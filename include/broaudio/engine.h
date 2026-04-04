@@ -5,7 +5,6 @@
 #include "broaudio/dsp/biquad.h"
 #include "broaudio/dsp/compressor.h"
 #include "broaudio/dsp/delay.h"
-#include "broaudio/dsp/equalizer.h"
 #include "broaudio/dsp/limiter.h"
 #include "broaudio/synth/voice.h"
 #include "broaudio/clip/clip.h"
@@ -114,7 +113,7 @@ public:
     void startRecording();
     void stopRecording();
     bool isRecording() const { return recording_.load(std::memory_order_relaxed); }
-    const std::vector<float>& getRecordBuffer() const { return recordOutput_; }
+    std::vector<float> getRecordBuffer() const { return recordOutput_; }
 
     // --- Audio Clips ---
 
@@ -162,7 +161,7 @@ private:
     using ClipList = std::vector<std::shared_ptr<AudioClip>>;
     using ClipListPtr = std::shared_ptr<const ClipList>;
     ClipListPtr clips_ = std::make_shared<const ClipList>();
-    std::mutex clipWriteMutex_;
+    std::mutex mediaWriteMutex_;
 
     // RCU playback list
     using PlaybackList = std::vector<std::shared_ptr<ClipPlayback>>;
@@ -215,6 +214,10 @@ private:
     uint64_t recordStartPos_ = 0;
     std::atomic<bool> recording_{false};
     std::vector<float> recordOutput_;
+
+    // Pre-allocated scratch buffers for audio callbacks (avoids heap allocs on audio thread)
+    std::vector<float> outputScratch_;
+    std::vector<float> micScratch_;
 };
 
 } // namespace broaudio

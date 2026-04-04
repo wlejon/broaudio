@@ -27,31 +27,9 @@ void Limiter::updateCoefficients()
 
 void Limiter::updateDelayBuffer()
 {
-    delayLength_ = static_cast<size_t>(lookAhead_ * 0.001f * sampleRate_ * channels_);
+    delayLength_ = static_cast<size_t>(std::max(lookAhead_, 0.1f) * 0.001f * sampleRate_ * channels_);
     delayBuffer_.resize(delayLength_ + channels_, 0.0f);
     delayReadPos_ = (delayWritePos_ + channels_) % delayLength_;
-}
-
-float Limiter::processSample(float sample)
-{
-    if (!enabled_) return sample;
-
-    float sampleDb = 20.0f * std::log10(std::max(std::abs(sample), 1e-6f));
-
-    float gainReduction = 0.0f;
-    if (sampleDb > threshold_) {
-        float excess = sampleDb - threshold_;
-        gainReduction = excess * (1.0f - 1.0f / ratio_);
-    }
-
-    float targetEnvelope = gainReduction;
-    if (targetEnvelope > envelope_)
-        envelope_ = targetEnvelope + (envelope_ - targetEnvelope) * attackCoeff_;
-    else
-        envelope_ = targetEnvelope + (envelope_ - targetEnvelope) * releaseCoeff_;
-
-    float gain = std::pow(10.0f, -envelope_ / 20.0f);
-    return sample * gain;
 }
 
 void Limiter::process(float* buffer, size_t frames)
@@ -60,11 +38,25 @@ void Limiter::process(float* buffer, size_t frames)
     updateCoefficients();
 
     for (size_t i = 0; i < frames * channels_; ++i) {
+        // Compute envelope from the incoming (non-delayed) sample
+        float incomingDb = 20.0f * std::log10(std::max(std::abs(buffer[i]), 1e-6f));
+        float gainReduction = 0.0f;
+        if (incomingDb > threshold_) {
+            float excess = incomingDb - threshold_;
+            gainReduction = excess * (1.0f - 1.0f / ratio_);
+        }
+        if (gainReduction > envelope_)
+            envelope_ = gainReduction + (envelope_ - gainReduction) * attackCoeff_;
+        else
+            envelope_ = gainReduction + (envelope_ - gainReduction) * releaseCoeff_;
+
+        float gain = std::pow(10.0f, -envelope_ / 20.0f);
+
+        // Write incoming sample into delay line, read delayed sample out
         delayBuffer_[delayWritePos_] = buffer[i];
         delayWritePos_ = (delayWritePos_ + 1) % delayLength_;
 
-        float lookaheadSample = delayBuffer_[delayReadPos_];
-        buffer[i] = processSample(lookaheadSample);
+        buffer[i] = delayBuffer_[delayReadPos_] * gain;
         delayReadPos_ = (delayReadPos_ + 1) % delayLength_;
     }
 }

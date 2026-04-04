@@ -43,8 +43,6 @@ public:
 private:
     void updateCoefficients();
     void updateDelayBuffer();
-    float processSample(float sample);
-
     float threshold_ = -6.0f;
     float ratio_ = 4.0f;
     float attack_ = 1.0f;

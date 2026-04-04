@@ -109,6 +109,8 @@ private:
 
 // Analysis ring buffer — audio thread writes, main thread reads.
 // writePos_ is atomic to avoid data races between threads.
+// Note: readers may see partially-updated sample data (benign tearing).
+// This is acceptable for visualization/analysis purposes.
 class AnalysisBuffer {
 public:
     explicit AnalysisBuffer(int capacity = 8192)

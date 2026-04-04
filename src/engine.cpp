@@ -55,6 +55,11 @@ bool Engine::init()
     delay_.init(sampleRate_ * 2);
     compressor_.init(sampleRate_);
 
+    // Pre-allocate scratch buffers large enough for any reasonable callback size.
+    // 8192 stereo frames = 16384 floats covers SDL's typical max buffer requests.
+    outputScratch_.resize(16384, 0.0f);
+    micScratch_.resize(8192, 0.0f);
+
     initialized_ = true;
     SDL_Log("broaudio: initialized %d Hz stereo", sampleRate_);
     return true;
@@ -214,8 +219,8 @@ void Engine::releaseFilterSlot(int slot)
 {
     if (slot < 0 || slot >= MAX_FILTERS) return;
     filterParams_[slot].enabled.store(false, std::memory_order_relaxed);
-    filterParams_[slot].allocated.store(false, std::memory_order_relaxed);
     filterParams_[slot].version.fetch_add(1, std::memory_order_release);
+    filterParams_[slot].allocated.store(false, std::memory_order_release);
 }
 
 void Engine::setFilterEnabled(int slot, bool enabled)
@@ -287,14 +292,20 @@ void Engine::setDelayMix(float mix)
 
 void Engine::setListenerPosition(float x, float y, float z)
 {
-    listener_.position = {x, y, z};
+    listener_.posX.store(x, std::memory_order_relaxed);
+    listener_.posY.store(y, std::memory_order_relaxed);
+    listener_.posZ.store(z, std::memory_order_relaxed);
 }
 
 void Engine::setListenerOrientation(float fx, float fy, float fz,
                                      float ux, float uy, float uz)
 {
-    listener_.forward = {fx, fy, fz};
-    listener_.up = {ux, uy, uz};
+    listener_.fwdX.store(fx, std::memory_order_relaxed);
+    listener_.fwdY.store(fy, std::memory_order_relaxed);
+    listener_.fwdZ.store(fz, std::memory_order_relaxed);
+    listener_.upX.store(ux, std::memory_order_relaxed);
+    listener_.upY.store(uy, std::memory_order_relaxed);
+    listener_.upZ.store(uz, std::memory_order_relaxed);
 }
 
 // ---------------------------------------------------------------------------
@@ -345,8 +356,9 @@ void Engine::micCallback(void* userdata, SDL_AudioStream* stream,
     if (avail <= 0) return;
 
     int numSamples = avail / static_cast<int>(sizeof(float));
-    float stackBuf[4096];
-    float* buffer = (numSamples <= 4096) ? stackBuf : new float[numSamples];
+    if (static_cast<size_t>(numSamples) > engine->micScratch_.size())
+        engine->micScratch_.resize(numSamples);
+    float* buffer = engine->micScratch_.data();
 
     int got = SDL_GetAudioStreamData(stream, buffer, avail);
     if (got > 0) {
@@ -362,8 +374,6 @@ void Engine::micCallback(void* userdata, SDL_AudioStream* stream,
         }
         engine->micPlaybackWritePos_.store(wp + samplesGot, std::memory_order_release);
     }
-
-    if (buffer != stackBuf) delete[] buffer;
 }
 
 // ---------------------------------------------------------------------------
@@ -425,7 +435,7 @@ int Engine::createClip(const float* samples, int numSamples)
     if (numSamples <= 0 || !samples) return -1;
 
     auto clip = std::make_shared<AudioClip>();
-    std::lock_guard<std::mutex> lock(clipWriteMutex_);
+    std::lock_guard<std::mutex> lock(mediaWriteMutex_);
     clip->id = nextClipId_++;
     clip->samples.assign(samples, samples + numSamples);
 
@@ -439,7 +449,7 @@ int Engine::createClip(const float* samples, int numSamples)
 
 void Engine::deleteClip(int clipId)
 {
-    std::lock_guard<std::mutex> lock(clipWriteMutex_);
+    std::lock_guard<std::mutex> lock(mediaWriteMutex_);
 
     auto currentPB = std::atomic_load(&playbacks_);
     auto newPB = std::make_shared<PlaybackList>();
@@ -500,7 +510,7 @@ void Engine::getClipWaveform(int clipId, float* outMinMax, int numBins) const
 
 int Engine::playClip(int clipId, float gain, bool loop)
 {
-    std::lock_guard<std::mutex> lock(clipWriteMutex_);
+    std::lock_guard<std::mutex> lock(mediaWriteMutex_);
     if (!findClip(clipId)) return -1;
 
     auto pb = std::make_shared<ClipPlayback>();
@@ -523,7 +533,7 @@ int Engine::playClip(int clipId, float gain, bool loop)
 
 void Engine::stopPlayback(int instanceId)
 {
-    std::lock_guard<std::mutex> lock(clipWriteMutex_);
+    std::lock_guard<std::mutex> lock(mediaWriteMutex_);
     auto current = std::atomic_load(&playbacks_);
     auto newList = std::make_shared<PlaybackList>();
     for (auto& pb : *current) {
@@ -561,7 +571,7 @@ void Engine::setPlaybackPlaying(int instanceId, bool playing)
 void Engine::setPlaybackRate(int instanceId, float rate)
 {
     if (auto* pb = findPlayback(instanceId))
-        pb->rate.store(rate, std::memory_order_relaxed);
+        pb->rate.store(std::clamp(rate, 0.01f, 16.0f), std::memory_order_relaxed);
 }
 
 void Engine::setPlaybackPan(int instanceId, float pan)
@@ -572,7 +582,7 @@ void Engine::setPlaybackPan(int instanceId, float pan)
 
 void Engine::setPlaybackRegion(int instanceId, int start, int end)
 {
-    std::lock_guard<std::mutex> lock(clipWriteMutex_);
+    std::lock_guard<std::mutex> lock(mediaWriteMutex_);
     if (auto* pb = findPlayback(instanceId)) {
         auto* clip = findClip(pb->clipId);
         if (!clip) return;
@@ -614,8 +624,9 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
     int numFrames = numFloats / 2;
     if (numFrames <= 0) return;
 
-    float stackBuf[8192];
-    float* buffer = (numFloats <= 8192) ? stackBuf : new float[numFloats];
+    if (static_cast<size_t>(numFloats) > engine->outputScratch_.size())
+        engine->outputScratch_.resize(numFloats);
+    float* buffer = engine->outputScratch_.data();
 
     std::memset(buffer, 0, numFloats * sizeof(float));
     engine->generateSamples(buffer, numFrames);
@@ -730,10 +741,10 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
     // Compressor
     engine->compressor_.processStereo(buffer, numFrames);
 
-    // Soft limiter + master gain
+    // Master gain + soft limiter
     float mg = engine->masterGain_.load(std::memory_order_relaxed);
     for (int i = 0; i < numFloats; i++) {
-        buffer[i] = softLimit(buffer[i]) * mg;
+        buffer[i] = softLimit(buffer[i] * mg);
     }
 
     // Mix mic monitor
@@ -762,15 +773,12 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
 
     SDL_PutAudioStreamData(stream, buffer, numFloats * sizeof(float));
 
-    // Mono mixdown to output ring buffer for analysis
-    float monoBuf[4096];
-    int monoCount = std::min(numFrames, 4096);
-    for (int i = 0; i < monoCount; i++) {
-        monoBuf[i] = (buffer[i * 2] + buffer[i * 2 + 1]) * 0.5f;
+    // Mono mixdown to output ring buffer for analysis.
+    // Reuse the start of buffer since we've already sent it to SDL.
+    for (int i = 0; i < numFrames; i++) {
+        buffer[i] = (buffer[i * 2] + buffer[i * 2 + 1]) * 0.5f;
     }
-    engine->outputBuffer_.write(monoBuf, monoCount);
-
-    if (buffer != stackBuf) delete[] buffer;
+    engine->outputBuffer_.write(buffer, numFrames);
 }
 
 void Engine::generateSamples(float* buffer, int numFrames)
@@ -874,8 +882,9 @@ void Engine::generateSamples(float* buffer, int numFrames)
     if (hasFinished) {
         std::unique_lock<std::mutex> lock(voiceWriteMutex_, std::try_to_lock);
         if (lock.owns_lock()) {
+            auto freshVoices = std::atomic_load(&voices_);
             auto newList = std::make_shared<VoiceList>();
-            for (auto& v : *currentVoices) {
+            for (auto& v : *freshVoices) {
                 if (!(v->started && (v->envStage == EnvStage::Done || !v->active)))
                     newList->push_back(v);
             }

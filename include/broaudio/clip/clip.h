@@ -14,8 +14,8 @@ struct AudioClip {
 struct ClipPlayback {
     int id = 0;
     int clipId = 0;
-    int regionStart = 0;
-    int regionEnd = 0; // 0 = full clip
+    std::atomic<int> regionStart{0};
+    std::atomic<int> regionEnd{0}; // 0 = full clip
     std::atomic<uint64_t> playPos{0};  // fixed-point: upper bits = sample, lower 16 = fraction
     std::atomic<float> gain{1.0f};
     std::atomic<float> pan{0.0f};

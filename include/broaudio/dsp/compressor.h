@@ -11,6 +11,7 @@ struct Compressor {
 
     void init(int sampleRate);
     void process(float* buffer, int numSamples);
+    void processStereo(float* buffer, int numFrames);
 };
 
 } // namespace broaudio

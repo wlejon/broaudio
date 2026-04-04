@@ -1,9 +1,6 @@
 #include "broaudio/synth/oscillator.h"
 #include <cmath>
-
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
+#include <numbers>
 
 namespace broaudio {
 
@@ -27,7 +24,7 @@ float generateSample(Waveform wf, float phase, float phaseInc)
 {
     switch (wf) {
         case Waveform::Sine:
-            return std::sin(phase * 2.0f * static_cast<float>(M_PI));
+            return std::sin(phase * 2.0f * std::numbers::pi_v<float>);
 
         case Waveform::Square: {
             float sample = (phase < 0.5f) ? 1.0f : -1.0f;

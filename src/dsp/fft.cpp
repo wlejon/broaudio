@@ -1,10 +1,7 @@
 #include "broaudio/dsp/fft.h"
 #include <cmath>
 #include <algorithm>
-
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
+#include <numbers>
 
 namespace broaudio {
 
@@ -22,7 +19,7 @@ void fft(float* real, float* imag, int n)
     }
 
     for (int len = 2; len <= n; len <<= 1) {
-        float angle = -2.0f * static_cast<float>(M_PI) / static_cast<float>(len);
+        float angle = -2.0f * std::numbers::pi_v<float> / static_cast<float>(len);
         float wReal = std::cos(angle);
         float wImag = std::sin(angle);
         for (int i = 0; i < n; i += len) {

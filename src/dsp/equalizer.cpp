@@ -1,10 +1,7 @@
 #include "broaudio/dsp/equalizer.h"
 #include <cmath>
 #include <algorithm>
-
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
+#include <numbers>
 
 namespace broaudio {
 
@@ -158,7 +155,7 @@ void Equalizer::calculatePeakingEQ(float frequency, float gain, float q,
                                     float& b0, float& b1, float& b2)
 {
     float A = std::pow(10.0f, gain / 40.0f);
-    float omega = 2.0f * static_cast<float>(M_PI) * frequency / static_cast<float>(sampleRate_);
+    float omega = 2.0f * std::numbers::pi_v<float> * frequency / static_cast<float>(sampleRate_);
     float sin_omega = std::sin(omega);
     float cos_omega = std::cos(omega);
     float alpha = sin_omega / (2.0f * q);

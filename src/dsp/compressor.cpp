@@ -31,4 +31,27 @@ void Compressor::process(float* buffer, int numSamples)
     }
 }
 
+void Compressor::processStereo(float* buffer, int numFrames)
+{
+    for (int i = 0; i < numFrames; i++) {
+        float absL = std::fabs(buffer[i * 2]);
+        float absR = std::fabs(buffer[i * 2 + 1]);
+        float absLevel = absL > absR ? absL : absR;
+
+        if (absLevel > envelope)
+            envelope += attackCoeff * (absLevel - envelope);
+        else
+            envelope += releaseCoeff * (absLevel - envelope);
+
+        float gain = 1.0f;
+        if (envelope > threshold) {
+            float target = threshold + (envelope - threshold) / ratio;
+            gain = target / envelope;
+        }
+
+        buffer[i * 2] *= gain;
+        buffer[i * 2 + 1] *= gain;
+    }
+}
+
 } // namespace broaudio

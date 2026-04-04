@@ -107,24 +107,27 @@ private:
     alignas(64) std::atomic<size_t> readIndex_{0};
 };
 
-// Simple analysis ring buffer (single-writer, not lock-free — for waveform display etc.)
+// Analysis ring buffer — audio thread writes, main thread reads.
+// writePos_ is atomic to avoid data races between threads.
 class AnalysisBuffer {
 public:
     explicit AnalysisBuffer(int capacity = 8192)
         : data_(capacity, 0.0f), capacity_(capacity) {}
 
     void write(const float* src, int count) {
+        uint64_t wp = writePos_.load(std::memory_order_relaxed);
         for (int i = 0; i < count; i++) {
-            data_[writePos_ % capacity_] = src[i];
-            writePos_++;
+            data_[static_cast<size_t>(wp % capacity_)] = src[i];
+            wp++;
         }
+        writePos_.store(wp, std::memory_order_release);
     }
 
     void readLatest(float* dst, int count) const {
-        int start = static_cast<int>(writePos_) - count;
-        if (start < 0) start = 0;
+        uint64_t wp = writePos_.load(std::memory_order_acquire);
+        uint64_t start = (wp >= static_cast<uint64_t>(count)) ? wp - count : 0;
         for (int i = 0; i < count; i++)
-            dst[i] = data_[(start + i) % capacity_];
+            dst[i] = data_[static_cast<size_t>((start + i) % capacity_)];
     }
 
     int capacity() const { return capacity_; }
@@ -132,7 +135,7 @@ public:
 private:
     std::vector<float> data_;
     int capacity_;
-    uint64_t writePos_ = 0;
+    std::atomic<uint64_t> writePos_{0};
 };
 
 } // namespace broaudio

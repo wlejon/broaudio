@@ -201,8 +201,9 @@ void Engine::stopVoice(int id, double /*when*/)
 int Engine::allocateFilterSlot()
 {
     for (int i = 0; i < MAX_FILTERS; i++) {
-        if (!filterParams_[i].allocated.load(std::memory_order_relaxed)) {
-            filterParams_[i].allocated.store(true, std::memory_order_relaxed);
+        bool expected = false;
+        if (filterParams_[i].allocated.compare_exchange_strong(
+                expected, true, std::memory_order_acq_rel)) {
             return i;
         }
     }
@@ -510,8 +511,8 @@ int Engine::playClip(int clipId, float gain, bool loop)
     pb->playing.store(true, std::memory_order_relaxed);
     pb->active.store(true, std::memory_order_relaxed);
     pb->playPos.store(0, std::memory_order_relaxed);
-    pb->regionStart = 0;
-    pb->regionEnd = 0;
+    pb->regionStart.store(0, std::memory_order_relaxed);
+    pb->regionEnd.store(0, std::memory_order_relaxed);
 
     int id = pb->id;
     auto newList = std::make_shared<PlaybackList>(*std::atomic_load(&playbacks_));
@@ -576,8 +577,10 @@ void Engine::setPlaybackRegion(int instanceId, int start, int end)
         auto* clip = findClip(pb->clipId);
         if (!clip) return;
         int maxLen = static_cast<int>(clip->samples.size());
-        pb->regionStart = std::clamp(start, 0, maxLen);
-        pb->regionEnd = std::clamp(end, pb->regionStart, maxLen);
+        int rs = std::clamp(start, 0, maxLen);
+        int re = std::clamp(end, rs, maxLen);
+        pb->regionStart.store(rs, std::memory_order_relaxed);
+        pb->regionEnd.store(re, std::memory_order_relaxed);
         pb->playPos.store(0, std::memory_order_relaxed);
     }
 }
@@ -589,8 +592,10 @@ float Engine::getPlaybackPosition(int instanceId) const
     auto* clip = findClip(pb->clipId);
     if (!clip) return 0.0f;
 
-    int end = pb->regionEnd > 0 ? pb->regionEnd : static_cast<int>(clip->samples.size());
-    int len = end - pb->regionStart;
+    int re = pb->regionEnd.load(std::memory_order_relaxed);
+    int rs = pb->regionStart.load(std::memory_order_relaxed);
+    int end = re > 0 ? re : static_cast<int>(clip->samples.size());
+    int len = end - rs;
     if (len <= 0) return 0.0f;
     uint64_t pos = pb->playPos.load(std::memory_order_relaxed);
     int intPos = static_cast<int>(pos >> 16);
@@ -639,8 +644,9 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
             }
             if (!clip) continue;
 
-            int start = pb->regionStart;
-            int end = pb->regionEnd > 0 ? pb->regionEnd : static_cast<int>(clip->samples.size());
+            int start = pb->regionStart.load(std::memory_order_relaxed);
+            int end = pb->regionEnd.load(std::memory_order_relaxed);
+            end = end > 0 ? end : static_cast<int>(clip->samples.size());
             int len = end - start;
             if (len <= 0) continue;
 
@@ -722,7 +728,7 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
     }
 
     // Compressor
-    engine->compressor_.process(buffer, numFloats);
+    engine->compressor_.processStereo(buffer, numFrames);
 
     // Soft limiter + master gain
     float mg = engine->masterGain_.load(std::memory_order_relaxed);

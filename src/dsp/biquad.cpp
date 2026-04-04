@@ -1,15 +1,12 @@
 #include "broaudio/dsp/biquad.h"
 #include <cmath>
-
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
+#include <numbers>
 
 namespace broaudio {
 
 void BiquadFilter::computeCoefficients(int sampleRate)
 {
-    float w0 = 2.0f * static_cast<float>(M_PI) * frequency / static_cast<float>(sampleRate);
+    float w0 = 2.0f * std::numbers::pi_v<float> * frequency / static_cast<float>(sampleRate);
     float sinW0 = std::sin(w0);
     float cosW0 = std::cos(w0);
     float alpha = sinW0 / (2.0f * Q);

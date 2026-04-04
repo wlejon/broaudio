@@ -87,7 +87,7 @@ double Engine::currentTime() const
 
 Voice* Engine::findVoice(int id)
 {
-    auto currentVoices = std::atomic_load(&voices_);
+    auto currentVoices = voices_.load();
     for (auto& v : *currentVoices) {
         if (v->id == id) return v.get();
     }
@@ -106,9 +106,9 @@ int Engine::createVoice()
     voice->sustainLevel.store(DEFAULT_SUSTAIN, std::memory_order_relaxed);
     voice->releaseCoeff.store(std::exp(-3.0f / (DEFAULT_RELEASE * sr)), std::memory_order_relaxed);
 
-    auto newList = std::make_shared<VoiceList>(*std::atomic_load(&voices_));
+    auto newList = std::make_shared<VoiceList>(*voices_.load());
     newList->push_back(voice);
-    std::atomic_store(&voices_, std::const_pointer_cast<const VoiceList>(newList));
+    voices_.store(std::move(newList));
 
     return voice->id;
 }
@@ -117,13 +117,13 @@ void Engine::removeVoice(int id)
 {
     std::lock_guard<std::mutex> lock(voiceWriteMutex_);
 
-    auto current = std::atomic_load(&voices_);
+    auto current = voices_.load();
     auto newList = std::make_shared<VoiceList>();
     newList->reserve(current->size());
     for (auto& v : *current) {
         if (v->id != id) newList->push_back(v);
     }
-    std::atomic_store(&voices_, std::const_pointer_cast<const VoiceList>(newList));
+    voices_.store(std::move(newList));
 }
 
 void Engine::setWaveform(int id, Waveform wf)
@@ -413,7 +413,7 @@ void Engine::stopRecording()
 
 AudioClip* Engine::findClip(int clipId) const
 {
-    auto currentClips = std::atomic_load(&clips_);
+    auto currentClips = clips_.load();
     for (auto& c : *currentClips) {
         if (c->id == clipId) return c.get();
     }
@@ -422,7 +422,7 @@ AudioClip* Engine::findClip(int clipId) const
 
 ClipPlayback* Engine::findPlayback(int instanceId) const
 {
-    auto currentPlaybacks = std::atomic_load(&playbacks_);
+    auto currentPlaybacks = playbacks_.load();
     for (auto& pb : *currentPlaybacks) {
         if (pb->id == instanceId && pb->active.load(std::memory_order_relaxed))
             return pb.get();
@@ -440,9 +440,9 @@ int Engine::createClip(const float* samples, int numSamples)
     clip->samples.assign(samples, samples + numSamples);
 
     int id = clip->id;
-    auto newList = std::make_shared<ClipList>(*std::atomic_load(&clips_));
+    auto newList = std::make_shared<ClipList>(*clips_.load());
     newList->push_back(std::move(clip));
-    std::atomic_store(&clips_, std::const_pointer_cast<const ClipList>(newList));
+    clips_.store(std::move(newList));
 
     return id;
 }
@@ -451,7 +451,7 @@ void Engine::deleteClip(int clipId)
 {
     std::lock_guard<std::mutex> lock(mediaWriteMutex_);
 
-    auto currentPB = std::atomic_load(&playbacks_);
+    auto currentPB = playbacks_.load();
     auto newPB = std::make_shared<PlaybackList>();
     for (auto& pb : *currentPB) {
         if (pb->clipId == clipId) {
@@ -461,14 +461,14 @@ void Engine::deleteClip(int clipId)
             newPB->push_back(pb);
         }
     }
-    std::atomic_store(&playbacks_, std::const_pointer_cast<const PlaybackList>(newPB));
+    playbacks_.store(std::move(newPB));
 
-    auto currentClips = std::atomic_load(&clips_);
+    auto currentClips = clips_.load();
     auto newClips = std::make_shared<ClipList>();
     for (auto& c : *currentClips) {
         if (c->id != clipId) newClips->push_back(c);
     }
-    std::atomic_store(&clips_, std::const_pointer_cast<const ClipList>(newClips));
+    clips_.store(std::move(newClips));
 }
 
 int Engine::getClipSampleCount(int clipId) const
@@ -525,16 +525,16 @@ int Engine::playClip(int clipId, float gain, bool loop)
     pb->regionEnd.store(0, std::memory_order_relaxed);
 
     int id = pb->id;
-    auto newList = std::make_shared<PlaybackList>(*std::atomic_load(&playbacks_));
+    auto newList = std::make_shared<PlaybackList>(*playbacks_.load());
     newList->push_back(std::move(pb));
-    std::atomic_store(&playbacks_, std::const_pointer_cast<const PlaybackList>(newList));
+    playbacks_.store(std::move(newList));
     return id;
 }
 
 void Engine::stopPlayback(int instanceId)
 {
     std::lock_guard<std::mutex> lock(mediaWriteMutex_);
-    auto current = std::atomic_load(&playbacks_);
+    auto current = playbacks_.load();
     auto newList = std::make_shared<PlaybackList>();
     for (auto& pb : *current) {
         if (pb->id == instanceId) {
@@ -544,7 +544,7 @@ void Engine::stopPlayback(int instanceId)
             newList->push_back(pb);
         }
     }
-    std::atomic_store(&playbacks_, std::const_pointer_cast<const PlaybackList>(newList));
+    playbacks_.store(std::move(newList));
 }
 
 void Engine::setPlaybackGain(int instanceId, float gain)
@@ -643,8 +643,8 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
 
     // Mix clip playback instances (lock-free RCU read)
     {
-        auto currentClips = std::atomic_load(&engine->clips_);
-        auto currentPlaybacks = std::atomic_load(&engine->playbacks_);
+        auto currentClips = engine->clips_.load();
+        auto currentPlaybacks = engine->playbacks_.load();
         for (auto& pb : *currentPlaybacks) {
             if (!pb->active.load(std::memory_order_relaxed)) continue;
             if (!pb->playing.load(std::memory_order_relaxed)) continue;
@@ -783,7 +783,7 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
 
 void Engine::generateSamples(float* buffer, int numFrames)
 {
-    auto currentVoices = std::atomic_load(&voices_);
+    auto currentVoices = voices_.load();
 
     double baseTime = static_cast<double>(samplesGenerated_.load(std::memory_order_relaxed))
                       / static_cast<double>(sampleRate_);
@@ -882,13 +882,13 @@ void Engine::generateSamples(float* buffer, int numFrames)
     if (hasFinished) {
         std::unique_lock<std::mutex> lock(voiceWriteMutex_, std::try_to_lock);
         if (lock.owns_lock()) {
-            auto freshVoices = std::atomic_load(&voices_);
+            auto freshVoices = voices_.load();
             auto newList = std::make_shared<VoiceList>();
             for (auto& v : *freshVoices) {
                 if (!(v->started && (v->envStage == EnvStage::Done || !v->active)))
                     newList->push_back(v);
             }
-            std::atomic_store(&voices_, std::const_pointer_cast<const VoiceList>(newList));
+            voices_.store(std::move(newList));
         }
     }
 

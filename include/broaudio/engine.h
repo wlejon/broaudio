@@ -150,8 +150,7 @@ private:
 
     // RCU voice list
     using VoiceList = std::vector<std::shared_ptr<Voice>>;
-    using VoiceListPtr = std::shared_ptr<const VoiceList>;
-    VoiceListPtr voices_ = std::make_shared<const VoiceList>();
+    std::atomic<std::shared_ptr<const VoiceList>> voices_{std::make_shared<const VoiceList>()};
     std::mutex voiceWriteMutex_;
     int nextVoiceId_ = 1;
 
@@ -159,14 +158,12 @@ private:
 
     // RCU clip list
     using ClipList = std::vector<std::shared_ptr<AudioClip>>;
-    using ClipListPtr = std::shared_ptr<const ClipList>;
-    ClipListPtr clips_ = std::make_shared<const ClipList>();
+    std::atomic<std::shared_ptr<const ClipList>> clips_{std::make_shared<const ClipList>()};
     std::mutex mediaWriteMutex_;
 
     // RCU playback list
     using PlaybackList = std::vector<std::shared_ptr<ClipPlayback>>;
-    using PlaybackListPtr = std::shared_ptr<const PlaybackList>;
-    PlaybackListPtr playbacks_ = std::make_shared<const PlaybackList>();
+    std::atomic<std::shared_ptr<const PlaybackList>> playbacks_{std::make_shared<const PlaybackList>()};
 
     int nextClipId_ = 1;
     int nextPlaybackId_ = 1;

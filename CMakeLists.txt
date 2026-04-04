@@ -12,9 +12,9 @@ if(MSVC)
     endif()
 endif()
 
-# SDL3 — consumer must provide it (bro has it as a submodule)
+# SDL3 — use consumer-provided target if available, otherwise find it
 if(NOT TARGET SDL3::SDL3 AND NOT TARGET SDL3::SDL3-static)
-    message(FATAL_ERROR "broaudio requires SDL3. Provide SDL3::SDL3 or SDL3::SDL3-static target.")
+    find_package(SDL3 REQUIRED)
 endif()
 
 add_library(broaudio STATIC

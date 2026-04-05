@@ -13,6 +13,7 @@ VoiceAllocator::VoiceAllocator(Engine& engine, int maxVoices)
     slots_.resize(maxVoices);
     for (auto& slot : slots_) {
         slot.voiceId = engine_.createVoice();
+        engine_.setVoicePersistent(slot.voiceId, true);
     }
 }
 
@@ -33,6 +34,7 @@ void VoiceAllocator::setMaxVoices(int count)
         slots_.resize(count);
         for (int i = maxVoices_; i < count; i++) {
             slots_[i].voiceId = engine_.createVoice();
+            engine_.setVoicePersistent(slots_[i].voiceId, true);
         }
     } else {
         // Remove excess slots (release active ones first)
@@ -114,6 +116,7 @@ int VoiceAllocator::noteOn(int note, float velocity, double when)
         // Re-create the voice to get fresh audio state
         engine_.removeVoice(slots_[slotIdx].voiceId);
         slots_[slotIdx].voiceId = engine_.createVoice();
+        engine_.setVoicePersistent(slots_[slotIdx].voiceId, true);
     }
 
     Slot& slot = slots_[slotIdx];

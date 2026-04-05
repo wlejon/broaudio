@@ -618,6 +618,13 @@ void Engine::setVoiceNote(int id, int noteNumber, float velocity)
     }
 }
 
+void Engine::setVoicePersistent(int id, bool persistent)
+{
+    if (auto* v = findVoice(id)) {
+        v->persistent.store(persistent, std::memory_order_relaxed);
+    }
+}
+
 void Engine::startVoice(int id, double when)
 {
     if (auto* v = findVoice(id)) {
@@ -1391,11 +1398,22 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
 
         if (voice.triggerStart.load(std::memory_order_acquire)) {
             voice.triggerStart.store(false, std::memory_order_relaxed);
-            voice.started = true;
-            voice.active = true;
-            voice.phase = 0.0f;
-            voice.envStage = EnvStage::Attack;
-            voice.envLevel = 0.0f;
+            // Clear any pending release so a rapid noteOff+noteOn doesn't
+            // immediately put the newly started voice into Release.
+            voice.triggerRelease.store(false, std::memory_order_relaxed);
+            if (voice.active && voice.started) {
+                // Retrigger: voice is still sounding. Keep phase continuous
+                // to avoid waveform discontinuity (click). Start attack from
+                // current envelope level so there's no sudden amplitude jump.
+                voice.envStage = EnvStage::Attack;
+            } else {
+                // Fresh start from silence.
+                voice.started = true;
+                voice.active = true;
+                voice.phase = 0.0f;
+                voice.envStage = EnvStage::Attack;
+                voice.envLevel = 0.0f;
+            }
         }
 
         if (voice.triggerRelease.load(std::memory_order_acquire)) {
@@ -1579,9 +1597,13 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
     }
 
     // Clean up finished voices via RCU write (only if needed)
+    // Purge one-shot voices that have finished their release envelope.
+    // Persistent voices (managed by VoiceAllocator) are never purged — they
+    // stay in the list for reuse.
     bool hasFinished = false;
     for (auto& v : *currentVoices) {
-        if (v->started && (v->envStage == EnvStage::Done || !v->active)) {
+        if (v->started && (v->envStage == EnvStage::Done || !v->active)
+            && !v->persistent.load(std::memory_order_relaxed)) {
             hasFinished = true;
             break;
         }
@@ -1592,7 +1614,9 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
             auto freshVoices = voices_.load();
             auto newList = std::make_shared<VoiceList>();
             for (auto& v : *freshVoices) {
-                if (!(v->started && (v->envStage == EnvStage::Done || !v->active)))
+                bool finished = v->started && (v->envStage == EnvStage::Done || !v->active);
+                bool persistent = v->persistent.load(std::memory_order_relaxed);
+                if (!finished || persistent)
                     newList->push_back(v);
             }
             voices_.store(std::move(newList));

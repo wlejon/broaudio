@@ -43,6 +43,11 @@ struct Voice {
     std::atomic<bool> triggerRelease{false};
     std::atomic<double> startTime{-1.0};
 
+    // When true, the audio callback will not auto-purge this voice after
+    // its envelope finishes.  Used by VoiceAllocator to keep pooled voices
+    // alive for reuse.
+    std::atomic<bool> persistent{false};
+
     // Wavetable (set from main thread, read from audio thread)
     // Shared ownership: multiple voices can reference the same bank.
     std::atomic<std::shared_ptr<const WavetableBank>> wavetable{nullptr};

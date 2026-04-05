@@ -52,6 +52,7 @@ public:
     void setSustainLevel(int id, float level);
     void setReleaseTime(int id, float seconds);
     void setVoiceNote(int id, int noteNumber, float velocity);
+    void setVoicePersistent(int id, bool persistent);
     void setVoiceFilterEnabled(int id, bool enabled);
     void setVoiceFilterType(int id, BiquadFilter::Type type);
     void setVoiceFilterFrequency(int id, float freq);

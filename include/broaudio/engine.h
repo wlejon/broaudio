@@ -170,6 +170,8 @@ public:
     bool isMicMuted() const { return micMuted_.load(std::memory_order_relaxed); }
     void setMicMonitorGain(float g) { micMonitorGain_.store(g, std::memory_order_relaxed); }
     float micMonitorGain() const { return micMonitorGain_.load(std::memory_order_relaxed); }
+    void setMicBus(int busId) { micBusId_.store(busId, std::memory_order_relaxed); }
+    int micBus() const { return micBusId_.load(std::memory_order_relaxed); }
 
     // --- Recording ---
 
@@ -290,6 +292,7 @@ private:
     Limiter masterLimiter_{44100, 2};
     std::atomic<bool> micMuted_{true};
     std::atomic<float> micMonitorGain_{0.5f};
+    std::atomic<int> micBusId_{-1};  // -1 = direct-to-output (legacy), >= 0 = route through bus
 
     static constexpr int RECORD_RING_SIZE = 44100 * 60;
     std::vector<float> recordRing_ = std::vector<float>(RECORD_RING_SIZE, 0.0f);

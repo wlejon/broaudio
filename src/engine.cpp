@@ -1281,6 +1281,39 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
         }
     }
 
+    // Mix mic into target bus (if routed)
+    int micBusId = engine->micBusId_.load(std::memory_order_relaxed);
+    if (micBusId >= 0 && !engine->micMuted_.load(std::memory_order_relaxed)) {
+        float micGain = engine->micMonitorGain_.load(std::memory_order_relaxed);
+        uint64_t wp = engine->micPlaybackWritePos_.load(std::memory_order_acquire);
+        uint64_t rp = engine->micPlaybackReadPos_;
+        int cap = Engine::MIC_FIFO_SIZE;
+        uint64_t available = wp - rp;
+
+        int targetLatency = numFrames;
+        if (available > static_cast<uint64_t>(cap - numFrames)) {
+            rp = wp - targetLatency;
+            available = targetLatency;
+        }
+
+        int toRead = static_cast<int>(std::min(available, static_cast<uint64_t>(numFrames)));
+
+        // Find target bus
+        Bus* micBus = nullptr;
+        for (auto& bus : *currentBuses) {
+            if (bus->id == micBusId) { micBus = bus.get(); break; }
+        }
+        if (micBus) {
+            for (int i = 0; i < toRead; i++) {
+                int idx = static_cast<int>((rp + i) % cap);
+                float s = engine->micPlayback_[idx] * micGain;
+                micBus->buffer[i * 2]     += s;
+                micBus->buffer[i * 2 + 1] += s;
+            }
+        }
+        engine->micPlaybackReadPos_ = rp + toRead;
+    }
+
     // Record tap (mono mixdown from master bus, before effects)
     Bus* masterBus = nullptr;
     for (auto& bus : *currentBuses) {
@@ -1345,8 +1378,8 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
         std::memset(buffer, 0, numFloats * sizeof(float));
     }
 
-    // Mix mic monitor
-    if (!engine->micMuted_.load(std::memory_order_relaxed)) {
+    // Mix mic monitor (direct-to-output, only when not routed through a bus)
+    if (micBusId < 0 && !engine->micMuted_.load(std::memory_order_relaxed)) {
         float micGain = engine->micMonitorGain_.load(std::memory_order_relaxed);
         uint64_t wp = engine->micPlaybackWritePos_.load(std::memory_order_acquire);
         uint64_t rp = engine->micPlaybackReadPos_;

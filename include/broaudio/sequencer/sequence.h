@@ -1,5 +1,7 @@
 #pragma once
 
+#include "broaudio/sequencer/automation.h"
+
 #include <cstdint>
 #include <vector>
 
@@ -49,6 +51,14 @@ public:
     double loopStartBeat() const { return loopStartBeat_; }
     double loopEndBeat() const { return loopEndBeat_; }
 
+    // Automation lanes
+    int addAutomationLane(AutomationLane::ApplyFn applyFn);
+    void removeAutomationLane(int index);
+    AutomationLane& automationLane(int index);
+    const AutomationLane& automationLane(int index) const;
+    int automationLaneCount() const { return static_cast<int>(automationLanes_.size()); }
+    void clearAutomationLanes();
+
     // Query
     double currentBeat(double engineTime) const;
     double beatToEngineTime(double beat) const;
@@ -93,6 +103,9 @@ private:
 
     double effectiveLoopEnd() const;
     void sortNotes();
+
+    // Automation
+    std::vector<AutomationLane> automationLanes_;
 };
 
 } // namespace broaudio

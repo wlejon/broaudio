@@ -95,6 +95,38 @@ double Sequence::engineTimeToBeat(double engineTime) const
     return (engineTime - playStartEngineTime_) * bpm_ / 60.0 + pauseOffsetBeats_;
 }
 
+// --- Automation lanes ---
+
+int Sequence::addAutomationLane(AutomationLane::ApplyFn applyFn)
+{
+    automationLanes_.emplace_back(std::move(applyFn));
+    return static_cast<int>(automationLanes_.size()) - 1;
+}
+
+void Sequence::removeAutomationLane(int index)
+{
+    if (index >= 0 && index < static_cast<int>(automationLanes_.size())) {
+        automationLanes_.erase(automationLanes_.begin() + index);
+    }
+}
+
+AutomationLane& Sequence::automationLane(int index)
+{
+    return automationLanes_[index];
+}
+
+const AutomationLane& Sequence::automationLane(int index) const
+{
+    return automationLanes_[index];
+}
+
+void Sequence::clearAutomationLanes()
+{
+    automationLanes_.clear();
+}
+
+// --- Looping ---
+
 void Sequence::setLoopRange(double startBeat, double endBeat)
 {
     loopStartBeat_ = std::max(0.0, startBeat);
@@ -154,6 +186,11 @@ void Sequence::update(double engineTime)
             allocator_.noteOn(n.note, n.velocity, noteEngTime);
             activeNotes_.push_back({n.note, n.beatPosition + n.duration});
         }
+    }
+
+    // Apply automation at current beat
+    for (auto& lane : automationLanes_) {
+        lane.apply(beat);
     }
 
     lastUpdateBeat_ = beat;

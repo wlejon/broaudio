@@ -49,6 +49,7 @@ add_library(broaudio STATIC
     src/synth/wavetable.cpp
     src/synth/voice_allocator.cpp
     src/clip/clip.cpp
+    src/sequencer/automation.cpp
     src/sequencer/sequence.cpp
     src/engine.cpp
 )

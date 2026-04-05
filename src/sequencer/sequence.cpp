@@ -119,25 +119,7 @@ void Sequence::update(double engineTime)
 
     double beat = currentBeat(engineTime);
 
-    // Fire noteOn for events in (lastUpdateBeat_, beat]
-    for (auto& n : notes_) {
-        if (n.beatPosition > lastUpdateBeat_ && n.beatPosition <= beat) {
-            double noteEngTime = beatToEngineTime(n.beatPosition);
-            allocator_.noteOn(n.note, n.velocity, noteEngTime);
-            activeNotes_.push_back({n.note, n.beatPosition + n.duration});
-        }
-    }
-
-    // Fire noteOff for expired active notes
-    for (int i = static_cast<int>(activeNotes_.size()) - 1; i >= 0; i--) {
-        if (activeNotes_[i].offBeat <= beat) {
-            double offEngTime = beatToEngineTime(activeNotes_[i].offBeat);
-            allocator_.noteOff(activeNotes_[i].note, offEngTime);
-            activeNotes_.erase(activeNotes_.begin() + i);
-        }
-    }
-
-    // Handle loop
+    // Handle loop BEFORE firing notes so we never process beyond the boundary.
     if (loopEnabled_) {
         double loopEnd = effectiveLoopEnd();
         if (beat >= loopEnd) {
@@ -147,11 +129,30 @@ void Sequence::update(double engineTime)
             }
             activeNotes_.clear();
 
-            // Wrap back to loop start (use tiny offset so notes at loopStart fire)
+            // Wrap back to loop start
             pauseOffsetBeats_ = loopStartBeat_;
             playStartEngineTime_ = engineTime;
             lastUpdateBeat_ = loopStartBeat_ - 1e-9;
             return;
+        }
+    }
+
+    // Fire noteOffs BEFORE noteOns — otherwise a noteOff for a previous note
+    // kills a just-started voice when adjacent steps share the same MIDI note.
+    for (int i = static_cast<int>(activeNotes_.size()) - 1; i >= 0; i--) {
+        if (activeNotes_[i].offBeat <= beat) {
+            double offEngTime = beatToEngineTime(activeNotes_[i].offBeat);
+            allocator_.noteOff(activeNotes_[i].note, offEngTime);
+            activeNotes_.erase(activeNotes_.begin() + i);
+        }
+    }
+
+    // Fire noteOn for events in (lastUpdateBeat_, beat]
+    for (auto& n : notes_) {
+        if (n.beatPosition > lastUpdateBeat_ && n.beatPosition <= beat) {
+            double noteEngTime = beatToEngineTime(n.beatPosition);
+            allocator_.noteOn(n.note, n.velocity, noteEngTime);
+            activeNotes_.push_back({n.note, n.beatPosition + n.duration});
         }
     }
 

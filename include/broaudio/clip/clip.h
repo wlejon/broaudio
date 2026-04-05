@@ -19,6 +19,7 @@ struct ClipPlayback {
     std::atomic<uint64_t> playPos{0};  // fixed-point: upper bits = sample, lower 16 = fraction
     std::atomic<float> gain{1.0f};
     std::atomic<float> pan{0.0f};
+    std::atomic<int> busId{0};           // target mix bus (0 = master)
     std::atomic<float> rate{1.0f};
     std::atomic<bool> playing{false};
     std::atomic<bool> looping{false};

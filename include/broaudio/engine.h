@@ -2,11 +2,15 @@
 
 #include "broaudio/types.h"
 #include "broaudio/core/ring_buffer.h"
+#include "broaudio/dsp/params.h"
 #include "broaudio/dsp/biquad.h"
 #include "broaudio/dsp/compressor.h"
 #include "broaudio/dsp/delay.h"
 #include "broaudio/dsp/limiter.h"
+#include "broaudio/mix/bus.h"
+#include "broaudio/synth/modulation.h"
 #include "broaudio/synth/voice.h"
+#include "broaudio/synth/wavetable.h"
 #include "broaudio/clip/clip.h"
 #include "broaudio/spatial/listener.h"
 
@@ -18,25 +22,6 @@
 struct SDL_AudioStream;
 
 namespace broaudio {
-
-// Lock-free parameter structs (main thread → audio thread)
-struct FilterParams {
-    std::atomic<bool> enabled{false};
-    std::atomic<int> type{0};
-    std::atomic<float> frequency{1000.0f};
-    std::atomic<float> Q{1.0f};
-    std::atomic<float> gainDB{0.0f};
-    std::atomic<bool> allocated{false};
-    std::atomic<uint32_t> version{0};
-};
-
-struct DelayParams {
-    std::atomic<bool> enabled{false};
-    std::atomic<float> time{0.3f};
-    std::atomic<float> feedback{0.3f};
-    std::atomic<float> mix{0.5f};
-    std::atomic<uint32_t> version{0};
-};
 
 class Engine {
 public:
@@ -60,6 +45,7 @@ public:
     void setFrequency(int id, float freq);
     void setGain(int id, float gain);
     void setVoicePan(int id, float pan);
+    void setVoiceWavetable(int id, std::shared_ptr<const WavetableBank> bank);
     void setAttackTime(int id, float seconds);
     void setDecayTime(int id, float seconds);
     void setSustainLevel(int id, float level);
@@ -67,14 +53,54 @@ public:
     void startVoice(int id, double when);
     void stopVoice(int id, double when);
 
+    // --- Modulation ---
+
+    ModMatrix& modMatrix() { return modMatrix_; }
+
+    // --- Mix buses ---
+
+    static constexpr int MASTER_BUS_ID = 0;
+
+    int createBus();                               // returns bus id, feeds into master
+    void deleteBus(int busId);                     // cannot delete master
+    void setBusGain(int busId, float gain);
+    void setBusPan(int busId, float pan);
+    void setBusMuted(int busId, bool muted);
+
+    // Per-bus filter control
+    int allocateBusFilterSlot(int busId);
+    void releaseBusFilterSlot(int busId, int slot);
+    void setBusFilterEnabled(int busId, int slot, bool enabled);
+    void setBusFilterType(int busId, int slot, BiquadFilter::Type type);
+    void setBusFilterFrequency(int busId, int slot, float freq);
+    void setBusFilterQ(int busId, int slot, float q);
+    void setBusFilterGain(int busId, int slot, float gainDB);
+
+    // Per-bus delay control
+    void setBusDelayEnabled(int busId, bool enabled);
+    void setBusDelayTime(int busId, float seconds);
+    void setBusDelayFeedback(int busId, float fb);
+    void setBusDelayMix(int busId, float mix);
+
+    // Per-bus compressor control
+    void setBusCompressorEnabled(int busId, bool enabled);
+    void setBusCompressorThreshold(int busId, float threshold);
+    void setBusCompressorRatio(int busId, float ratio);
+    void setBusCompressorAttack(int busId, float ms);
+    void setBusCompressorRelease(int busId, float ms);
+
+    // Voice/clip bus routing
+    void setVoiceBus(int voiceId, int busId);
+    void setPlaybackBus(int instanceId, int busId);
+
     // --- Master output ---
 
     void setMasterGain(float gain);
     float masterGain() const { return masterGain_.load(std::memory_order_relaxed); }
 
-    // --- Filters (global post-mix) ---
+    // --- Filters (master bus shortcuts) ---
 
-    static constexpr int MAX_FILTERS = 4;
+    static constexpr int MAX_FILTERS = Bus::MAX_FILTERS;
 
     int allocateFilterSlot();
     void releaseFilterSlot(int slot);
@@ -84,7 +110,7 @@ public:
     void setFilterQ(int slot, float q);
     void setFilterGain(int slot, float gainDB);
 
-    // --- Delay (global post-mix) ---
+    // --- Delay (master bus shortcuts) ---
 
     void setDelayEnabled(bool enabled);
     void setDelayTime(float seconds);
@@ -141,15 +167,22 @@ public:
     const Listener& listener() const { return listener_; }
 
 private:
+    // Type aliases (must precede method declarations that use them)
+    using VoiceList = std::vector<std::shared_ptr<Voice>>;
+    using ClipList = std::vector<std::shared_ptr<AudioClip>>;
+    using PlaybackList = std::vector<std::shared_ptr<ClipPlayback>>;
+    using BusList = std::vector<std::shared_ptr<Bus>>;
+
     static void audioCallback(void* userdata, SDL_AudioStream* stream,
                               int additional_amount, int total_amount);
-    void generateSamples(float* buffer, int numFrames);
+    void generateSamples(int numFrames, const BusList& buses);
+    void processBusEffects(Bus& bus, int numFrames);
+    void mixBusIntoParent(Bus& child, Bus& parent, int numFrames);
 
     static void micCallback(void* userdata, SDL_AudioStream* stream,
                             int additional_amount, int total_amount);
 
     // RCU voice list
-    using VoiceList = std::vector<std::shared_ptr<Voice>>;
     std::atomic<std::shared_ptr<const VoiceList>> voices_{std::make_shared<const VoiceList>()};
     std::mutex voiceWriteMutex_;
     int nextVoiceId_ = 1;
@@ -157,12 +190,10 @@ private:
     Voice* findVoice(int id);
 
     // RCU clip list
-    using ClipList = std::vector<std::shared_ptr<AudioClip>>;
     std::atomic<std::shared_ptr<const ClipList>> clips_{std::make_shared<const ClipList>()};
     std::mutex mediaWriteMutex_;
 
     // RCU playback list
-    using PlaybackList = std::vector<std::shared_ptr<ClipPlayback>>;
     std::atomic<std::shared_ptr<const PlaybackList>> playbacks_{std::make_shared<const PlaybackList>()};
 
     int nextClipId_ = 1;
@@ -171,16 +202,15 @@ private:
     AudioClip* findClip(int clipId) const;
     ClipPlayback* findPlayback(int instanceId) const;
 
-    // Filter/effect params (lock-free main→audio)
-    FilterParams filterParams_[MAX_FILTERS];
-    DelayParams delayParams_;
+    // RCU bus list — master bus is always id 0
+    std::atomic<std::shared_ptr<const BusList>> buses_{std::make_shared<const BusList>()};
+    std::mutex busWriteMutex_;
+    int nextBusId_ = 1;   // 0 is reserved for master
 
-    // Audio-thread-only effect state
-    BiquadFilter filters_[MAX_FILTERS];
-    uint32_t filterVersions_[MAX_FILTERS] = {};
-    DelayEffect delay_;
-    uint32_t delayVersion_ = 0;
-    Compressor compressor_;
+    Bus* findBus(int busId) const;
+
+    // Modulation
+    ModMatrix modMatrix_;
 
     // Spatial
     Listener listener_;

@@ -17,6 +17,17 @@ if(NOT TARGET SDL3::SDL3 AND NOT TARGET SDL3::SDL3-static)
     find_package(SDL3 REQUIRED)
 endif()
 
+# libremidi — optional MIDI support
+option(BROAUDIO_MIDI "Enable MIDI input via libremidi" ON)
+if(BROAUDIO_MIDI)
+    find_package(libremidi QUIET)
+    if(NOT libremidi_FOUND AND NOT TARGET libremidi::libremidi)
+        # Allow consumer to provide libremidi via add_subdirectory
+        set(BROAUDIO_MIDI OFF)
+        message(STATUS "broaudio: libremidi not found, MIDI support disabled")
+    endif()
+endif()
+
 add_library(broaudio STATIC
     src/core/ring_buffer.cpp
     src/dsp/biquad.cpp
@@ -26,10 +37,18 @@ add_library(broaudio STATIC
     src/dsp/fft.cpp
     src/dsp/limiter.cpp
     src/synth/oscillator.cpp
+    src/synth/modulation.cpp
     src/synth/voice.cpp
+    src/synth/wavetable.cpp
+    src/synth/voice_allocator.cpp
     src/clip/clip.cpp
     src/engine.cpp
 )
+
+if(BROAUDIO_MIDI)
+    target_sources(broaudio PRIVATE src/midi/midi_input.cpp)
+    target_compile_definitions(broaudio PUBLIC BROAUDIO_HAS_MIDI=1)
+endif()
 
 target_include_directories(broaudio PUBLIC include)
 
@@ -37,4 +56,8 @@ if(TARGET SDL3::SDL3)
     target_link_libraries(broaudio PUBLIC SDL3::SDL3)
 elseif(TARGET SDL3::SDL3-static)
     target_link_libraries(broaudio PUBLIC SDL3::SDL3-static)
+endif()
+
+if(BROAUDIO_MIDI AND TARGET libremidi::libremidi)
+    target_link_libraries(broaudio PUBLIC libremidi::libremidi)
 endif()

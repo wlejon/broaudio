@@ -4,7 +4,7 @@
 
 namespace broaudio {
 
-enum class Waveform : uint8_t { Sine, Square, Sawtooth, Triangle };
+enum class Waveform : uint8_t { Sine, Square, Sawtooth, Triangle, Wavetable };
 
 enum class EnvStage : uint8_t { Idle, Attack, Decay, Sustain, Release, Done };
 

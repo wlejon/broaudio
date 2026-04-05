@@ -1,5 +1,6 @@
 #include "broaudio/engine.h"
 #include "broaudio/synth/oscillator.h"
+#include "broaudio/synth/wavetable.h"
 #include "broaudio/dsp/limiter.h"
 
 #include <SDL3/SDL.h>
@@ -14,6 +15,7 @@ static constexpr float DEFAULT_DECAY   = 0.1f;
 static constexpr float DEFAULT_SUSTAIN = 1.0f;
 static constexpr float DEFAULT_RELEASE = 0.04f;
 static constexpr float VOICE_AMPLITUDE = 0.1f;
+static constexpr int   MAX_SCRATCH_FRAMES = 8192;
 
 // ---------------------------------------------------------------------------
 // Engine lifecycle
@@ -52,13 +54,21 @@ bool Engine::init()
 
     SDL_ResumeAudioStreamDevice(stream_);
 
-    delay_.init(sampleRate_ * 2);
-    compressor_.init(sampleRate_);
+    // Create master bus (id 0)
+    {
+        auto master = std::make_shared<Bus>();
+        master->id = MASTER_BUS_ID;
+        master->parentId.store(-1, std::memory_order_relaxed);  // no parent
+        master->initAudioState(sampleRate_, MAX_SCRATCH_FRAMES);
 
-    // Pre-allocate scratch buffers large enough for any reasonable callback size.
-    // 8192 stereo frames = 16384 floats covers SDL's typical max buffer requests.
-    outputScratch_.resize(16384, 0.0f);
-    micScratch_.resize(8192, 0.0f);
+        auto list = std::make_shared<BusList>();
+        list->push_back(std::move(master));
+        buses_.store(std::move(list));
+    }
+
+    // Pre-allocate scratch buffers
+    outputScratch_.resize(MAX_SCRATCH_FRAMES * 2, 0.0f);
+    micScratch_.resize(MAX_SCRATCH_FRAMES, 0.0f);
 
     initialized_ = true;
     SDL_Log("broaudio: initialized %d Hz stereo", sampleRate_);
@@ -80,6 +90,252 @@ double Engine::currentTime() const
     return static_cast<double>(samplesGenerated_.load(std::memory_order_relaxed))
            / static_cast<double>(sampleRate_);
 }
+
+// ---------------------------------------------------------------------------
+// Bus management — RCU for the list, atomics for parameters
+// ---------------------------------------------------------------------------
+
+Bus* Engine::findBus(int busId) const
+{
+    auto currentBuses = buses_.load();
+    for (auto& b : *currentBuses) {
+        if (b->id == busId) return b.get();
+    }
+    return nullptr;
+}
+
+int Engine::createBus()
+{
+    std::lock_guard<std::mutex> lock(busWriteMutex_);
+
+    auto bus = std::make_shared<Bus>();
+    bus->id = nextBusId_++;
+    bus->parentId.store(MASTER_BUS_ID, std::memory_order_relaxed);
+    bus->initAudioState(sampleRate_, MAX_SCRATCH_FRAMES);
+
+    auto newList = std::make_shared<BusList>(*buses_.load());
+    newList->push_back(std::move(bus));
+    buses_.store(std::move(newList));
+
+    return bus->id;
+}
+
+void Engine::deleteBus(int busId)
+{
+    if (busId == MASTER_BUS_ID) return;  // cannot delete master
+
+    std::lock_guard<std::mutex> lock(busWriteMutex_);
+
+    // Reroute any voices/clips on this bus to master
+    auto currentVoices = voices_.load();
+    for (auto& v : *currentVoices) {
+        if (v->busId.load(std::memory_order_relaxed) == busId)
+            v->busId.store(MASTER_BUS_ID, std::memory_order_relaxed);
+    }
+    auto currentPlaybacks = playbacks_.load();
+    for (auto& pb : *currentPlaybacks) {
+        if (pb->busId.load(std::memory_order_relaxed) == busId)
+            pb->busId.store(MASTER_BUS_ID, std::memory_order_relaxed);
+    }
+
+    auto current = buses_.load();
+    auto newList = std::make_shared<BusList>();
+    newList->reserve(current->size());
+    for (auto& b : *current) {
+        if (b->id != busId) newList->push_back(b);
+    }
+    buses_.store(std::move(newList));
+}
+
+void Engine::setBusGain(int busId, float gain)
+{
+    if (auto* b = findBus(busId))
+        b->gain.store(std::clamp(gain, 0.0f, 2.0f), std::memory_order_relaxed);
+}
+
+void Engine::setBusPan(int busId, float pan)
+{
+    if (auto* b = findBus(busId))
+        b->pan.store(std::clamp(pan, -1.0f, 1.0f), std::memory_order_relaxed);
+}
+
+void Engine::setBusMuted(int busId, bool muted)
+{
+    if (auto* b = findBus(busId))
+        b->muted.store(muted, std::memory_order_relaxed);
+}
+
+// --- Per-bus filter control ---
+
+int Engine::allocateBusFilterSlot(int busId)
+{
+    auto* bus = findBus(busId);
+    if (!bus) return -1;
+    for (int i = 0; i < Bus::MAX_FILTERS; i++) {
+        bool expected = false;
+        if (bus->filterParams[i].allocated.compare_exchange_strong(
+                expected, true, std::memory_order_acq_rel)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+void Engine::releaseBusFilterSlot(int busId, int slot)
+{
+    auto* bus = findBus(busId);
+    if (!bus || slot < 0 || slot >= Bus::MAX_FILTERS) return;
+    bus->filterParams[slot].enabled.store(false, std::memory_order_relaxed);
+    bus->filterParams[slot].version.fetch_add(1, std::memory_order_release);
+    bus->filterParams[slot].allocated.store(false, std::memory_order_release);
+}
+
+void Engine::setBusFilterEnabled(int busId, int slot, bool enabled)
+{
+    auto* bus = findBus(busId);
+    if (!bus || slot < 0 || slot >= Bus::MAX_FILTERS) return;
+    bus->filterParams[slot].enabled.store(enabled, std::memory_order_relaxed);
+    bus->filterParams[slot].version.fetch_add(1, std::memory_order_release);
+}
+
+void Engine::setBusFilterType(int busId, int slot, BiquadFilter::Type type)
+{
+    auto* bus = findBus(busId);
+    if (!bus || slot < 0 || slot >= Bus::MAX_FILTERS) return;
+    bus->filterParams[slot].type.store(static_cast<int>(type), std::memory_order_relaxed);
+    bus->filterParams[slot].version.fetch_add(1, std::memory_order_release);
+}
+
+void Engine::setBusFilterFrequency(int busId, int slot, float freq)
+{
+    auto* bus = findBus(busId);
+    if (!bus || slot < 0 || slot >= Bus::MAX_FILTERS) return;
+    bus->filterParams[slot].frequency.store(std::clamp(freq, 20.0f, 20000.0f), std::memory_order_relaxed);
+    bus->filterParams[slot].version.fetch_add(1, std::memory_order_release);
+}
+
+void Engine::setBusFilterQ(int busId, int slot, float q)
+{
+    auto* bus = findBus(busId);
+    if (!bus || slot < 0 || slot >= Bus::MAX_FILTERS) return;
+    bus->filterParams[slot].Q.store(std::clamp(q, 0.1f, 30.0f), std::memory_order_relaxed);
+    bus->filterParams[slot].version.fetch_add(1, std::memory_order_release);
+}
+
+void Engine::setBusFilterGain(int busId, int slot, float gainDB)
+{
+    auto* bus = findBus(busId);
+    if (!bus || slot < 0 || slot >= Bus::MAX_FILTERS) return;
+    bus->filterParams[slot].gainDB.store(std::clamp(gainDB, -40.0f, 40.0f), std::memory_order_relaxed);
+    bus->filterParams[slot].version.fetch_add(1, std::memory_order_release);
+}
+
+// --- Per-bus delay control ---
+
+void Engine::setBusDelayEnabled(int busId, bool enabled)
+{
+    auto* bus = findBus(busId);
+    if (!bus) return;
+    bus->delayParams.enabled.store(enabled, std::memory_order_relaxed);
+    bus->delayParams.version.fetch_add(1, std::memory_order_release);
+}
+
+void Engine::setBusDelayTime(int busId, float seconds)
+{
+    auto* bus = findBus(busId);
+    if (!bus) return;
+    bus->delayParams.time.store(std::clamp(seconds, 0.001f, 2.0f), std::memory_order_relaxed);
+    bus->delayParams.version.fetch_add(1, std::memory_order_release);
+}
+
+void Engine::setBusDelayFeedback(int busId, float fb)
+{
+    auto* bus = findBus(busId);
+    if (!bus) return;
+    bus->delayParams.feedback.store(std::clamp(fb, 0.0f, 0.95f), std::memory_order_relaxed);
+    bus->delayParams.version.fetch_add(1, std::memory_order_release);
+}
+
+void Engine::setBusDelayMix(int busId, float mix)
+{
+    auto* bus = findBus(busId);
+    if (!bus) return;
+    bus->delayParams.mix.store(std::clamp(mix, 0.0f, 1.0f), std::memory_order_relaxed);
+    bus->delayParams.version.fetch_add(1, std::memory_order_release);
+}
+
+// --- Per-bus compressor control ---
+
+void Engine::setBusCompressorEnabled(int busId, bool enabled)
+{
+    auto* bus = findBus(busId);
+    if (!bus) return;
+    bus->compressorParams.enabled.store(enabled, std::memory_order_relaxed);
+    bus->compressorParams.version.fetch_add(1, std::memory_order_release);
+}
+
+void Engine::setBusCompressorThreshold(int busId, float threshold)
+{
+    auto* bus = findBus(busId);
+    if (!bus) return;
+    bus->compressorParams.threshold.store(std::clamp(threshold, 0.0f, 1.0f), std::memory_order_relaxed);
+    bus->compressorParams.version.fetch_add(1, std::memory_order_release);
+}
+
+void Engine::setBusCompressorRatio(int busId, float ratio)
+{
+    auto* bus = findBus(busId);
+    if (!bus) return;
+    bus->compressorParams.ratio.store(std::clamp(ratio, 1.0f, 20.0f), std::memory_order_relaxed);
+    bus->compressorParams.version.fetch_add(1, std::memory_order_release);
+}
+
+void Engine::setBusCompressorAttack(int busId, float ms)
+{
+    auto* bus = findBus(busId);
+    if (!bus) return;
+    bus->compressorParams.attackMs.store(std::clamp(ms, 0.1f, 100.0f), std::memory_order_relaxed);
+    bus->compressorParams.version.fetch_add(1, std::memory_order_release);
+}
+
+void Engine::setBusCompressorRelease(int busId, float ms)
+{
+    auto* bus = findBus(busId);
+    if (!bus) return;
+    bus->compressorParams.releaseMs.store(std::clamp(ms, 1.0f, 1000.0f), std::memory_order_relaxed);
+    bus->compressorParams.version.fetch_add(1, std::memory_order_release);
+}
+
+// --- Voice/clip bus routing ---
+
+void Engine::setVoiceBus(int voiceId, int busId)
+{
+    if (auto* v = findVoice(voiceId))
+        v->busId.store(busId, std::memory_order_relaxed);
+}
+
+void Engine::setPlaybackBus(int instanceId, int busId)
+{
+    if (auto* pb = findPlayback(instanceId))
+        pb->busId.store(busId, std::memory_order_relaxed);
+}
+
+// ---------------------------------------------------------------------------
+// Master bus shortcuts — delegate to per-bus methods
+// ---------------------------------------------------------------------------
+
+int Engine::allocateFilterSlot() { return allocateBusFilterSlot(MASTER_BUS_ID); }
+void Engine::releaseFilterSlot(int s) { releaseBusFilterSlot(MASTER_BUS_ID, s); }
+void Engine::setFilterEnabled(int s, bool e) { setBusFilterEnabled(MASTER_BUS_ID, s, e); }
+void Engine::setFilterType(int s, BiquadFilter::Type t) { setBusFilterType(MASTER_BUS_ID, s, t); }
+void Engine::setFilterFrequency(int s, float f) { setBusFilterFrequency(MASTER_BUS_ID, s, f); }
+void Engine::setFilterQ(int s, float q) { setBusFilterQ(MASTER_BUS_ID, s, q); }
+void Engine::setFilterGain(int s, float g) { setBusFilterGain(MASTER_BUS_ID, s, g); }
+
+void Engine::setDelayEnabled(bool e) { setBusDelayEnabled(MASTER_BUS_ID, e); }
+void Engine::setDelayTime(float s) { setBusDelayTime(MASTER_BUS_ID, s); }
+void Engine::setDelayFeedback(float f) { setBusDelayFeedback(MASTER_BUS_ID, f); }
+void Engine::setDelayMix(float m) { setBusDelayMix(MASTER_BUS_ID, m); }
 
 // ---------------------------------------------------------------------------
 // Voice management — RCU for the list, atomics for parameters
@@ -130,6 +386,14 @@ void Engine::setWaveform(int id, Waveform wf)
 {
     if (auto* v = findVoice(id))
         v->waveform.store(wf, std::memory_order_relaxed);
+}
+
+void Engine::setVoiceWavetable(int id, std::shared_ptr<const WavetableBank> bank)
+{
+    if (auto* v = findVoice(id)) {
+        v->waveform.store(Waveform::Wavetable, std::memory_order_relaxed);
+        v->wavetable.store(std::move(bank), std::memory_order_release);
+    }
 }
 
 void Engine::setFrequency(int id, float freq)
@@ -197,93 +461,6 @@ void Engine::stopVoice(int id, double /*when*/)
     if (auto* v = findVoice(id)) {
         v->triggerRelease.store(true, std::memory_order_release);
     }
-}
-
-// ---------------------------------------------------------------------------
-// Filter control
-// ---------------------------------------------------------------------------
-
-int Engine::allocateFilterSlot()
-{
-    for (int i = 0; i < MAX_FILTERS; i++) {
-        bool expected = false;
-        if (filterParams_[i].allocated.compare_exchange_strong(
-                expected, true, std::memory_order_acq_rel)) {
-            return i;
-        }
-    }
-    return -1;
-}
-
-void Engine::releaseFilterSlot(int slot)
-{
-    if (slot < 0 || slot >= MAX_FILTERS) return;
-    filterParams_[slot].enabled.store(false, std::memory_order_relaxed);
-    filterParams_[slot].version.fetch_add(1, std::memory_order_release);
-    filterParams_[slot].allocated.store(false, std::memory_order_release);
-}
-
-void Engine::setFilterEnabled(int slot, bool enabled)
-{
-    if (slot < 0 || slot >= MAX_FILTERS) return;
-    filterParams_[slot].enabled.store(enabled, std::memory_order_relaxed);
-    filterParams_[slot].version.fetch_add(1, std::memory_order_release);
-}
-
-void Engine::setFilterType(int slot, BiquadFilter::Type type)
-{
-    if (slot < 0 || slot >= MAX_FILTERS) return;
-    filterParams_[slot].type.store(static_cast<int>(type), std::memory_order_relaxed);
-    filterParams_[slot].version.fetch_add(1, std::memory_order_release);
-}
-
-void Engine::setFilterFrequency(int slot, float freq)
-{
-    if (slot < 0 || slot >= MAX_FILTERS) return;
-    filterParams_[slot].frequency.store(std::clamp(freq, 20.0f, 20000.0f), std::memory_order_relaxed);
-    filterParams_[slot].version.fetch_add(1, std::memory_order_release);
-}
-
-void Engine::setFilterQ(int slot, float q)
-{
-    if (slot < 0 || slot >= MAX_FILTERS) return;
-    filterParams_[slot].Q.store(std::clamp(q, 0.1f, 30.0f), std::memory_order_relaxed);
-    filterParams_[slot].version.fetch_add(1, std::memory_order_release);
-}
-
-void Engine::setFilterGain(int slot, float gainDB)
-{
-    if (slot < 0 || slot >= MAX_FILTERS) return;
-    filterParams_[slot].gainDB.store(std::clamp(gainDB, -40.0f, 40.0f), std::memory_order_relaxed);
-    filterParams_[slot].version.fetch_add(1, std::memory_order_release);
-}
-
-// ---------------------------------------------------------------------------
-// Delay control
-// ---------------------------------------------------------------------------
-
-void Engine::setDelayEnabled(bool enabled)
-{
-    delayParams_.enabled.store(enabled, std::memory_order_relaxed);
-    delayParams_.version.fetch_add(1, std::memory_order_release);
-}
-
-void Engine::setDelayTime(float seconds)
-{
-    delayParams_.time.store(std::clamp(seconds, 0.001f, 2.0f), std::memory_order_relaxed);
-    delayParams_.version.fetch_add(1, std::memory_order_release);
-}
-
-void Engine::setDelayFeedback(float fb)
-{
-    delayParams_.feedback.store(std::clamp(fb, 0.0f, 0.95f), std::memory_order_relaxed);
-    delayParams_.version.fetch_add(1, std::memory_order_release);
-}
-
-void Engine::setDelayMix(float mix)
-{
-    delayParams_.mix.store(std::clamp(mix, 0.0f, 1.0f), std::memory_order_relaxed);
-    delayParams_.version.fetch_add(1, std::memory_order_release);
 }
 
 // ---------------------------------------------------------------------------
@@ -613,6 +790,97 @@ float Engine::getPlaybackPosition(int instanceId) const
 }
 
 // ---------------------------------------------------------------------------
+// Bus effect processing — audio thread only
+// ---------------------------------------------------------------------------
+
+void Engine::processBusEffects(Bus& bus, int numFrames)
+{
+    float* buf = bus.buffer.data();
+
+    // Filters
+    for (int f = 0; f < Bus::MAX_FILTERS; f++) {
+        uint32_t ver = bus.filterParams[f].version.load(std::memory_order_acquire);
+        if (ver != bus.filterVersions[f]) {
+            bus.filterVersions[f] = ver;
+            bool enabled = bus.filterParams[f].enabled.load(std::memory_order_relaxed);
+            bus.filters[f].enabled = enabled;
+            if (enabled) {
+                bus.filters[f].type = static_cast<BiquadFilter::Type>(
+                    bus.filterParams[f].type.load(std::memory_order_relaxed));
+                bus.filters[f].frequency = bus.filterParams[f].frequency.load(std::memory_order_relaxed);
+                bus.filters[f].Q = bus.filterParams[f].Q.load(std::memory_order_relaxed);
+                bus.filters[f].gainDB = bus.filterParams[f].gainDB.load(std::memory_order_relaxed);
+                bus.filters[f].computeCoefficients(sampleRate_);
+            } else {
+                bus.filters[f].reset();
+            }
+        }
+        if (!bus.filters[f].enabled) continue;
+        for (int i = 0; i < numFrames; i++) {
+            buf[i * 2]     = bus.filters[f].process(buf[i * 2], 0);
+            buf[i * 2 + 1] = bus.filters[f].process(buf[i * 2 + 1], 1);
+        }
+    }
+
+    // Delay
+    {
+        uint32_t ver = bus.delayParams.version.load(std::memory_order_acquire);
+        if (ver != bus.delayVersion) {
+            bus.delayVersion = ver;
+            bus.delay.enabled = bus.delayParams.enabled.load(std::memory_order_relaxed);
+            float delaySec = bus.delayParams.time.load(std::memory_order_relaxed);
+            int maxSamples = static_cast<int>(bus.delay.buffer.size());
+            bus.delay.delaySamples = std::clamp(
+                static_cast<int>(delaySec * sampleRate_), 1, maxSamples - 1);
+            bus.delay.feedback = bus.delayParams.feedback.load(std::memory_order_relaxed);
+            bus.delay.mix = bus.delayParams.mix.load(std::memory_order_relaxed);
+        }
+        if (bus.delay.enabled) {
+            bus.delay.processStereo(buf, numFrames);
+        }
+    }
+
+    // Compressor
+    {
+        uint32_t ver = bus.compressorParams.version.load(std::memory_order_acquire);
+        if (ver != bus.compressorVersion) {
+            bus.compressorVersion = ver;
+            bus.compressor.threshold = bus.compressorParams.threshold.load(std::memory_order_relaxed);
+            bus.compressor.ratio = bus.compressorParams.ratio.load(std::memory_order_relaxed);
+            // Recompute attack/release coefficients
+            float attackMs = bus.compressorParams.attackMs.load(std::memory_order_relaxed);
+            float releaseMs = bus.compressorParams.releaseMs.load(std::memory_order_relaxed);
+            bus.compressor.attackCoeff = 1.0f - std::exp(-1.0f / (attackMs * 0.001f * static_cast<float>(sampleRate_)));
+            bus.compressor.releaseCoeff = 1.0f - std::exp(-1.0f / (releaseMs * 0.001f * static_cast<float>(sampleRate_)));
+        }
+        if (bus.compressorParams.enabled.load(std::memory_order_relaxed)) {
+            bus.compressor.processStereo(buf, numFrames);
+        }
+    }
+}
+
+void Engine::mixBusIntoParent(Bus& child, Bus& parent, int numFrames)
+{
+    if (child.muted.load(std::memory_order_relaxed)) return;
+
+    float g = child.gain.load(std::memory_order_relaxed);
+    float panVal = child.pan.load(std::memory_order_relaxed);
+    float panL, panR;
+    panGains(panVal, panL, panR);
+
+    float* src = child.buffer.data();
+    float* dst = parent.buffer.data();
+
+    for (int i = 0; i < numFrames; i++) {
+        float L = src[i * 2]     * g;
+        float R = src[i * 2 + 1] * g;
+        // Apply bus panning (cross-mix stereo signal)
+        dst[i * 2]     += L * panL + R * (1.0f - panR);
+        dst[i * 2 + 1] += R * panR + L * (1.0f - panL);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Output audio callback + synthesis — LOCK-FREE
 // ---------------------------------------------------------------------------
 
@@ -628,20 +896,19 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
         engine->outputScratch_.resize(numFloats);
     float* buffer = engine->outputScratch_.data();
 
-    std::memset(buffer, 0, numFloats * sizeof(float));
-    engine->generateSamples(buffer, numFrames);
+    // Load bus list (lock-free RCU read)
+    auto currentBuses = engine->buses_.load();
 
-    // Record tap (mono mixdown, before effects)
-    if (engine->recording_.load(std::memory_order_relaxed)) {
-        uint64_t wp = engine->recordWritePos_.load(std::memory_order_relaxed);
-        for (int i = 0; i < numFrames; i++) {
-            float mono = (buffer[i * 2] + buffer[i * 2 + 1]) * 0.5f;
-            engine->recordRing_[static_cast<int>((wp + i) % RECORD_RING_SIZE)] = mono;
-        }
-        engine->recordWritePos_.store(wp + numFrames, std::memory_order_release);
+    // Clear all bus buffers
+    for (auto& bus : *currentBuses) {
+        int frames = std::min(numFrames, static_cast<int>(bus->buffer.size()) / 2);
+        bus->clearBuffer(frames);
     }
 
-    // Mix clip playback instances (lock-free RCU read)
+    // Generate voices into their target bus buffers
+    engine->generateSamples(numFrames, *currentBuses);
+
+    // Mix clip playback into target bus buffers
     {
         auto currentClips = engine->clips_.load();
         auto currentPlaybacks = engine->playbacks_.load();
@@ -654,6 +921,20 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
                 if (c->id == pb->clipId) { clip = c.get(); break; }
             }
             if (!clip) continue;
+
+            // Find target bus buffer
+            int targetBusId = pb->busId.load(std::memory_order_relaxed);
+            float* targetBuf = nullptr;
+            for (auto& bus : *currentBuses) {
+                if (bus->id == targetBusId) { targetBuf = bus->buffer.data(); break; }
+            }
+            if (!targetBuf) {
+                // Fallback to master
+                for (auto& bus : *currentBuses) {
+                    if (bus->id == MASTER_BUS_ID) { targetBuf = bus->buffer.data(); break; }
+                }
+            }
+            if (!targetBuf) continue;
 
             int start = pb->regionStart.load(std::memory_order_relaxed);
             int end = pb->regionEnd.load(std::memory_order_relaxed);
@@ -687,64 +968,58 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
                 if (nextIdx >= len) nextIdx = looping ? 0 : intPos;
                 float s1 = clip->samples[start + nextIdx];
                 float sample = (s0 + frac * (s1 - s0)) * g;
-                buffer[i * 2]     += sample * panL;
-                buffer[i * 2 + 1] += sample * panR;
+                targetBuf[i * 2]     += sample * panL;
+                targetBuf[i * 2 + 1] += sample * panR;
                 pos += increment;
             }
             pb->playPos.store(pos, std::memory_order_relaxed);
         }
     }
 
-    // Apply filters
-    for (int f = 0; f < Engine::MAX_FILTERS; f++) {
-        uint32_t ver = engine->filterParams_[f].version.load(std::memory_order_acquire);
-        if (ver != engine->filterVersions_[f]) {
-            engine->filterVersions_[f] = ver;
-            bool enabled = engine->filterParams_[f].enabled.load(std::memory_order_relaxed);
-            engine->filters_[f].enabled = enabled;
-            if (enabled) {
-                engine->filters_[f].type = static_cast<BiquadFilter::Type>(
-                    engine->filterParams_[f].type.load(std::memory_order_relaxed));
-                engine->filters_[f].frequency = engine->filterParams_[f].frequency.load(std::memory_order_relaxed);
-                engine->filters_[f].Q = engine->filterParams_[f].Q.load(std::memory_order_relaxed);
-                engine->filters_[f].gainDB = engine->filterParams_[f].gainDB.load(std::memory_order_relaxed);
-                engine->filters_[f].computeCoefficients(engine->sampleRate_);
-            } else {
-                engine->filters_[f].reset();
+    // Record tap (mono mixdown from master bus, before effects)
+    Bus* masterBus = nullptr;
+    for (auto& bus : *currentBuses) {
+        if (bus->id == MASTER_BUS_ID) { masterBus = bus.get(); break; }
+    }
+
+    if (engine->recording_.load(std::memory_order_relaxed) && masterBus) {
+        uint64_t wp = engine->recordWritePos_.load(std::memory_order_relaxed);
+        for (int i = 0; i < numFrames; i++) {
+            float mono = (masterBus->buffer[i * 2] + masterBus->buffer[i * 2 + 1]) * 0.5f;
+            engine->recordRing_[static_cast<int>((wp + i) % RECORD_RING_SIZE)] = mono;
+        }
+        engine->recordWritePos_.store(wp + numFrames, std::memory_order_release);
+    }
+
+    // Process child buses: apply effects, then mix into parent
+    for (auto& bus : *currentBuses) {
+        if (bus->id == MASTER_BUS_ID) continue;  // master processed last
+
+        engine->processBusEffects(*bus, numFrames);
+
+        // Find parent and mix into it
+        int parentId = bus->parentId.load(std::memory_order_relaxed);
+        for (auto& parent : *currentBuses) {
+            if (parent->id == parentId) {
+                engine->mixBusIntoParent(*bus, *parent, numFrames);
+                break;
             }
         }
-        if (!engine->filters_[f].enabled) continue;
-        for (int i = 0; i < numFrames; i++) {
-            buffer[i * 2]     = engine->filters_[f].process(buffer[i * 2], 0);
-            buffer[i * 2 + 1] = engine->filters_[f].process(buffer[i * 2 + 1], 1);
-        }
     }
 
-    // Apply delay
-    {
-        uint32_t ver = engine->delayParams_.version.load(std::memory_order_acquire);
-        if (ver != engine->delayVersion_) {
-            engine->delayVersion_ = ver;
-            engine->delay_.enabled = engine->delayParams_.enabled.load(std::memory_order_relaxed);
-            float delaySec = engine->delayParams_.time.load(std::memory_order_relaxed);
-            int maxSamples = static_cast<int>(engine->delay_.buffer.size());
-            engine->delay_.delaySamples = std::clamp(
-                static_cast<int>(delaySec * engine->sampleRate_), 1, maxSamples - 1);
-            engine->delay_.feedback = engine->delayParams_.feedback.load(std::memory_order_relaxed);
-            engine->delay_.mix = engine->delayParams_.mix.load(std::memory_order_relaxed);
-        }
-        if (engine->delay_.enabled) {
-            engine->delay_.processStereo(buffer, numFrames);
-        }
+    // Process master bus effects
+    if (masterBus) {
+        engine->processBusEffects(*masterBus, numFrames);
     }
 
-    // Compressor
-    engine->compressor_.processStereo(buffer, numFrames);
-
-    // Master gain + soft limiter
-    float mg = engine->masterGain_.load(std::memory_order_relaxed);
-    for (int i = 0; i < numFloats; i++) {
-        buffer[i] = softLimit(buffer[i] * mg);
+    // Copy master bus to output buffer, apply master gain + soft limiter
+    if (masterBus) {
+        float mg = engine->masterGain_.load(std::memory_order_relaxed);
+        for (int i = 0; i < numFloats; i++) {
+            buffer[i] = softLimit(masterBus->buffer[i] * mg);
+        }
+    } else {
+        std::memset(buffer, 0, numFloats * sizeof(float));
     }
 
     // Mix mic monitor
@@ -773,21 +1048,27 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
 
     SDL_PutAudioStreamData(stream, buffer, numFloats * sizeof(float));
 
-    // Mono mixdown to output ring buffer for analysis.
-    // Reuse the start of buffer since we've already sent it to SDL.
+    // Mono mixdown to output ring buffer for analysis
     for (int i = 0; i < numFrames; i++) {
         buffer[i] = (buffer[i * 2] + buffer[i * 2 + 1]) * 0.5f;
     }
     engine->outputBuffer_.write(buffer, numFrames);
 }
 
-void Engine::generateSamples(float* buffer, int numFrames)
+void Engine::generateSamples(int numFrames, const BusList& buses)
 {
     auto currentVoices = voices_.load();
 
     double baseTime = static_cast<double>(samplesGenerated_.load(std::memory_order_relaxed))
                       / static_cast<double>(sampleRate_);
     double sampleDt = 1.0 / static_cast<double>(sampleRate_);
+
+    // Build a quick lookup: bus id → buffer pointer
+    // Master bus is always present; unknown bus ids fall back to master
+    float* masterBuf = nullptr;
+    for (auto& bus : buses) {
+        if (bus->id == MASTER_BUS_ID) { masterBuf = bus->buffer.data(); break; }
+    }
 
     for (auto& voicePtr : *currentVoices) {
         Voice& voice = *voicePtr;
@@ -812,6 +1093,15 @@ void Engine::generateSamples(float* buffer, int numFrames)
         if (!voice.active || !voice.started) continue;
         if (voice.envStage == EnvStage::Done) continue;
 
+        // Find target bus buffer
+        int targetBusId = voice.busId.load(std::memory_order_relaxed);
+        float* buf = nullptr;
+        for (auto& bus : buses) {
+            if (bus->id == targetBusId) { buf = bus->buffer.data(); break; }
+        }
+        if (!buf) buf = masterBuf;
+        if (!buf) continue;
+
         float freq = voice.frequency.load(std::memory_order_relaxed);
         float gain = VOICE_AMPLITUDE * voice.gain.load(std::memory_order_relaxed);
         float phaseInc = freq / static_cast<float>(sampleRate_);
@@ -823,6 +1113,13 @@ void Engine::generateSamples(float* buffer, int numFrames)
         float relCoeff = voice.releaseCoeff.load(std::memory_order_relaxed);
         double startTime = voice.startTime.load(std::memory_order_relaxed);
         Waveform wf = voice.waveform.load(std::memory_order_relaxed);
+
+        // Load wavetable bank if needed (lock-free shared_ptr read)
+        std::shared_ptr<const WavetableBank> wtBank;
+        if (wf == Waveform::Wavetable) {
+            wtBank = voice.wavetable.load(std::memory_order_acquire);
+            if (!wtBank) continue;  // no wavetable set, skip this voice
+        }
 
         for (int i = 0; i < numFrames; i++) {
             double t = baseTime + i * sampleDt;
@@ -861,10 +1158,12 @@ void Engine::generateSamples(float* buffer, int numFrames)
 
             if (voice.envStage == EnvStage::Done) break;
 
-            float sample = generateSample(wf, voice.phase, phaseInc);
+            float sample = (wf == Waveform::Wavetable)
+                ? wtBank->sample(voice.phase, phaseInc)
+                : generateSample(wf, voice.phase, phaseInc);
             float s = sample * gain * voice.envLevel;
-            buffer[i * 2]     += s * panL;
-            buffer[i * 2 + 1] += s * panR;
+            buf[i * 2]     += s * panL;
+            buf[i * 2 + 1] += s * panR;
 
             voice.phase += phaseInc;
             if (voice.phase >= 1.0f) voice.phase -= 1.0f;

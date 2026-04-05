@@ -142,4 +142,4 @@ engine.setVoiceSend(voice, reverbBus, 0.5f);
 
 ## License
 
-Private. All rights reserved.
+MIT

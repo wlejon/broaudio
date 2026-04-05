@@ -24,6 +24,7 @@ set(BROAUDIO_TESTS
     test_bus_metering
     test_sidechain
     test_scheduled_events
+    test_signal_chain
 )
 
 foreach(test ${BROAUDIO_TESTS})

@@ -61,12 +61,7 @@ void Equalizer::process(float* buffer, int numSamples)
     float masterLinearGain = std::pow(10.0f, masterGain_ / 20.0f);
 
     for (int i = 0; i < numSamples; ++i) {
-        float output = processSample(buffer[i]) * masterLinearGain;
-        if (output > 1.0f)
-            output = 1.0f - std::exp(-output + 1.0f);
-        else if (output < -1.0f)
-            output = -1.0f + std::exp(output + 1.0f);
-        buffer[i] = output;
+        buffer[i] = processSample(buffer[i]) * masterLinearGain;
     }
 }
 
@@ -88,10 +83,7 @@ void Equalizer::processStereo(float* leftBuffer, float* rightBuffer, int numSamp
                 leftOutput = y0;
             }
         }
-        leftOutput *= masterLinearGain;
-        if (leftOutput > 1.0f) leftOutput = 1.0f - std::exp(-leftOutput + 1.0f);
-        else if (leftOutput < -1.0f) leftOutput = -1.0f + std::exp(leftOutput + 1.0f);
-        leftBuffer[i] = leftOutput;
+        leftBuffer[i] = leftOutput * masterLinearGain;
 
         float rightOutput = rightBuffer[i];
         for (auto& band : rightBands_) {
@@ -105,10 +97,7 @@ void Equalizer::processStereo(float* leftBuffer, float* rightBuffer, int numSamp
                 rightOutput = y0;
             }
         }
-        rightOutput *= masterLinearGain;
-        if (rightOutput > 1.0f) rightOutput = 1.0f - std::exp(-rightOutput + 1.0f);
-        else if (rightOutput < -1.0f) rightOutput = -1.0f + std::exp(rightOutput + 1.0f);
-        rightBuffer[i] = rightOutput;
+        rightBuffer[i] = rightOutput * masterLinearGain;
     }
 }
 
@@ -130,10 +119,7 @@ void Equalizer::processStereoInterleaved(float* buffer, int numFrames)
                 leftOutput = y0;
             }
         }
-        leftOutput *= masterLinearGain;
-        if (leftOutput > 1.0f) leftOutput = 1.0f - std::exp(-leftOutput + 1.0f);
-        else if (leftOutput < -1.0f) leftOutput = -1.0f + std::exp(leftOutput + 1.0f);
-        buffer[i * 2] = leftOutput;
+        buffer[i * 2] = leftOutput * masterLinearGain;
 
         float rightOutput = buffer[i * 2 + 1];
         for (auto& band : rightBands_) {
@@ -147,10 +133,7 @@ void Equalizer::processStereoInterleaved(float* buffer, int numFrames)
                 rightOutput = y0;
             }
         }
-        rightOutput *= masterLinearGain;
-        if (rightOutput > 1.0f) rightOutput = 1.0f - std::exp(-rightOutput + 1.0f);
-        else if (rightOutput < -1.0f) rightOutput = -1.0f + std::exp(rightOutput + 1.0f);
-        buffer[i * 2 + 1] = rightOutput;
+        buffer[i * 2 + 1] = rightOutput * masterLinearGain;
     }
 }
 

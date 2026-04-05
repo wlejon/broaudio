@@ -90,6 +90,20 @@ public:
     void setBusCompressorAttack(int busId, float ms);
     void setBusCompressorRelease(int busId, float ms);
 
+    // Per-bus reverb control
+    void setBusReverbEnabled(int busId, bool enabled);
+    void setBusReverbRoomSize(int busId, float size);
+    void setBusReverbDamping(int busId, float damping);
+    void setBusReverbMix(int busId, float mix);
+
+    // Per-bus chorus/flanger control
+    void setBusChorusEnabled(int busId, bool enabled);
+    void setBusChorusRate(int busId, float hz);
+    void setBusChorusDepth(int busId, float seconds);
+    void setBusChorusMix(int busId, float mix);
+    void setBusChorusFeedback(int busId, float fb);
+    void setBusChorusBaseDelay(int busId, float seconds);
+
     // Voice/clip bus routing
     void setVoiceBus(int voiceId, int busId);
     void setPlaybackBus(int instanceId, int busId);
@@ -124,6 +138,11 @@ public:
     const AnalysisBuffer& outputBuffer() const { return outputBuffer_; }
     AnalysisBuffer& micBuffer() { return micBuffer_; }
     const AnalysisBuffer& micBuffer() const { return micBuffer_; }
+
+    // Get spectrum magnitudes from the output analysis buffer.
+    // Writes `numBins` magnitude values (linear scale) into `outMagnitudes`.
+    // numBins should be a power of 2 (max 8192). Returns actual bins written.
+    int getSpectrum(float* outMagnitudes, int numBins) const;
 
     // --- Microphone ---
 

@@ -1,6 +1,7 @@
 #include "broaudio/engine.h"
 #include "broaudio/synth/oscillator.h"
 #include "broaudio/synth/wavetable.h"
+#include "broaudio/dsp/fft.h"
 #include "broaudio/dsp/limiter.h"
 
 #include <SDL3/SDL.h>
@@ -306,6 +307,90 @@ void Engine::setBusCompressorRelease(int busId, float ms)
     bus->compressorParams.version.fetch_add(1, std::memory_order_release);
 }
 
+// --- Per-bus reverb control ---
+
+void Engine::setBusReverbEnabled(int busId, bool enabled)
+{
+    auto* bus = findBus(busId);
+    if (!bus) return;
+    bus->reverbParams.enabled.store(enabled, std::memory_order_relaxed);
+    bus->reverbParams.version.fetch_add(1, std::memory_order_release);
+}
+
+void Engine::setBusReverbRoomSize(int busId, float size)
+{
+    auto* bus = findBus(busId);
+    if (!bus) return;
+    bus->reverbParams.roomSize.store(std::clamp(size, 0.0f, 1.0f), std::memory_order_relaxed);
+    bus->reverbParams.version.fetch_add(1, std::memory_order_release);
+}
+
+void Engine::setBusReverbDamping(int busId, float damping)
+{
+    auto* bus = findBus(busId);
+    if (!bus) return;
+    bus->reverbParams.damping.store(std::clamp(damping, 0.0f, 1.0f), std::memory_order_relaxed);
+    bus->reverbParams.version.fetch_add(1, std::memory_order_release);
+}
+
+void Engine::setBusReverbMix(int busId, float mix)
+{
+    auto* bus = findBus(busId);
+    if (!bus) return;
+    bus->reverbParams.mix.store(std::clamp(mix, 0.0f, 1.0f), std::memory_order_relaxed);
+    bus->reverbParams.version.fetch_add(1, std::memory_order_release);
+}
+
+// --- Per-bus chorus/flanger control ---
+
+void Engine::setBusChorusEnabled(int busId, bool enabled)
+{
+    auto* bus = findBus(busId);
+    if (!bus) return;
+    bus->chorusParams.enabled.store(enabled, std::memory_order_relaxed);
+    bus->chorusParams.version.fetch_add(1, std::memory_order_release);
+}
+
+void Engine::setBusChorusRate(int busId, float hz)
+{
+    auto* bus = findBus(busId);
+    if (!bus) return;
+    bus->chorusParams.rate.store(std::clamp(hz, 0.01f, 20.0f), std::memory_order_relaxed);
+    bus->chorusParams.version.fetch_add(1, std::memory_order_release);
+}
+
+void Engine::setBusChorusDepth(int busId, float seconds)
+{
+    auto* bus = findBus(busId);
+    if (!bus) return;
+    bus->chorusParams.depth.store(std::clamp(seconds, 0.0001f, 0.05f), std::memory_order_relaxed);
+    bus->chorusParams.version.fetch_add(1, std::memory_order_release);
+}
+
+void Engine::setBusChorusMix(int busId, float mix)
+{
+    auto* bus = findBus(busId);
+    if (!bus) return;
+    bus->chorusParams.mix.store(std::clamp(mix, 0.0f, 1.0f), std::memory_order_relaxed);
+    bus->chorusParams.version.fetch_add(1, std::memory_order_release);
+}
+
+void Engine::setBusChorusFeedback(int busId, float fb)
+{
+    auto* bus = findBus(busId);
+    if (!bus) return;
+    bus->chorusParams.feedback.store(std::clamp(fb, 0.0f, 0.95f), std::memory_order_relaxed);
+    bus->chorusParams.version.fetch_add(1, std::memory_order_release);
+}
+
+void Engine::setBusChorusBaseDelay(int busId, float seconds)
+{
+    auto* bus = findBus(busId);
+    if (!bus) return;
+    bus->chorusParams.baseDelay.store(std::clamp(seconds, 0.001f, 0.05f), std::memory_order_relaxed);
+    bus->chorusParams.version.fetch_add(1, std::memory_order_release);
+}
+
 // --- Voice/clip bus routing ---
 
 void Engine::setVoiceBus(int voiceId, int busId)
@@ -593,6 +678,47 @@ void Engine::stopRecording()
 }
 
 // ---------------------------------------------------------------------------
+// Spectrum analysis
+// ---------------------------------------------------------------------------
+
+int Engine::getSpectrum(float* outMagnitudes, int numBins) const
+{
+    if (numBins <= 0 || numBins > 8192) return 0;
+
+    // Ensure power of 2
+    int n = 1;
+    while (n < numBins) n <<= 1;
+    if (n > 8192) n = 8192;
+
+    // Read recent samples from the analysis buffer
+    std::vector<float> real(n, 0.0f);
+    std::vector<float> imag(n, 0.0f);
+
+    // Read latest samples from the analysis ring buffer (benign tearing acceptable for viz)
+    outputBuffer_.readLatest(real.data(), n);
+
+    // Apply Hann window
+    for (int i = 0; i < n; i++) {
+        float w = 0.5f * (1.0f - std::cos(2.0f * 3.14159265f * static_cast<float>(i) / static_cast<float>(n)));
+        real[i] *= w;
+    }
+
+    fft(real.data(), imag.data(), n);
+
+    // Compute magnitudes (only first half — Nyquist)
+    int outBins = n / 2;
+    if (outBins > numBins) outBins = numBins;
+    float invN = 1.0f / static_cast<float>(n);
+    for (int i = 0; i < outBins; i++) {
+        float re = real[i] * invN;
+        float im = imag[i] * invN;
+        outMagnitudes[i] = std::sqrt(re * re + im * im) * 2.0f;
+    }
+
+    return outBins;
+}
+
+// ---------------------------------------------------------------------------
 // Audio Clips — RCU for clip and playback lists
 // ---------------------------------------------------------------------------
 
@@ -865,6 +991,38 @@ void Engine::processBusEffects(Bus& bus, int numFrames)
             bus.compressor.processStereo(buf, numFrames);
         }
     }
+
+    // Chorus
+    {
+        uint32_t ver = bus.chorusParams.version.load(std::memory_order_acquire);
+        if (ver != bus.chorusVersion) {
+            bus.chorusVersion = ver;
+            bus.chorus.enabled = bus.chorusParams.enabled.load(std::memory_order_relaxed);
+            bus.chorus.rate = bus.chorusParams.rate.load(std::memory_order_relaxed);
+            bus.chorus.depth = bus.chorusParams.depth.load(std::memory_order_relaxed);
+            bus.chorus.mix = bus.chorusParams.mix.load(std::memory_order_relaxed);
+            bus.chorus.feedback = bus.chorusParams.feedback.load(std::memory_order_relaxed);
+            bus.chorus.baseDelay = bus.chorusParams.baseDelay.load(std::memory_order_relaxed);
+        }
+        if (bus.chorus.enabled) {
+            bus.chorus.processStereo(buf, numFrames);
+        }
+    }
+
+    // Reverb (last in chain — after all other effects)
+    {
+        uint32_t ver = bus.reverbParams.version.load(std::memory_order_acquire);
+        if (ver != bus.reverbVersion) {
+            bus.reverbVersion = ver;
+            bus.reverb.enabled = bus.reverbParams.enabled.load(std::memory_order_relaxed);
+            bus.reverb.roomSize = bus.reverbParams.roomSize.load(std::memory_order_relaxed);
+            bus.reverb.damping = bus.reverbParams.damping.load(std::memory_order_relaxed);
+            bus.reverb.mix = bus.reverbParams.mix.load(std::memory_order_relaxed);
+        }
+        if (bus.reverb.enabled) {
+            bus.reverb.processStereo(buf, numFrames);
+        }
+    }
 }
 
 void Engine::mixBusIntoParent(Bus& child, Bus& parent, int numFrames)
@@ -1129,6 +1287,9 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
             if (!wtBank) continue;  // no wavetable set, skip this voice
         }
 
+        bool isNoise = (wf == Waveform::WhiteNoise || wf == Waveform::PinkNoise
+                        || wf == Waveform::BrownNoise);
+
         for (int i = 0; i < numFrames; i++) {
             double t = baseTime + i * sampleDt;
             if (t < startTime) continue;
@@ -1166,9 +1327,14 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
 
             if (voice.envStage == EnvStage::Done) break;
 
-            float sample = (wf == Waveform::Wavetable)
-                ? wtBank->sample(voice.phase, phaseInc)
-                : generateSample(wf, voice.phase, phaseInc);
+            float sample;
+            if (isNoise) {
+                sample = generateNoise(wf, voice.noiseState);
+            } else if (wf == Waveform::Wavetable) {
+                sample = wtBank->sample(voice.phase, phaseInc);
+            } else {
+                sample = generateSample(wf, voice.phase, phaseInc);
+            }
             float s = sample * gain * voice.envLevel;
             buf[i * 2]     += s * panL;
             buf[i * 2 + 1] += s * panR;

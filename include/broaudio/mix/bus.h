@@ -2,8 +2,10 @@
 
 #include "broaudio/dsp/params.h"
 #include "broaudio/dsp/biquad.h"
+#include "broaudio/dsp/chorus.h"
 #include "broaudio/dsp/compressor.h"
 #include "broaudio/dsp/delay.h"
+#include "broaudio/dsp/reverb.h"
 
 #include <atomic>
 #include <cstring>
@@ -30,6 +32,8 @@ struct Bus {
     FilterParams filterParams[MAX_FILTERS];
     DelayParams delayParams;
     CompressorParams compressorParams;
+    ReverbParams reverbParams;
+    ChorusParams chorusParams;
 
     // Audio-thread-only effect state — never touched by main thread
     std::vector<float> buffer;       // stereo interleaved scratch, sized at init
@@ -39,11 +43,17 @@ struct Bus {
     uint32_t delayVersion = 0;
     Compressor compressor;
     uint32_t compressorVersion = 0;
+    Reverb reverb;
+    uint32_t reverbVersion = 0;
+    Chorus chorus;
+    uint32_t chorusVersion = 0;
 
     void initAudioState(int sampleRate, int maxFrames) {
         buffer.resize(static_cast<size_t>(maxFrames) * 2, 0.0f);
         delay.init(sampleRate * 2);
         compressor.init(sampleRate);
+        reverb.init(sampleRate);
+        chorus.init(sampleRate);
     }
 
     void clearBuffer(int numFrames) {

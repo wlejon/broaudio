@@ -2,6 +2,7 @@
 
 #include "broaudio/types.h"
 #include "broaudio/synth/modulation.h"
+#include "broaudio/synth/oscillator.h"
 #include <atomic>
 #include <memory>
 
@@ -43,6 +44,9 @@ struct Voice {
 
     // Per-voice modulation state (LFO phases, velocity, note context)
     ModState modState;
+
+    // Per-voice noise state (pink/brown noise accumulators)
+    NoiseState noiseState;
 };
 
 } // namespace broaudio

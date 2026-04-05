@@ -35,11 +35,13 @@ endif()
 add_library(broaudio STATIC
     src/core/ring_buffer.cpp
     src/dsp/biquad.cpp
+    src/dsp/chorus.cpp
     src/dsp/compressor.cpp
     src/dsp/delay.cpp
     src/dsp/equalizer.cpp
     src/dsp/fft.cpp
     src/dsp/limiter.cpp
+    src/dsp/reverb.cpp
     src/synth/oscillator.cpp
     src/synth/modulation.cpp
     src/synth/voice.cpp
@@ -61,6 +63,8 @@ target_include_directories(broaudio PUBLIC include)
 
 if(MSVC)
     target_compile_options(broaudio PRIVATE /MP /permissive- /utf-8)
+    # Work around MSVC ICE in Release with /O2 on engine.cpp
+    set_source_files_properties(src/engine.cpp PROPERTIES COMPILE_FLAGS "/O1")
 endif()
 
 if(TARGET SDL3::SDL3)

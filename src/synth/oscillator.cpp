@@ -71,4 +71,55 @@ float generateSample(Waveform wf, float phase, float phaseInc)
     return 0.0f;
 }
 
+// ---------------------------------------------------------------------------
+// Noise generation
+// ---------------------------------------------------------------------------
+
+static float whiteNoise()
+{
+    // Fast xorshift-based white noise
+    static uint32_t seed = 1;
+    seed ^= seed << 13;
+    seed ^= seed >> 17;
+    seed ^= seed << 5;
+    return static_cast<float>(static_cast<int32_t>(seed)) / 2147483648.0f;
+}
+
+float generateNoise(Waveform wf, NoiseState& state)
+{
+    switch (wf) {
+        case Waveform::WhiteNoise:
+            return whiteNoise();
+
+        case Waveform::PinkNoise: {
+            // Voss-McCartney: update one octave band per sample based on
+            // trailing zeros of the index counter
+            float white = whiteNoise();
+            int idx = state.pinkIndex++;
+            // Find lowest set bit to determine which row to update
+            for (int i = 0; i < 7; i++) {
+                if ((idx & (1 << i)) != 0) {
+                    state.pinkRunningSum -= state.pinkRows[i];
+                    state.pinkRows[i] = whiteNoise() * 0.25f;
+                    state.pinkRunningSum += state.pinkRows[i];
+                    break;
+                }
+            }
+            return (state.pinkRunningSum + white * 0.25f) * 0.5f;
+        }
+
+        case Waveform::BrownNoise: {
+            float white = whiteNoise();
+            state.brownValue += white * 0.02f;
+            // Clamp to prevent drift
+            if (state.brownValue > 1.0f) state.brownValue = 1.0f;
+            if (state.brownValue < -1.0f) state.brownValue = -1.0f;
+            return state.brownValue;
+        }
+
+        default:
+            return 0.0f;
+    }
+}
+
 } // namespace broaudio

@@ -179,6 +179,13 @@ public:
     void setMicBus(int busId) { micBusId_.store(busId, std::memory_order_relaxed); }
     int micBus() const { return micBusId_.load(std::memory_order_relaxed); }
 
+    // --- Offline processing ---
+
+    // Process mono samples through a bus's effect chain offline (non-realtime).
+    // Creates a temporary bus with cloned params, processes in chunks, returns mono output.
+    // Safe to call from the main thread. Does not affect live audio.
+    std::vector<float> processEffectsOffline(int busId, const float* monoInput, int numSamples);
+
     // --- Recording ---
 
     void startRecording();

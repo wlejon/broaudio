@@ -149,6 +149,111 @@ void Engine::deleteBus(int busId)
     buses_.store(std::move(newList));
 }
 
+std::vector<float> Engine::processEffectsOffline(int busId, const float* monoInput, int numSamples)
+{
+    auto* srcBus = findBus(busId);
+    if (!srcBus || numSamples <= 0) return {};
+
+    static constexpr int CHUNK = 1024;
+
+    // Create a temporary bus with fresh effect state and cloned params
+    Bus temp;
+    temp.initAudioState(sampleRate_, CHUNK);
+
+    // Snapshot filter params
+    for (int i = 0; i < Bus::MAX_FILTERS; i++) {
+        temp.filterParams[i].enabled.store(srcBus->filterParams[i].enabled.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        temp.filterParams[i].type.store(srcBus->filterParams[i].type.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        temp.filterParams[i].frequency.store(srcBus->filterParams[i].frequency.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        temp.filterParams[i].Q.store(srcBus->filterParams[i].Q.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        temp.filterParams[i].gainDB.store(srcBus->filterParams[i].gainDB.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        temp.filterParams[i].version.store(1, std::memory_order_relaxed);
+    }
+
+    // Snapshot delay params
+    temp.delayParams.enabled.store(srcBus->delayParams.enabled.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    temp.delayParams.time.store(srcBus->delayParams.time.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    temp.delayParams.feedback.store(srcBus->delayParams.feedback.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    temp.delayParams.mix.store(srcBus->delayParams.mix.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    temp.delayParams.version.store(1, std::memory_order_relaxed);
+
+    // Snapshot compressor params
+    temp.compressorParams.enabled.store(srcBus->compressorParams.enabled.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    temp.compressorParams.threshold.store(srcBus->compressorParams.threshold.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    temp.compressorParams.ratio.store(srcBus->compressorParams.ratio.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    temp.compressorParams.attackMs.store(srcBus->compressorParams.attackMs.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    temp.compressorParams.releaseMs.store(srcBus->compressorParams.releaseMs.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    temp.compressorParams.version.store(1, std::memory_order_relaxed);
+
+    // Snapshot reverb params
+    temp.reverbParams.enabled.store(srcBus->reverbParams.enabled.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    temp.reverbParams.roomSize.store(srcBus->reverbParams.roomSize.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    temp.reverbParams.damping.store(srcBus->reverbParams.damping.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    temp.reverbParams.mix.store(srcBus->reverbParams.mix.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    temp.reverbParams.version.store(1, std::memory_order_relaxed);
+
+    // Snapshot chorus params
+    temp.chorusParams.enabled.store(srcBus->chorusParams.enabled.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    temp.chorusParams.rate.store(srcBus->chorusParams.rate.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    temp.chorusParams.depth.store(srcBus->chorusParams.depth.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    temp.chorusParams.mix.store(srcBus->chorusParams.mix.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    temp.chorusParams.feedback.store(srcBus->chorusParams.feedback.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    temp.chorusParams.baseDelay.store(srcBus->chorusParams.baseDelay.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    temp.chorusParams.version.store(1, std::memory_order_relaxed);
+
+    // Clone effect order
+    for (int i = 0; i < Bus::NUM_EFFECT_SLOTS; i++) {
+        temp.effectOrder[i].store(srcBus->effectOrder[i].load(std::memory_order_relaxed), std::memory_order_relaxed);
+    }
+    temp.effectOrderVersion.store(1, std::memory_order_relaxed);
+
+    // Add extra samples for effect tails (delay, reverb)
+    float delaySec = temp.delayParams.time.load(std::memory_order_relaxed);
+    float delayFb = temp.delayParams.feedback.load(std::memory_order_relaxed);
+    bool hasDelay = temp.delayParams.enabled.load(std::memory_order_relaxed);
+    bool hasReverb = temp.reverbParams.enabled.load(std::memory_order_relaxed);
+    int tailSamples = 0;
+    if (hasDelay) {
+        // Approximate delay tail based on feedback decay
+        int repeats = delayFb > 0.01f ? static_cast<int>(std::log(0.001f) / std::log(delayFb)) : 0;
+        tailSamples = std::max(tailSamples, static_cast<int>(delaySec * sampleRate_) * repeats);
+    }
+    if (hasReverb) {
+        tailSamples = std::max(tailSamples, sampleRate_ * 3); // ~3s reverb tail
+    }
+    tailSamples = std::min(tailSamples, sampleRate_ * 10); // cap at 10s
+
+    int totalSamples = numSamples + tailSamples;
+    std::vector<float> output(totalSamples);
+
+    for (int pos = 0; pos < totalSamples; pos += CHUNK) {
+        int frames = std::min(CHUNK, totalSamples - pos);
+
+        // Fill temp bus buffer: mono → stereo (zero-padded for tail)
+        for (int i = 0; i < frames; i++) {
+            int srcIdx = pos + i;
+            float s = (srcIdx < numSamples) ? monoInput[srcIdx] : 0.0f;
+            temp.buffer[i * 2]     = s;
+            temp.buffer[i * 2 + 1] = s;
+        }
+
+        processBusEffects(temp, frames);
+
+        // Mono mixdown to output
+        for (int i = 0; i < frames; i++) {
+            output[pos + i] = (temp.buffer[i * 2] + temp.buffer[i * 2 + 1]) * 0.5f;
+        }
+    }
+
+    // Trim trailing silence
+    int end = totalSamples - 1;
+    while (end > numSamples && std::abs(output[end]) < 0.0001f) end--;
+    end = std::max(end, numSamples - 1);
+    output.resize(end + 1);
+
+    return output;
+}
+
 void Engine::setBusGain(int busId, float gain)
 {
     if (auto* b = findBus(busId))

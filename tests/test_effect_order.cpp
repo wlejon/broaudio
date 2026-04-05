@@ -24,13 +24,14 @@ TEST(default_cache_matches_order) {
     ASSERT_EQ(bus.effectOrderCache[3], 3);
     ASSERT_EQ(bus.effectOrderCache[4], 4);
     ASSERT_EQ(bus.effectOrderCache[5], 5);
+    ASSERT_EQ(bus.effectOrderCache[6], 6);
     PASS();
 }
 
 // --- EffectSlot enum ---
 
-TEST(effect_slot_count_is_six) {
-    ASSERT_EQ(static_cast<int>(EffectSlot::Count), 6);
+TEST(effect_slot_count_is_seven) {
+    ASSERT_EQ(static_cast<int>(EffectSlot::Count), 7);
     PASS();
 }
 
@@ -43,13 +44,14 @@ TEST(num_effect_slots_matches_count) {
 
 TEST(set_custom_order) {
     Bus bus;
-    // Reverb first, then filter, delay, compressor, chorus, eq
+    // Reverb first, then filter, delay, compressor, chorus, eq, distortion
     bus.effectOrder[0].store(static_cast<uint8_t>(EffectSlot::Reverb));
     bus.effectOrder[1].store(static_cast<uint8_t>(EffectSlot::Filter));
     bus.effectOrder[2].store(static_cast<uint8_t>(EffectSlot::Delay));
     bus.effectOrder[3].store(static_cast<uint8_t>(EffectSlot::Compressor));
     bus.effectOrder[4].store(static_cast<uint8_t>(EffectSlot::Chorus));
     bus.effectOrder[5].store(static_cast<uint8_t>(EffectSlot::Equalizer));
+    bus.effectOrder[6].store(static_cast<uint8_t>(EffectSlot::Distortion));
     bus.effectOrderVersion.fetch_add(1);
 
     ASSERT_EQ(bus.effectOrder[0].load(), static_cast<uint8_t>(EffectSlot::Reverb));

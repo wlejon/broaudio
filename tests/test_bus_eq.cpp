@@ -97,14 +97,14 @@ TEST(eq_disabled_no_change) {
 
 TEST(effect_slot_equalizer_exists) {
     ASSERT_EQ(static_cast<int>(EffectSlot::Equalizer), 5);
-    ASSERT_EQ(static_cast<int>(EffectSlot::Count), 6);
+    ASSERT_EQ(static_cast<int>(EffectSlot::Count), 7);
     PASS();
 }
 
 TEST(bus_default_order_includes_eq) {
     Bus bus;
     ASSERT_EQ(bus.effectOrder[5].load(), static_cast<uint8_t>(EffectSlot::Equalizer));
-    ASSERT_EQ(Bus::NUM_EFFECT_SLOTS, 6);
+    ASSERT_EQ(Bus::NUM_EFFECT_SLOTS, 7);
     PASS();
 }
 

@@ -38,6 +38,7 @@ add_library(broaudio STATIC
     src/dsp/chorus.cpp
     src/dsp/compressor.cpp
     src/dsp/delay.cpp
+    src/dsp/distortion.cpp
     src/dsp/equalizer.cpp
     src/dsp/fft.cpp
     src/dsp/limiter.cpp

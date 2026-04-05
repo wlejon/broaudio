@@ -6,6 +6,7 @@
 #include "broaudio/dsp/chorus.h"
 #include "broaudio/dsp/compressor.h"
 #include "broaudio/dsp/delay.h"
+#include "broaudio/dsp/distortion.h"
 #include "broaudio/dsp/equalizer.h"
 #include "broaudio/dsp/reverb.h"
 
@@ -39,6 +40,7 @@ struct Bus {
     CompressorParams compressorParams;
     ReverbParams reverbParams;
     ChorusParams chorusParams;
+    DistortionParams distortionParams;
     EqualizerParams eqParams;
 
     // Effect processing order (main thread writes, audio thread reads)
@@ -48,7 +50,8 @@ struct Bus {
         static_cast<uint8_t>(EffectSlot::Compressor),
         static_cast<uint8_t>(EffectSlot::Chorus),
         static_cast<uint8_t>(EffectSlot::Reverb),
-        static_cast<uint8_t>(EffectSlot::Equalizer)
+        static_cast<uint8_t>(EffectSlot::Equalizer),
+        static_cast<uint8_t>(EffectSlot::Distortion)
     };
     std::atomic<uint32_t> effectOrderVersion{0};
 
@@ -64,9 +67,11 @@ struct Bus {
     uint32_t reverbVersion = 0;
     Chorus chorus;
     uint32_t chorusVersion = 0;
+    Distortion distortion;
+    uint32_t distortionVersion = 0;
     Equalizer equalizer;
     uint32_t eqVersion = 0;
-    uint8_t effectOrderCache[NUM_EFFECT_SLOTS] = {0, 1, 2, 3, 4, 5};
+    uint8_t effectOrderCache[NUM_EFFECT_SLOTS] = {0, 1, 2, 3, 4, 5, 6};
     uint32_t effectOrderVersionSeen = 0;
 
     // Metering (audio thread writes, main thread reads)

@@ -24,6 +24,7 @@ enum class EffectSlot : uint8_t {
     Chorus,
     Reverb,
     Equalizer,
+    Distortion,
     Count
 };
 

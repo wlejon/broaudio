@@ -114,6 +114,15 @@ public:
     // Per-bus effect chain order
     void setBusEffectOrder(int busId, const EffectSlot* order, int count);
 
+    // Per-bus distortion/waveshaper control
+    void setBusDistortionEnabled(int busId, bool enabled);
+    void setBusDistortionMode(int busId, DistortionMode mode);
+    void setBusDistortionDrive(int busId, float drive);
+    void setBusDistortionMix(int busId, float mix);
+    void setBusDistortionOutputGain(int busId, float gain);
+    void setBusDistortionCrushBits(int busId, float bits);
+    void setBusDistortionCrushRate(int busId, float rate);
+
     // Per-bus chorus/flanger control
     void setBusChorusEnabled(int busId, bool enabled);
     void setBusChorusRate(int busId, float hz);
@@ -271,6 +280,7 @@ private:
     void processBusDelay(Bus& bus, float* buf, int numFrames);
     void processBusCompressor(Bus& bus, float* buf, int numFrames);
     void processBusChorus(Bus& bus, float* buf, int numFrames);
+    void processBusDistortion(Bus& bus, float* buf, int numFrames);
     void processBusReverb(Bus& bus, float* buf, int numFrames);
     void processBusEqualizer(Bus& bus, float* buf, int numFrames);
     void updateBusMeters(Bus& bus, int numFrames);

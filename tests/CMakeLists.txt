@@ -15,6 +15,7 @@ set(BROAUDIO_TESTS
     test_delay
     test_reverb
     test_chorus
+    test_distortion
     test_ring_buffer
     test_voice_allocator
     test_effect_order

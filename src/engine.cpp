@@ -202,6 +202,16 @@ std::vector<float> Engine::processEffectsOffline(int busId, const float* monoInp
     temp.chorusParams.baseDelay.store(srcBus->chorusParams.baseDelay.load(std::memory_order_relaxed), std::memory_order_relaxed);
     temp.chorusParams.version.store(1, std::memory_order_relaxed);
 
+    // Snapshot distortion params
+    temp.distortionParams.enabled.store(srcBus->distortionParams.enabled.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    temp.distortionParams.mode.store(srcBus->distortionParams.mode.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    temp.distortionParams.drive.store(srcBus->distortionParams.drive.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    temp.distortionParams.mix.store(srcBus->distortionParams.mix.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    temp.distortionParams.outputGain.store(srcBus->distortionParams.outputGain.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    temp.distortionParams.crushBits.store(srcBus->distortionParams.crushBits.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    temp.distortionParams.crushRate.store(srcBus->distortionParams.crushRate.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    temp.distortionParams.version.store(1, std::memory_order_relaxed);
+
     // Snapshot EQ params
     temp.eqParams.enabled.store(srcBus->eqParams.enabled.load(std::memory_order_relaxed), std::memory_order_relaxed);
     temp.eqParams.masterGain.store(srcBus->eqParams.masterGain.load(std::memory_order_relaxed), std::memory_order_relaxed);
@@ -504,6 +514,64 @@ void Engine::setBusChorusBaseDelay(int busId, float seconds)
     if (!bus) return;
     bus->chorusParams.baseDelay.store(std::clamp(seconds, 0.001f, 0.05f), std::memory_order_relaxed);
     bus->chorusParams.version.fetch_add(1, std::memory_order_release);
+}
+
+// --- Per-bus distortion/waveshaper control ---
+
+void Engine::setBusDistortionEnabled(int busId, bool enabled)
+{
+    auto* bus = findBus(busId);
+    if (!bus) return;
+    bus->distortionParams.enabled.store(enabled, std::memory_order_relaxed);
+    bus->distortionParams.version.fetch_add(1, std::memory_order_release);
+}
+
+void Engine::setBusDistortionMode(int busId, DistortionMode mode)
+{
+    auto* bus = findBus(busId);
+    if (!bus) return;
+    bus->distortionParams.mode.store(static_cast<int>(mode), std::memory_order_relaxed);
+    bus->distortionParams.version.fetch_add(1, std::memory_order_release);
+}
+
+void Engine::setBusDistortionDrive(int busId, float drive)
+{
+    auto* bus = findBus(busId);
+    if (!bus) return;
+    bus->distortionParams.drive.store(std::clamp(drive, 0.1f, 100.0f), std::memory_order_relaxed);
+    bus->distortionParams.version.fetch_add(1, std::memory_order_release);
+}
+
+void Engine::setBusDistortionMix(int busId, float mix)
+{
+    auto* bus = findBus(busId);
+    if (!bus) return;
+    bus->distortionParams.mix.store(std::clamp(mix, 0.0f, 1.0f), std::memory_order_relaxed);
+    bus->distortionParams.version.fetch_add(1, std::memory_order_release);
+}
+
+void Engine::setBusDistortionOutputGain(int busId, float gain)
+{
+    auto* bus = findBus(busId);
+    if (!bus) return;
+    bus->distortionParams.outputGain.store(std::clamp(gain, 0.0f, 2.0f), std::memory_order_relaxed);
+    bus->distortionParams.version.fetch_add(1, std::memory_order_release);
+}
+
+void Engine::setBusDistortionCrushBits(int busId, float bits)
+{
+    auto* bus = findBus(busId);
+    if (!bus) return;
+    bus->distortionParams.crushBits.store(std::clamp(bits, 1.0f, 16.0f), std::memory_order_relaxed);
+    bus->distortionParams.version.fetch_add(1, std::memory_order_release);
+}
+
+void Engine::setBusDistortionCrushRate(int busId, float rate)
+{
+    auto* bus = findBus(busId);
+    if (!bus) return;
+    bus->distortionParams.crushRate.store(std::clamp(rate, 0.01f, 1.0f), std::memory_order_relaxed);
+    bus->distortionParams.version.fetch_add(1, std::memory_order_release);
 }
 
 // --- Per-bus equalizer control ---
@@ -1409,6 +1477,24 @@ void Engine::processBusEqualizer(Bus& bus, float* buf, int numFrames)
     }
 }
 
+void Engine::processBusDistortion(Bus& bus, float* buf, int numFrames)
+{
+    uint32_t ver = bus.distortionParams.version.load(std::memory_order_acquire);
+    if (ver != bus.distortionVersion) {
+        bus.distortionVersion = ver;
+        bus.distortion.enabled = bus.distortionParams.enabled.load(std::memory_order_relaxed);
+        bus.distortion.mode = static_cast<DistortionMode>(bus.distortionParams.mode.load(std::memory_order_relaxed));
+        bus.distortion.drive = bus.distortionParams.drive.load(std::memory_order_relaxed);
+        bus.distortion.mix = bus.distortionParams.mix.load(std::memory_order_relaxed);
+        bus.distortion.outputGain = bus.distortionParams.outputGain.load(std::memory_order_relaxed);
+        bus.distortion.crushBits = bus.distortionParams.crushBits.load(std::memory_order_relaxed);
+        bus.distortion.crushRate = bus.distortionParams.crushRate.load(std::memory_order_relaxed);
+    }
+    if (bus.distortion.enabled) {
+        bus.distortion.processStereo(buf, numFrames);
+    }
+}
+
 void Engine::updateBusMeters(Bus& bus, int numFrames)
 {
     float* buf = bus.buffer.data();
@@ -1448,6 +1534,7 @@ void Engine::processBusEffects(Bus& bus, int numFrames)
             case EffectSlot::Chorus:     processBusChorus(bus, buf, numFrames); break;
             case EffectSlot::Reverb:     processBusReverb(bus, buf, numFrames); break;
             case EffectSlot::Equalizer:  processBusEqualizer(bus, buf, numFrames); break;
+            case EffectSlot::Distortion: processBusDistortion(bus, buf, numFrames); break;
             default: break;
         }
     }

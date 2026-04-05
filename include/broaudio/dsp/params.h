@@ -50,6 +50,24 @@ struct ChorusParams {
     std::atomic<uint32_t> version{0};
 };
 
+enum class DistortionMode : uint8_t {
+    SoftClip,   // tanh saturation
+    HardClip,   // flat clamp
+    Foldback,   // wave folding
+    Bitcrush,   // bit depth + sample rate reduction
+};
+
+struct DistortionParams {
+    std::atomic<bool> enabled{false};
+    std::atomic<int> mode{static_cast<int>(DistortionMode::SoftClip)};
+    std::atomic<float> drive{1.0f};     // 1.0 = unity, higher = more distortion
+    std::atomic<float> mix{1.0f};       // wet/dry (0 = dry, 1 = full wet)
+    std::atomic<float> outputGain{1.0f}; // post-distortion gain compensation
+    std::atomic<float> crushBits{16.0f}; // bit depth for Bitcrush mode (1-16)
+    std::atomic<float> crushRate{1.0f};  // sample rate factor for Bitcrush (0.01-1.0)
+    std::atomic<uint32_t> version{0};
+};
+
 struct EqualizerParams {
     std::atomic<bool> enabled{false};
     std::atomic<float> bandGains[7] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};

@@ -10,7 +10,6 @@ static constexpr int SR = 44100;
 TEST(limiter_transparent_below_threshold) {
     Limiter lim(SR, 1);
     lim.setThreshold(-6.0f);
-    lim.setRatio(10.0f);
 
     // Signal at -20 dB (~0.1 amplitude)
     int n = 5000;
@@ -27,19 +26,42 @@ TEST(limiter_transparent_below_threshold) {
 TEST(limiter_reduces_loud_signal) {
     Limiter lim(SR, 1);
     lim.setThreshold(-6.0f);  // ~0.5 amplitude
-    lim.setRatio(10.0f);
 
     // Signal at 0 dB (amplitude 1.0) — well above threshold
     int n = 10000;
     std::vector<float> buf(n, 1.0f);
     lim.process(buf.data(), n);
 
-    // Output should be limited below 1.0
+    // Output should be limited to threshold (~0.5)
     float peak = 0.0f;
     for (int i = n / 2; i < n; i++) {
         if (std::fabs(buf[i]) > peak) peak = std::fabs(buf[i]);
     }
-    ASSERT_LT(peak, 0.85f);
+    ASSERT_LT(peak, 0.6f);
+    PASS();
+}
+
+TEST(limiter_brickwall_never_exceeds_threshold) {
+    Limiter lim(SR, 2);
+    lim.setThreshold(-3.0f);  // ~0.708 amplitude
+
+    float threshLin = std::pow(10.0f, -3.0f / 20.0f);
+
+    // Feed a very hot signal: +12 dB (amplitude 4.0)
+    int frames = 10000;
+    std::vector<float> buf(frames * 2);
+    for (int i = 0; i < frames * 2; i++) buf[i] = 4.0f;
+
+    lim.process(buf.data(), frames);
+
+    // After the lookahead settles, output must never exceed threshold.
+    // Allow a tiny margin for the first few samples during lookahead fill.
+    float peak = 0.0f;
+    for (int i = frames / 2; i < frames; i++) {
+        float a = std::max(std::fabs(buf[i * 2]), std::fabs(buf[i * 2 + 1]));
+        if (a > peak) peak = a;
+    }
+    ASSERT_LT(peak, threshLin + 0.01f);
     PASS();
 }
 
@@ -59,7 +81,6 @@ TEST(limiter_disabled_passes_through) {
 TEST(limiter_stereo_processes_both_channels) {
     Limiter lim(SR, 2);
     lim.setThreshold(-6.0f);
-    lim.setRatio(10.0f);
 
     int frames = 5000;
     std::vector<float> buf(frames * 2);
@@ -73,8 +94,9 @@ TEST(limiter_stereo_processes_both_channels) {
         if (std::fabs(buf[i * 2]) > peakL) peakL = std::fabs(buf[i * 2]);
         if (std::fabs(buf[i * 2 + 1]) > peakR) peakR = std::fabs(buf[i * 2 + 1]);
     }
-    ASSERT_LT(peakL, 0.9f);
-    ASSERT_LT(peakR, 0.9f);
+    float thresh = std::pow(10.0f, -6.0f / 20.0f);
+    ASSERT_LT(peakL, thresh + 0.01f);
+    ASSERT_LT(peakR, thresh + 0.01f);
     PASS();
 }
 

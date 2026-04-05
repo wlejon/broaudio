@@ -7,57 +7,92 @@ namespace broaudio {
 Limiter::Limiter(int sampleRate, int channels)
     : sampleRate_(sampleRate), channels_(channels)
 {
-    updateCoefficients();
-    updateDelayBuffer();
+    rebuildLookahead();
+}
+
+void Limiter::setLookAhead(float lookAheadMs)
+{
+    lookAheadMs_ = std::max(0.1f, lookAheadMs);
+    rebuildLookahead();
+}
+
+void Limiter::rebuildLookahead()
+{
+    size_t frames = static_cast<size_t>(
+        std::max(1.0f, lookAheadMs_ * 0.001f * static_cast<float>(sampleRate_)));
+
+    delayLen_ = frames * channels_;
+    delayBuf_.assign(delayLen_, 0.0f);
+    delayPos_ = 0;
+
+    peakLen_ = frames;
+    peakBuf_.assign(peakLen_, 0.0f);
+    peakPos_ = 0;
+
+    releaseCoeff_ = std::exp(-1.0f / (releaseMs_ * 0.001f * static_cast<float>(sampleRate_)));
+    envelope_ = 1.0f;
 }
 
 void Limiter::reset()
 {
-    envelope_ = 0.0f;
-    std::fill(delayBuffer_.begin(), delayBuffer_.end(), 0.0f);
-    delayWritePos_ = 0;
-    delayReadPos_ = 0;
-}
-
-void Limiter::updateCoefficients()
-{
-    attackCoeff_ = std::exp(-1.0f / (attack_ * 0.001f * sampleRate_));
-    releaseCoeff_ = std::exp(-1.0f / (release_ * 0.001f * sampleRate_));
-}
-
-void Limiter::updateDelayBuffer()
-{
-    delayLength_ = static_cast<size_t>(std::max(lookAhead_, 0.1f) * 0.001f * sampleRate_ * channels_);
-    delayBuffer_.resize(delayLength_ + channels_, 0.0f);
-    delayReadPos_ = (delayWritePos_ + channels_) % delayLength_;
+    std::fill(delayBuf_.begin(), delayBuf_.end(), 0.0f);
+    std::fill(peakBuf_.begin(), peakBuf_.end(), 0.0f);
+    delayPos_ = 0;
+    peakPos_ = 0;
+    envelope_ = 1.0f;
 }
 
 void Limiter::process(float* buffer, size_t frames)
 {
     if (!enabled_) return;
-    updateCoefficients();
 
-    for (size_t i = 0; i < frames * channels_; ++i) {
-        // Compute envelope from the incoming (non-delayed) sample
-        float incomingDb = 20.0f * std::log10(std::max(std::abs(buffer[i]), 1e-6f));
-        float gainReduction = 0.0f;
-        if (incomingDb > threshold_) {
-            float excess = incomingDb - threshold_;
-            gainReduction = excess * (1.0f - 1.0f / ratio_);
+    float threshold = thresholdLin_;
+    float relCoeff = std::exp(-1.0f / (releaseMs_ * 0.001f * static_cast<float>(sampleRate_)));
+
+    for (size_t f = 0; f < frames; f++) {
+        // Find the peak of the current input frame (across channels)
+        float framePeak = 0.0f;
+        for (int ch = 0; ch < channels_; ch++) {
+            float a = std::fabs(buffer[f * channels_ + ch]);
+            if (a > framePeak) framePeak = a;
         }
-        if (gainReduction > envelope_)
-            envelope_ = gainReduction + (envelope_ - gainReduction) * attackCoeff_;
-        else
-            envelope_ = gainReduction + (envelope_ - gainReduction) * releaseCoeff_;
 
-        float gain = std::pow(10.0f, -envelope_ / 20.0f);
+        // Write peak into the circular lookahead peak buffer
+        peakBuf_[peakPos_] = framePeak;
+        peakPos_ = (peakPos_ + 1) % peakLen_;
 
-        // Write incoming sample into delay line, read delayed sample out
-        delayBuffer_[delayWritePos_] = buffer[i];
-        delayWritePos_ = (delayWritePos_ + 1) % delayLength_;
+        // Find the maximum peak across the entire lookahead window.
+        // This lets us know the worst-case level that's coming and
+        // pre-apply enough gain reduction before it arrives.
+        float maxPeak = 0.0f;
+        for (size_t i = 0; i < peakLen_; i++) {
+            if (peakBuf_[i] > maxPeak) maxPeak = peakBuf_[i];
+        }
 
-        buffer[i] = delayBuffer_[delayReadPos_] * gain;
-        delayReadPos_ = (delayReadPos_ + 1) % delayLength_;
+        // Compute the gain needed to keep maxPeak at or below threshold
+        float targetGain = 1.0f;
+        if (maxPeak > threshold) {
+            targetGain = threshold / maxPeak;
+        }
+
+        // Envelope: instant attack (grab new minimum immediately),
+        // smooth release (let gain recover gradually)
+        if (targetGain < envelope_) {
+            envelope_ = targetGain;  // instant attack
+        } else {
+            envelope_ = targetGain + (envelope_ - targetGain) * relCoeff;
+        }
+
+        // Write incoming samples into delay line, read delayed samples out
+        for (int ch = 0; ch < channels_; ch++) {
+            size_t idx = f * channels_ + ch;
+            size_t dIdx = delayPos_ + ch;
+
+            float delayed = delayBuf_[dIdx];
+            delayBuf_[dIdx] = buffer[idx];
+            buffer[idx] = delayed * envelope_;
+        }
+        delayPos_ = (delayPos_ + channels_) % delayLen_;
     }
 }
 

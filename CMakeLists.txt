@@ -77,3 +77,10 @@ endif()
 if(BROAUDIO_MIDI AND TARGET libremidi::libremidi)
     target_link_libraries(broaudio PUBLIC libremidi::libremidi)
 endif()
+
+# Tests
+option(BROAUDIO_TESTS "Build broaudio tests" ON)
+if(BROAUDIO_TESTS AND CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    enable_testing()
+    add_subdirectory(tests)
+endif()

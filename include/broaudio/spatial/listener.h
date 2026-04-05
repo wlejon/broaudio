@@ -1,6 +1,7 @@
 #pragma once
 
 #include "broaudio/types.h"
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 

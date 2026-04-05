@@ -45,12 +45,17 @@ public:
     void setFrequency(int id, float freq);
     void setGain(int id, float gain);
     void setVoicePan(int id, float pan);
+    void setVoicePitchBend(int id, float semitones);
     void setVoiceWavetable(int id, std::shared_ptr<const WavetableBank> bank);
     void setAttackTime(int id, float seconds);
     void setDecayTime(int id, float seconds);
     void setSustainLevel(int id, float level);
     void setReleaseTime(int id, float seconds);
     void setVoiceNote(int id, int noteNumber, float velocity);
+    void setVoiceFilterEnabled(int id, bool enabled);
+    void setVoiceFilterType(int id, BiquadFilter::Type type);
+    void setVoiceFilterFrequency(int id, float freq);
+    void setVoiceFilterQ(int id, float q);
     void startVoice(int id, double when);
     void stopVoice(int id, double when);
 
@@ -108,10 +113,21 @@ public:
     void setVoiceBus(int voiceId, int busId);
     void setPlaybackBus(int instanceId, int busId);
 
+    // Aux sends (voice, clip, and bus)
+    void setVoiceSend(int voiceId, int sendBusId, float amount);
+    void setPlaybackSend(int instanceId, int sendBusId, float amount);
+    void setBusSend(int busId, int sendBusId, float amount);
+
     // --- Master output ---
 
     void setMasterGain(float gain);
     float masterGain() const { return masterGain_.load(std::memory_order_relaxed); }
+
+    // --- Master limiter ---
+
+    void setLimiterEnabled(bool enabled);
+    void setLimiterThreshold(float thresholdDb);
+    void setLimiterRelease(float releaseMs);
 
     // --- Filters (master bus shortcuts) ---
 
@@ -186,6 +202,24 @@ public:
     void setListenerOrientation(float fx, float fy, float fz, float ux, float uy, float uz);
     const Listener& listener() const { return listener_; }
 
+    // --- Spatial sources (voice) ---
+
+    void setVoiceSpatialEnabled(int voiceId, bool enabled);
+    void setVoiceSpatialPosition(int voiceId, float x, float y, float z);
+    void setVoiceSpatialRefDistance(int voiceId, float dist);
+    void setVoiceSpatialMaxDistance(int voiceId, float dist);
+    void setVoiceSpatialRolloff(int voiceId, float rolloff);
+    void setVoiceSpatialDistanceModel(int voiceId, DistanceModel model);
+
+    // --- Spatial sources (clip playback) ---
+
+    void setPlaybackSpatialEnabled(int instanceId, bool enabled);
+    void setPlaybackSpatialPosition(int instanceId, float x, float y, float z);
+    void setPlaybackSpatialRefDistance(int instanceId, float dist);
+    void setPlaybackSpatialMaxDistance(int instanceId, float dist);
+    void setPlaybackSpatialRolloff(int instanceId, float rolloff);
+    void setPlaybackSpatialDistanceModel(int instanceId, DistanceModel model);
+
 private:
     // Type aliases (must precede method declarations that use them)
     using VoiceList = std::vector<std::shared_ptr<Voice>>;
@@ -252,6 +286,7 @@ private:
     uint64_t micPlaybackReadPos_ = 0;
 
     std::atomic<float> masterGain_{0.5f};
+    Limiter masterLimiter_{44100, 2};
     std::atomic<bool> micMuted_{true};
     std::atomic<float> micMonitorGain_{0.5f};
 

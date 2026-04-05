@@ -27,6 +27,8 @@ struct Bus {
     std::atomic<float> pan{0.0f};
     std::atomic<bool> muted{false};
     std::atomic<int> parentId{-1};   // -1 = master (no parent), 0+ = parent bus id
+    std::atomic<int> sendBusId{-1};  // aux send target (-1 = none)
+    std::atomic<float> sendAmount{0.0f}; // aux send level (0-1, post-fader)
 
     // Per-bus effect parameters
     FilterParams filterParams[MAX_FILTERS];

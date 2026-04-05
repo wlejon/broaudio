@@ -1,5 +1,6 @@
 #pragma once
 
+#include "broaudio/spatial/listener.h"
 #include <atomic>
 #include <cstdint>
 #include <vector>
@@ -20,10 +21,15 @@ struct ClipPlayback {
     std::atomic<float> gain{1.0f};
     std::atomic<float> pan{0.0f};
     std::atomic<int> busId{0};           // target mix bus (0 = master)
+    std::atomic<int> sendBusId{-1};      // aux send target (-1 = none)
+    std::atomic<float> sendAmount{0.0f}; // aux send level (0-1)
     std::atomic<float> rate{1.0f};
     std::atomic<bool> playing{false};
     std::atomic<bool> looping{false};
     std::atomic<bool> active{true};
+
+    // Spatial source
+    SpatialSource spatial;
 };
 
 } // namespace broaudio

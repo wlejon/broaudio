@@ -64,7 +64,8 @@ target_include_directories(broaudio PUBLIC include)
 if(MSVC)
     target_compile_options(broaudio PRIVATE /MP /permissive- /utf-8)
     # Work around MSVC ICE in Release with /O2 on engine.cpp
-    set_source_files_properties(src/engine.cpp PROPERTIES COMPILE_FLAGS "/O1")
+    set_source_files_properties(src/engine.cpp PROPERTIES
+        COMPILE_FLAGS "$<$<NOT:$<CONFIG:Debug>>:/O1>")
 endif()
 
 if(TARGET SDL3::SDL3)

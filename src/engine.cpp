@@ -405,6 +405,30 @@ void Engine::setPlaybackBus(int instanceId, int busId)
         pb->busId.store(busId, std::memory_order_relaxed);
 }
 
+void Engine::setVoiceSend(int voiceId, int sendBusId, float amount)
+{
+    if (auto* v = findVoice(voiceId)) {
+        v->sendBusId.store(sendBusId, std::memory_order_relaxed);
+        v->sendAmount.store(std::clamp(amount, 0.0f, 1.0f), std::memory_order_relaxed);
+    }
+}
+
+void Engine::setPlaybackSend(int instanceId, int sendBusId, float amount)
+{
+    if (auto* pb = findPlayback(instanceId)) {
+        pb->sendBusId.store(sendBusId, std::memory_order_relaxed);
+        pb->sendAmount.store(std::clamp(amount, 0.0f, 1.0f), std::memory_order_relaxed);
+    }
+}
+
+void Engine::setBusSend(int busId, int sendBusId, float amount)
+{
+    if (auto* b = findBus(busId)) {
+        b->sendBusId.store(sendBusId, std::memory_order_relaxed);
+        b->sendAmount.store(std::clamp(amount, 0.0f, 1.0f), std::memory_order_relaxed);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Master bus shortcuts — delegate to per-bus methods
 // ---------------------------------------------------------------------------
@@ -499,9 +523,30 @@ void Engine::setVoicePan(int id, float pan)
         v->pan.store(std::clamp(pan, -1.0f, 1.0f), std::memory_order_relaxed);
 }
 
+void Engine::setVoicePitchBend(int id, float semitones)
+{
+    if (auto* v = findVoice(id))
+        v->pitchBend.store(semitones, std::memory_order_relaxed);
+}
+
 void Engine::setMasterGain(float gain)
 {
     masterGain_.store(std::clamp(gain, 0.0f, 2.0f), std::memory_order_relaxed);
+}
+
+void Engine::setLimiterEnabled(bool enabled)
+{
+    masterLimiter_.setEnabled(enabled);
+}
+
+void Engine::setLimiterThreshold(float thresholdDb)
+{
+    masterLimiter_.setThreshold(thresholdDb);
+}
+
+void Engine::setLimiterRelease(float releaseMs)
+{
+    masterLimiter_.setRelease(releaseMs);
 }
 
 void Engine::setAttackTime(int id, float seconds)
@@ -531,6 +576,38 @@ void Engine::setReleaseTime(int id, float seconds)
         v->releaseCoeff.store(seconds > 0.0001f
             ? std::exp(-3.0f / (seconds * static_cast<float>(sampleRate_)))
             : 0.0f, std::memory_order_relaxed);
+}
+
+void Engine::setVoiceFilterEnabled(int id, bool enabled)
+{
+    if (auto* v = findVoice(id)) {
+        v->filterEnabled.store(enabled, std::memory_order_relaxed);
+        v->filterVersion.fetch_add(1, std::memory_order_release);
+    }
+}
+
+void Engine::setVoiceFilterType(int id, BiquadFilter::Type type)
+{
+    if (auto* v = findVoice(id)) {
+        v->filterType.store(static_cast<int>(type), std::memory_order_relaxed);
+        v->filterVersion.fetch_add(1, std::memory_order_release);
+    }
+}
+
+void Engine::setVoiceFilterFrequency(int id, float freq)
+{
+    if (auto* v = findVoice(id)) {
+        v->filterFrequency.store(std::clamp(freq, 20.0f, 20000.0f), std::memory_order_relaxed);
+        v->filterVersion.fetch_add(1, std::memory_order_release);
+    }
+}
+
+void Engine::setVoiceFilterQ(int id, float q)
+{
+    if (auto* v = findVoice(id)) {
+        v->filterQ.store(std::clamp(q, 0.1f, 30.0f), std::memory_order_relaxed);
+        v->filterVersion.fetch_add(1, std::memory_order_release);
+    }
 }
 
 void Engine::setVoiceNote(int id, int noteNumber, float velocity)
@@ -577,6 +654,33 @@ void Engine::setListenerOrientation(float fx, float fy, float fz,
     listener_.upY.store(uy, std::memory_order_relaxed);
     listener_.upZ.store(uz, std::memory_order_relaxed);
 }
+
+// --- Spatial sources (voice) ---
+
+static void setSpatialEnabled(SpatialSource& s, bool enabled) { s.spatialEnabled.store(enabled, std::memory_order_relaxed); }
+static void setSpatialPosition(SpatialSource& s, float x, float y, float z) {
+    s.posX.store(x, std::memory_order_relaxed);
+    s.posY.store(y, std::memory_order_relaxed);
+    s.posZ.store(z, std::memory_order_relaxed);
+}
+static void setSpatialRefDistance(SpatialSource& s, float d) { s.refDistance.store(std::max(0.001f, d), std::memory_order_relaxed); }
+static void setSpatialMaxDistance(SpatialSource& s, float d) { s.maxDistance.store(std::max(0.001f, d), std::memory_order_relaxed); }
+static void setSpatialRolloff(SpatialSource& s, float r) { s.rolloff.store(std::max(0.0f, r), std::memory_order_relaxed); }
+static void setSpatialDistanceModel(SpatialSource& s, DistanceModel m) { s.distanceModel.store(static_cast<int>(m), std::memory_order_relaxed); }
+
+void Engine::setVoiceSpatialEnabled(int id, bool enabled) { if (auto* v = findVoice(id)) setSpatialEnabled(v->spatial, enabled); }
+void Engine::setVoiceSpatialPosition(int id, float x, float y, float z) { if (auto* v = findVoice(id)) setSpatialPosition(v->spatial, x, y, z); }
+void Engine::setVoiceSpatialRefDistance(int id, float d) { if (auto* v = findVoice(id)) setSpatialRefDistance(v->spatial, d); }
+void Engine::setVoiceSpatialMaxDistance(int id, float d) { if (auto* v = findVoice(id)) setSpatialMaxDistance(v->spatial, d); }
+void Engine::setVoiceSpatialRolloff(int id, float r) { if (auto* v = findVoice(id)) setSpatialRolloff(v->spatial, r); }
+void Engine::setVoiceSpatialDistanceModel(int id, DistanceModel m) { if (auto* v = findVoice(id)) setSpatialDistanceModel(v->spatial, m); }
+
+void Engine::setPlaybackSpatialEnabled(int id, bool enabled) { if (auto* pb = findPlayback(id)) setSpatialEnabled(pb->spatial, enabled); }
+void Engine::setPlaybackSpatialPosition(int id, float x, float y, float z) { if (auto* pb = findPlayback(id)) setSpatialPosition(pb->spatial, x, y, z); }
+void Engine::setPlaybackSpatialRefDistance(int id, float d) { if (auto* pb = findPlayback(id)) setSpatialRefDistance(pb->spatial, d); }
+void Engine::setPlaybackSpatialMaxDistance(int id, float d) { if (auto* pb = findPlayback(id)) setSpatialMaxDistance(pb->spatial, d); }
+void Engine::setPlaybackSpatialRolloff(int id, float r) { if (auto* pb = findPlayback(id)) setSpatialRolloff(pb->spatial, r); }
+void Engine::setPlaybackSpatialDistanceModel(int id, DistanceModel m) { if (auto* pb = findPlayback(id)) setSpatialDistanceModel(pb->spatial, m); }
 
 // ---------------------------------------------------------------------------
 // Microphone capture
@@ -1112,8 +1216,28 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
             float g = pb->gain.load(std::memory_order_relaxed);
             float rate = pb->rate.load(std::memory_order_relaxed);
             bool looping = pb->looping.load(std::memory_order_relaxed);
+            float clipPan = pb->pan.load(std::memory_order_relaxed);
+
+            // Spatial override for clip playback
+            if (pb->spatial.spatialEnabled.load(std::memory_order_relaxed)) {
+                float spatialPan = 0.0f;
+                float spatialGain = computeSpatial(engine->listener_, pb->spatial, spatialPan);
+                g *= spatialGain;
+                clipPan = spatialPan;
+            }
+
             float panL, panR;
-            panGains(pb->pan.load(std::memory_order_relaxed), panL, panR);
+            panGains(clipPan, panL, panR);
+
+            // Find clip send bus buffer (if configured)
+            int clipSendId = pb->sendBusId.load(std::memory_order_relaxed);
+            float clipSendAmt = pb->sendAmount.load(std::memory_order_relaxed);
+            float* clipSendBuf = nullptr;
+            if (clipSendId >= 0 && clipSendAmt > 0.0f) {
+                for (auto& bus : *currentBuses) {
+                    if (bus->id == clipSendId) { clipSendBuf = bus->buffer.data(); break; }
+                }
+            }
 
             constexpr int FRAC_BITS = 16;
             constexpr uint64_t FRAC_MASK = (1ULL << FRAC_BITS) - 1;
@@ -1136,6 +1260,14 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
                 float sample = (s0 + frac * (s1 - s0)) * g;
                 targetBuf[i * 2]     += sample * panL;
                 targetBuf[i * 2 + 1] += sample * panR;
+
+                // Clip aux send
+                if (clipSendBuf) {
+                    float sendSample = (s0 + frac * (s1 - s0)) * g * clipSendAmt;
+                    clipSendBuf[i * 2]     += sendSample * panL;
+                    clipSendBuf[i * 2 + 1] += sendSample * panR;
+                }
+
                 pos += increment;
             }
             pb->playPos.store(pos, std::memory_order_relaxed);
@@ -1157,7 +1289,7 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
         engine->recordWritePos_.store(wp + numFrames, std::memory_order_release);
     }
 
-    // Process child buses: apply effects, then mix into parent
+    // Process child buses: apply effects, then mix into parent + send
     for (auto& bus : *currentBuses) {
         if (bus->id == MASTER_BUS_ID) continue;  // master processed last
 
@@ -1171,6 +1303,23 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
                 break;
             }
         }
+
+        // Bus-to-bus aux send (post-effects, post-fader)
+        int busSendId = bus->sendBusId.load(std::memory_order_relaxed);
+        float busSendAmt = bus->sendAmount.load(std::memory_order_relaxed);
+        if (busSendId >= 0 && busSendAmt > 0.0f) {
+            for (auto& sendTarget : *currentBuses) {
+                if (sendTarget->id == busSendId) {
+                    float busGain = bus->gain.load(std::memory_order_relaxed) * busSendAmt;
+                    float* src = bus->buffer.data();
+                    float* dst = sendTarget->buffer.data();
+                    for (int i = 0; i < numFrames * 2; i++) {
+                        dst[i] += src[i] * busGain;
+                    }
+                    break;
+                }
+            }
+        }
     }
 
     // Process master bus effects
@@ -1178,12 +1327,13 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
         engine->processBusEffects(*masterBus, numFrames);
     }
 
-    // Copy master bus to output buffer, apply master gain + soft limiter
+    // Copy master bus to output buffer, apply master gain + limiter
     if (masterBus) {
         float mg = engine->masterGain_.load(std::memory_order_relaxed);
         for (int i = 0; i < numFloats; i++) {
-            buffer[i] = softLimit(masterBus->buffer[i] * mg);
+            buffer[i] = masterBus->buffer[i] * mg;
         }
+        engine->masterLimiter_.process(buffer, static_cast<size_t>(numFrames));
     } else {
         std::memset(buffer, 0, numFloats * sizeof(float));
     }
@@ -1268,11 +1418,20 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
         if (!buf) buf = masterBuf;
         if (!buf) continue;
 
-        float freq = voice.frequency.load(std::memory_order_relaxed);
+        // Find send bus buffer (if configured)
+        int sendId = voice.sendBusId.load(std::memory_order_relaxed);
+        float baseSendAmt = voice.sendAmount.load(std::memory_order_relaxed);
+        float* sendBuf = nullptr;
+        if (sendId >= 0 && baseSendAmt > 0.0f) {
+            for (auto& bus : buses) {
+                if (bus->id == sendId) { sendBuf = bus->buffer.data(); break; }
+            }
+        }
+
+        float baseFreq = voice.frequency.load(std::memory_order_relaxed);
         float gain = VOICE_AMPLITUDE * voice.gain.load(std::memory_order_relaxed);
-        float phaseInc = freq / static_cast<float>(sampleRate_);
-        float panL, panR;
-        panGains(voice.pan.load(std::memory_order_relaxed), panL, panR);
+        float pitchBendSemitones = voice.pitchBend.load(std::memory_order_relaxed);
+        float basePan = voice.pan.load(std::memory_order_relaxed);
         float attRate = voice.attackRate.load(std::memory_order_relaxed);
         float decCoeff = voice.decayCoeff.load(std::memory_order_relaxed);
         float susLevel = voice.sustainLevel.load(std::memory_order_relaxed);
@@ -1327,6 +1486,30 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
 
             if (voice.envStage == EnvStage::Done) break;
 
+            // Run modulation matrix for this sample
+            ModValues mod;
+            modMatrix_.process(mod, voice.modState, voice.envLevel, sampleRate_);
+
+            // Apply pitch bend + mod pitch to frequency
+            float totalPitchSemitones = pitchBendSemitones + mod.pitch;
+            float freq = baseFreq * std::exp2(totalPitchSemitones / 12.0f);
+            float phaseInc = freq / static_cast<float>(sampleRate_);
+
+            // Apply mod gain and pan
+            float finalGain = gain * voice.envLevel * mod.gain;
+            float finalPan = std::clamp(basePan + mod.pan, -1.0f, 1.0f);
+
+            // Spatial override: if enabled, compute pan and attenuation from 3D position
+            if (voice.spatial.spatialEnabled.load(std::memory_order_relaxed)) {
+                float spatialPan = 0.0f;
+                float spatialGain = computeSpatial(listener_, voice.spatial, spatialPan);
+                finalGain *= spatialGain;
+                finalPan = std::clamp(spatialPan + mod.pan, -1.0f, 1.0f);
+            }
+
+            float panL, panR;
+            panGains(finalPan, panL, panR);
+
             float sample;
             if (isNoise) {
                 sample = generateNoise(wf, voice.noiseState);
@@ -1335,9 +1518,60 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
             } else {
                 sample = generateSample(wf, voice.phase, phaseInc);
             }
-            float s = sample * gain * voice.envLevel;
+
+            // Per-voice filter (modulated by mod matrix)
+            if (voice.filter.enabled) {
+                uint32_t fv = voice.filterVersion.load(std::memory_order_acquire);
+                if (fv != voice.filterVersionSeen) {
+                    voice.filterVersionSeen = fv;
+                    voice.filter.enabled = voice.filterEnabled.load(std::memory_order_relaxed);
+                    voice.filter.type = static_cast<BiquadFilter::Type>(
+                        voice.filterType.load(std::memory_order_relaxed));
+                    float baseCutoff = voice.filterFrequency.load(std::memory_order_relaxed);
+                    float baseQ = voice.filterQ.load(std::memory_order_relaxed);
+                    voice.filter.frequency = std::clamp(baseCutoff * mod.filterFreq, 20.0f, 20000.0f);
+                    voice.filter.Q = std::clamp(baseQ * mod.filterQ, 0.1f, 30.0f);
+                    voice.filter.computeCoefficients(sampleRate_);
+                } else if (mod.filterFreq != 1.0f || mod.filterQ != 1.0f) {
+                    float baseCutoff = voice.filterFrequency.load(std::memory_order_relaxed);
+                    float baseQ = voice.filterQ.load(std::memory_order_relaxed);
+                    voice.filter.frequency = std::clamp(baseCutoff * mod.filterFreq, 20.0f, 20000.0f);
+                    voice.filter.Q = std::clamp(baseQ * mod.filterQ, 0.1f, 30.0f);
+                    voice.filter.computeCoefficients(sampleRate_);
+                }
+                if (voice.filter.enabled)
+                    sample = voice.filter.process(sample, 0);
+            } else {
+                // Check if filter was just enabled
+                uint32_t fv = voice.filterVersion.load(std::memory_order_acquire);
+                if (fv != voice.filterVersionSeen) {
+                    voice.filterVersionSeen = fv;
+                    voice.filter.enabled = voice.filterEnabled.load(std::memory_order_relaxed);
+                    if (voice.filter.enabled) {
+                        voice.filter.type = static_cast<BiquadFilter::Type>(
+                            voice.filterType.load(std::memory_order_relaxed));
+                        float baseCutoff = voice.filterFrequency.load(std::memory_order_relaxed);
+                        float baseQ = voice.filterQ.load(std::memory_order_relaxed);
+                        voice.filter.frequency = std::clamp(baseCutoff * mod.filterFreq, 20.0f, 20000.0f);
+                        voice.filter.Q = std::clamp(baseQ * mod.filterQ, 0.1f, 30.0f);
+                        voice.filter.computeCoefficients(sampleRate_);
+                        voice.filter.reset();
+                        sample = voice.filter.process(sample, 0);
+                    }
+                }
+            }
+
+            float s = sample * finalGain;
             buf[i * 2]     += s * panL;
             buf[i * 2 + 1] += s * panR;
+
+            // Aux send (base amount + mod matrix delaySend)
+            if (sendBuf) {
+                float sendLevel = std::clamp(baseSendAmt + mod.delaySend, 0.0f, 1.0f);
+                float sendSample = sample * gain * voice.envLevel * sendLevel;
+                sendBuf[i * 2]     += sendSample * panL;
+                sendBuf[i * 2 + 1] += sendSample * panR;
+            }
 
             voice.phase += phaseInc;
             if (voice.phase >= 1.0f) voice.phase -= 1.0f;

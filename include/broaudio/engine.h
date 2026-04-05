@@ -195,9 +195,10 @@ public:
 
     // --- Audio Clips ---
 
-    int createClip(const float* samples, int numSamples);
+    int createClip(const float* samples, int numSamples, int channels = 1);
     void deleteClip(int clipId);
-    int getClipSampleCount(int clipId) const;
+    int getClipSampleCount(int clipId) const;   // returns frame count
+    int getClipChannels(int clipId) const;
     void getClipWaveform(int clipId, float* outMinMax, int numBins) const;
 
     // --- Clip Playback ---

@@ -994,13 +994,14 @@ ClipPlayback* Engine::findPlayback(int instanceId) const
     return nullptr;
 }
 
-int Engine::createClip(const float* samples, int numSamples)
+int Engine::createClip(const float* samples, int numSamples, int channels)
 {
-    if (numSamples <= 0 || !samples) return -1;
+    if (numSamples <= 0 || !samples || channels < 1 || channels > 2) return -1;
 
     auto clip = std::make_shared<AudioClip>();
     std::lock_guard<std::mutex> lock(mediaWriteMutex_);
     clip->id = nextClipId_++;
+    clip->channels = channels;
     clip->samples.assign(samples, samples + numSamples);
 
     int id = clip->id;
@@ -1037,7 +1038,13 @@ void Engine::deleteClip(int clipId)
 
 int Engine::getClipSampleCount(int clipId) const
 {
-    if (auto* c = findClip(clipId)) return static_cast<int>(c->samples.size());
+    if (auto* c = findClip(clipId)) return c->numFrames();
+    return 0;
+}
+
+int Engine::getClipChannels(int clipId) const
+{
+    if (auto* c = findClip(clipId)) return c->channels;
     return 0;
 }
 
@@ -1049,17 +1056,23 @@ void Engine::getClipWaveform(int clipId, float* outMinMax, int numBins) const
         return;
     }
 
-    int totalSamples = static_cast<int>(clip->samples.size());
-    float samplesPerBin = static_cast<float>(totalSamples) / static_cast<float>(numBins);
+    int totalFrames = clip->numFrames();
+    int ch = clip->channels;
+    float framesPerBin = static_cast<float>(totalFrames) / static_cast<float>(numBins);
 
     for (int b = 0; b < numBins; b++) {
-        int startIdx = static_cast<int>(b * samplesPerBin);
-        int endIdx = static_cast<int>((b + 1) * samplesPerBin);
-        endIdx = std::min(endIdx, totalSamples);
+        int startFrame = static_cast<int>(b * framesPerBin);
+        int endFrame = static_cast<int>((b + 1) * framesPerBin);
+        endFrame = std::min(endFrame, totalFrames);
 
         float minVal = 1.0f, maxVal = -1.0f;
-        for (int i = startIdx; i < endIdx; i++) {
-            float s = clip->samples[i];
+        for (int f = startFrame; f < endFrame; f++) {
+            float s;
+            if (ch == 2) {
+                s = (clip->samples[f * 2] + clip->samples[f * 2 + 1]) * 0.5f;
+            } else {
+                s = clip->samples[f];
+            }
             if (s < minVal) minVal = s;
             if (s > maxVal) maxVal = s;
         }
@@ -1150,7 +1163,7 @@ void Engine::setPlaybackRegion(int instanceId, int start, int end)
     if (auto* pb = findPlayback(instanceId)) {
         auto* clip = findClip(pb->clipId);
         if (!clip) return;
-        int maxLen = static_cast<int>(clip->samples.size());
+        int maxLen = clip->numFrames();
         int rs = std::clamp(start, 0, maxLen);
         int re = std::clamp(end, rs, maxLen);
         pb->regionStart.store(rs, std::memory_order_relaxed);
@@ -1168,7 +1181,7 @@ float Engine::getPlaybackPosition(int instanceId) const
 
     int re = pb->regionEnd.load(std::memory_order_relaxed);
     int rs = pb->regionStart.load(std::memory_order_relaxed);
-    int end = re > 0 ? re : static_cast<int>(clip->samples.size());
+    int end = re > 0 ? re : clip->numFrames();
     int len = end - rs;
     if (len <= 0) return 0.0f;
     uint64_t pos = pb->playPos.load(std::memory_order_relaxed);
@@ -1376,7 +1389,7 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
 
             int start = pb->regionStart.load(std::memory_order_relaxed);
             int end = pb->regionEnd.load(std::memory_order_relaxed);
-            end = end > 0 ? end : static_cast<int>(clip->samples.size());
+            end = end > 0 ? end : clip->numFrames();
             int len = end - start;
             if (len <= 0) continue;
 
@@ -1385,6 +1398,7 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
             float rate = pb->rate.load(std::memory_order_relaxed);
             bool looping = pb->looping.load(std::memory_order_relaxed);
             float clipPan = pb->pan.load(std::memory_order_relaxed);
+            int ch = clip->channels;
 
             // Spatial override for clip playback
             if (pb->spatial.spatialEnabled.load(std::memory_order_relaxed)) {
@@ -1421,19 +1435,39 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
                     break;
                 }
                 float frac = static_cast<float>(pos & FRAC_MASK) / (1 << FRAC_BITS);
-                float s0 = clip->samples[start + intPos];
                 int nextIdx = intPos + 1;
                 if (nextIdx >= len) nextIdx = looping ? 0 : intPos;
-                float s1 = clip->samples[start + nextIdx];
-                float sample = (s0 + frac * (s1 - s0)) * g;
-                targetBuf[i * 2]     += sample * panL;
-                targetBuf[i * 2 + 1] += sample * panR;
+
+                float outL, outR;
+                if (ch == 2) {
+                    // Stereo clip: interleaved L/R pairs
+                    int idx0 = (start + intPos) * 2;
+                    int idx1 = (start + nextIdx) * 2;
+                    float L0 = clip->samples[idx0];
+                    float R0 = clip->samples[idx0 + 1];
+                    float L1 = clip->samples[idx1];
+                    float R1 = clip->samples[idx1 + 1];
+                    float sL = (L0 + frac * (L1 - L0)) * g;
+                    float sR = (R0 + frac * (R1 - R0)) * g;
+                    // Pan acts as balance: panL/panR crossfade the stereo image
+                    outL = sL * panL + sR * (1.0f - panR);
+                    outR = sR * panR + sL * (1.0f - panL);
+                } else {
+                    // Mono clip
+                    float s0 = clip->samples[start + intPos];
+                    float s1 = clip->samples[start + nextIdx];
+                    float sample = (s0 + frac * (s1 - s0)) * g;
+                    outL = sample * panL;
+                    outR = sample * panR;
+                }
+
+                targetBuf[i * 2]     += outL;
+                targetBuf[i * 2 + 1] += outR;
 
                 // Clip aux send
                 if (clipSendBuf) {
-                    float sendSample = (s0 + frac * (s1 - s0)) * g * clipSendAmt;
-                    clipSendBuf[i * 2]     += sendSample * panL;
-                    clipSendBuf[i * 2 + 1] += sendSample * panR;
+                    clipSendBuf[i * 2]     += outL * clipSendAmt;
+                    clipSendBuf[i * 2 + 1] += outR * clipSendAmt;
                 }
 
                 pos += increment;

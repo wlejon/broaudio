@@ -9,7 +9,10 @@ namespace broaudio {
 
 struct AudioClip {
     int id = 0;
-    std::vector<float> samples;
+    int channels = 1;              // 1 = mono, 2 = stereo (interleaved)
+    std::vector<float> samples;    // length = numFrames * channels
+
+    int numFrames() const { return channels > 0 ? static_cast<int>(samples.size()) / channels : 0; }
 };
 
 struct ClipPlayback {

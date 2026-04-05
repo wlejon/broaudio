@@ -54,4 +54,28 @@ void Compressor::processStereo(float* buffer, int numFrames)
     }
 }
 
+void Compressor::processStereoWithSidechain(float* buffer, const float* sidechain, int numFrames)
+{
+    for (int i = 0; i < numFrames; i++) {
+        // Detect level from the sidechain signal instead of the input
+        float absL = std::fabs(sidechain[i * 2]);
+        float absR = std::fabs(sidechain[i * 2 + 1]);
+        float absLevel = absL > absR ? absL : absR;
+
+        if (absLevel > envelope)
+            envelope += attackCoeff * (absLevel - envelope);
+        else
+            envelope += releaseCoeff * (absLevel - envelope);
+
+        float gain = 1.0f;
+        if (envelope > threshold) {
+            float target = threshold + (envelope - threshold) / ratio;
+            gain = target / envelope;
+        }
+
+        buffer[i * 2] *= gain;
+        buffer[i * 2 + 1] *= gain;
+    }
+}
+
 } // namespace broaudio

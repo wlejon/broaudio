@@ -20,6 +20,10 @@ set(BROAUDIO_TESTS
     test_effect_order
     test_unison
     test_sequence
+    test_bus_eq
+    test_bus_metering
+    test_sidechain
+    test_scheduled_events
 )
 
 foreach(test ${BROAUDIO_TESTS})

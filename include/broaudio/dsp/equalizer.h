@@ -25,6 +25,7 @@ public:
 
     void process(float* buffer, int numSamples);
     void processStereo(float* leftBuffer, float* rightBuffer, int numSamples);
+    void processStereoInterleaved(float* buffer, int numFrames);
 
     float getMasterGain() const { return masterGain_; }
     float getBandGain(int bandIndex) const;

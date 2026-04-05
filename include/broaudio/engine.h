@@ -98,12 +98,18 @@ public:
     void setBusCompressorRatio(int busId, float ratio);
     void setBusCompressorAttack(int busId, float ms);
     void setBusCompressorRelease(int busId, float ms);
+    void setBusCompressorSidechain(int busId, int sidechainBusId);
 
     // Per-bus reverb control
     void setBusReverbEnabled(int busId, bool enabled);
     void setBusReverbRoomSize(int busId, float size);
     void setBusReverbDamping(int busId, float damping);
     void setBusReverbMix(int busId, float mix);
+
+    // Per-bus equalizer control
+    void setBusEqEnabled(int busId, bool enabled);
+    void setBusEqBandGain(int busId, int band, float gainDB);
+    void setBusEqMasterGain(int busId, float gainDB);
 
     // Per-bus effect chain order
     void setBusEffectOrder(int busId, const EffectSlot* order, int count);
@@ -115,6 +121,12 @@ public:
     void setBusChorusMix(int busId, float mix);
     void setBusChorusFeedback(int busId, float fb);
     void setBusChorusBaseDelay(int busId, float seconds);
+
+    // Per-bus metering (read from main thread, written by audio thread)
+    float getBusPeakL(int busId) const;
+    float getBusPeakR(int busId) const;
+    float getBusRmsL(int busId) const;
+    float getBusRmsR(int busId) const;
 
     // Voice/clip bus routing
     void setVoiceBus(int voiceId, int busId);
@@ -178,6 +190,13 @@ public:
     float micMonitorGain() const { return micMonitorGain_.load(std::memory_order_relaxed); }
     void setMicBus(int busId) { micBusId_.store(busId, std::memory_order_relaxed); }
     int micBus() const { return micBusId_.load(std::memory_order_relaxed); }
+
+    // --- Sample-accurate event scheduling ---
+
+    // Schedule a noteOn/noteOff to be dispatched sample-accurately in the audio callback.
+    // `when` is engine time in seconds (from currentTime()).
+    void scheduleNoteOn(int voiceId, double when);
+    void scheduleNoteOff(int voiceId, double when);
 
     // --- Offline processing ---
 
@@ -253,6 +272,8 @@ private:
     void processBusCompressor(Bus& bus, float* buf, int numFrames);
     void processBusChorus(Bus& bus, float* buf, int numFrames);
     void processBusReverb(Bus& bus, float* buf, int numFrames);
+    void processBusEqualizer(Bus& bus, float* buf, int numFrames);
+    void updateBusMeters(Bus& bus, int numFrames);
     void mixBusIntoParent(Bus& child, Bus& parent, int numFrames);
 
     static void micCallback(void* userdata, SDL_AudioStream* stream,
@@ -319,6 +340,18 @@ private:
     uint64_t recordStartPos_ = 0;
     std::atomic<bool> recording_{false};
     std::vector<float> recordOutput_;
+
+    // Sample-accurate scheduled events (main thread writes, audio thread reads)
+    struct ScheduledEvent {
+        enum class Type : uint8_t { NoteOn, NoteOff };
+        Type type;
+        int voiceId;
+        double when; // engine time in seconds
+    };
+    static constexpr int EVENT_RING_SIZE = 4096;
+    ScheduledEvent eventRing_[EVENT_RING_SIZE];
+    alignas(64) std::atomic<uint32_t> eventWrite_{0};
+    alignas(64) std::atomic<uint32_t> eventRead_{0};
 
     // Pre-allocated scratch buffers for audio callbacks (avoids heap allocs on audio thread)
     std::vector<float> outputScratch_;

@@ -28,6 +28,7 @@ struct CompressorParams {
     std::atomic<float> ratio{4.0f};
     std::atomic<float> attackMs{1.0f};
     std::atomic<float> releaseMs{100.0f};
+    std::atomic<int> sidechainBusId{-1}; // -1 = self-detect, >= 0 = use that bus's signal
     std::atomic<uint32_t> version{0};
 };
 
@@ -46,6 +47,13 @@ struct ChorusParams {
     std::atomic<float> mix{0.5f};
     std::atomic<float> feedback{0.0f};   // 0=chorus, >0=flanger
     std::atomic<float> baseDelay{0.01f}; // seconds
+    std::atomic<uint32_t> version{0};
+};
+
+struct EqualizerParams {
+    std::atomic<bool> enabled{false};
+    std::atomic<float> bandGains[7] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    std::atomic<float> masterGain{0.0f};
     std::atomic<uint32_t> version{0};
 };
 

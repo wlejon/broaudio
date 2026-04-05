@@ -6,6 +6,7 @@
 #include "broaudio/dsp/chorus.h"
 #include "broaudio/dsp/compressor.h"
 #include "broaudio/dsp/delay.h"
+#include "broaudio/dsp/equalizer.h"
 #include "broaudio/dsp/reverb.h"
 
 #include <atomic>
@@ -38,6 +39,7 @@ struct Bus {
     CompressorParams compressorParams;
     ReverbParams reverbParams;
     ChorusParams chorusParams;
+    EqualizerParams eqParams;
 
     // Effect processing order (main thread writes, audio thread reads)
     std::atomic<uint8_t> effectOrder[NUM_EFFECT_SLOTS] = {
@@ -45,7 +47,8 @@ struct Bus {
         static_cast<uint8_t>(EffectSlot::Delay),
         static_cast<uint8_t>(EffectSlot::Compressor),
         static_cast<uint8_t>(EffectSlot::Chorus),
-        static_cast<uint8_t>(EffectSlot::Reverb)
+        static_cast<uint8_t>(EffectSlot::Reverb),
+        static_cast<uint8_t>(EffectSlot::Equalizer)
     };
     std::atomic<uint32_t> effectOrderVersion{0};
 
@@ -61,8 +64,16 @@ struct Bus {
     uint32_t reverbVersion = 0;
     Chorus chorus;
     uint32_t chorusVersion = 0;
-    uint8_t effectOrderCache[NUM_EFFECT_SLOTS] = {0, 1, 2, 3, 4};
+    Equalizer equalizer;
+    uint32_t eqVersion = 0;
+    uint8_t effectOrderCache[NUM_EFFECT_SLOTS] = {0, 1, 2, 3, 4, 5};
     uint32_t effectOrderVersionSeen = 0;
+
+    // Metering (audio thread writes, main thread reads)
+    std::atomic<float> peakL{0.0f};
+    std::atomic<float> peakR{0.0f};
+    std::atomic<float> rmsL{0.0f};
+    std::atomic<float> rmsR{0.0f};
 
     void initAudioState(int sampleRate, int maxFrames) {
         buffer.resize(static_cast<size_t>(maxFrames) * 2, 0.0f);

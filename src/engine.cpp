@@ -1,6 +1,7 @@
 #include "broaudio/engine.h"
 #include "broaudio/synth/oscillator.h"
 #include "broaudio/synth/wavetable.h"
+#include "broaudio/dsp/equalizer.h"
 #include "broaudio/dsp/fft.h"
 #include "broaudio/dsp/limiter.h"
 
@@ -200,6 +201,14 @@ std::vector<float> Engine::processEffectsOffline(int busId, const float* monoInp
     temp.chorusParams.feedback.store(srcBus->chorusParams.feedback.load(std::memory_order_relaxed), std::memory_order_relaxed);
     temp.chorusParams.baseDelay.store(srcBus->chorusParams.baseDelay.load(std::memory_order_relaxed), std::memory_order_relaxed);
     temp.chorusParams.version.store(1, std::memory_order_relaxed);
+
+    // Snapshot EQ params
+    temp.eqParams.enabled.store(srcBus->eqParams.enabled.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    temp.eqParams.masterGain.store(srcBus->eqParams.masterGain.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    for (int i = 0; i < Equalizer::NUM_BANDS; i++) {
+        temp.eqParams.bandGains[i].store(srcBus->eqParams.bandGains[i].load(std::memory_order_relaxed), std::memory_order_relaxed);
+    }
+    temp.eqParams.version.store(1, std::memory_order_relaxed);
 
     // Clone effect order
     for (int i = 0; i < Bus::NUM_EFFECT_SLOTS; i++) {
@@ -495,6 +504,88 @@ void Engine::setBusChorusBaseDelay(int busId, float seconds)
     if (!bus) return;
     bus->chorusParams.baseDelay.store(std::clamp(seconds, 0.001f, 0.05f), std::memory_order_relaxed);
     bus->chorusParams.version.fetch_add(1, std::memory_order_release);
+}
+
+// --- Per-bus equalizer control ---
+
+void Engine::setBusEqEnabled(int busId, bool enabled)
+{
+    auto* bus = findBus(busId);
+    if (!bus) return;
+    bus->eqParams.enabled.store(enabled, std::memory_order_relaxed);
+    bus->eqParams.version.fetch_add(1, std::memory_order_release);
+}
+
+void Engine::setBusEqBandGain(int busId, int band, float gainDB)
+{
+    auto* bus = findBus(busId);
+    if (!bus || band < 0 || band >= Equalizer::NUM_BANDS) return;
+    bus->eqParams.bandGains[band].store(std::clamp(gainDB, -12.0f, 12.0f), std::memory_order_relaxed);
+    bus->eqParams.version.fetch_add(1, std::memory_order_release);
+}
+
+void Engine::setBusEqMasterGain(int busId, float gainDB)
+{
+    auto* bus = findBus(busId);
+    if (!bus) return;
+    bus->eqParams.masterGain.store(std::clamp(gainDB, 0.0f, 11.0f), std::memory_order_relaxed);
+    bus->eqParams.version.fetch_add(1, std::memory_order_release);
+}
+
+// --- Per-bus compressor sidechain ---
+
+void Engine::setBusCompressorSidechain(int busId, int sidechainBusId)
+{
+    auto* bus = findBus(busId);
+    if (!bus) return;
+    bus->compressorParams.sidechainBusId.store(sidechainBusId, std::memory_order_relaxed);
+    bus->compressorParams.version.fetch_add(1, std::memory_order_release);
+}
+
+// --- Per-bus metering ---
+
+float Engine::getBusPeakL(int busId) const
+{
+    if (auto* b = findBus(busId)) return b->peakL.load(std::memory_order_relaxed);
+    return 0.0f;
+}
+
+float Engine::getBusPeakR(int busId) const
+{
+    if (auto* b = findBus(busId)) return b->peakR.load(std::memory_order_relaxed);
+    return 0.0f;
+}
+
+float Engine::getBusRmsL(int busId) const
+{
+    if (auto* b = findBus(busId)) return b->rmsL.load(std::memory_order_relaxed);
+    return 0.0f;
+}
+
+float Engine::getBusRmsR(int busId) const
+{
+    if (auto* b = findBus(busId)) return b->rmsR.load(std::memory_order_relaxed);
+    return 0.0f;
+}
+
+// --- Sample-accurate event scheduling ---
+
+void Engine::scheduleNoteOn(int voiceId, double when)
+{
+    uint32_t w = eventWrite_.load(std::memory_order_relaxed);
+    uint32_t next = (w + 1) % EVENT_RING_SIZE;
+    if (next == eventRead_.load(std::memory_order_acquire)) return; // full
+    eventRing_[w] = {ScheduledEvent::Type::NoteOn, voiceId, when};
+    eventWrite_.store(next, std::memory_order_release);
+}
+
+void Engine::scheduleNoteOff(int voiceId, double when)
+{
+    uint32_t w = eventWrite_.load(std::memory_order_relaxed);
+    uint32_t next = (w + 1) % EVENT_RING_SIZE;
+    if (next == eventRead_.load(std::memory_order_acquire)) return; // full
+    eventRing_[w] = {ScheduledEvent::Type::NoteOff, voiceId, when};
+    eventWrite_.store(next, std::memory_order_release);
 }
 
 // --- Per-bus effect chain order ---
@@ -1251,6 +1342,17 @@ void Engine::processBusCompressor(Bus& bus, float* buf, int numFrames)
         bus.compressor.releaseCoeff = 1.0f - std::exp(-1.0f / (releaseMs * 0.001f * static_cast<float>(sampleRate_)));
     }
     if (bus.compressorParams.enabled.load(std::memory_order_relaxed)) {
+        int scBusId = bus.compressorParams.sidechainBusId.load(std::memory_order_relaxed);
+        if (scBusId >= 0) {
+            // Sidechain: detect level from another bus's buffer
+            auto currentBuses = buses_.load();
+            for (auto& scBus : *currentBuses) {
+                if (scBus->id == scBusId) {
+                    bus.compressor.processStereoWithSidechain(buf, scBus->buffer.data(), numFrames);
+                    return;
+                }
+            }
+        }
         bus.compressor.processStereo(buf, numFrames);
     }
 }
@@ -1287,6 +1389,46 @@ void Engine::processBusReverb(Bus& bus, float* buf, int numFrames)
     }
 }
 
+void Engine::processBusEqualizer(Bus& bus, float* buf, int numFrames)
+{
+    uint32_t ver = bus.eqParams.version.load(std::memory_order_acquire);
+    if (ver != bus.eqVersion) {
+        bus.eqVersion = ver;
+        bool enabled = bus.eqParams.enabled.load(std::memory_order_relaxed);
+        bus.equalizer.setEnabled(enabled);
+        if (enabled) {
+            bus.equalizer.setSampleRate(sampleRate_);
+            bus.equalizer.setMasterGain(bus.eqParams.masterGain.load(std::memory_order_relaxed));
+            for (int b = 0; b < Equalizer::NUM_BANDS; b++) {
+                bus.equalizer.setBandGain(b, bus.eqParams.bandGains[b].load(std::memory_order_relaxed));
+            }
+        }
+    }
+    if (bus.equalizer.isEnabled()) {
+        bus.equalizer.processStereoInterleaved(buf, numFrames);
+    }
+}
+
+void Engine::updateBusMeters(Bus& bus, int numFrames)
+{
+    float* buf = bus.buffer.data();
+    float pL = 0.0f, pR = 0.0f;
+    float sumSqL = 0.0f, sumSqR = 0.0f;
+    for (int i = 0; i < numFrames; i++) {
+        float l = std::fabs(buf[i * 2]);
+        float r = std::fabs(buf[i * 2 + 1]);
+        if (l > pL) pL = l;
+        if (r > pR) pR = r;
+        sumSqL += buf[i * 2] * buf[i * 2];
+        sumSqR += buf[i * 2 + 1] * buf[i * 2 + 1];
+    }
+    bus.peakL.store(pL, std::memory_order_relaxed);
+    bus.peakR.store(pR, std::memory_order_relaxed);
+    float invN = 1.0f / static_cast<float>(std::max(numFrames, 1));
+    bus.rmsL.store(std::sqrt(sumSqL * invN), std::memory_order_relaxed);
+    bus.rmsR.store(std::sqrt(sumSqR * invN), std::memory_order_relaxed);
+}
+
 void Engine::processBusEffects(Bus& bus, int numFrames)
 {
     float* buf = bus.buffer.data();
@@ -1305,9 +1447,12 @@ void Engine::processBusEffects(Bus& bus, int numFrames)
             case EffectSlot::Compressor: processBusCompressor(bus, buf, numFrames); break;
             case EffectSlot::Chorus:     processBusChorus(bus, buf, numFrames); break;
             case EffectSlot::Reverb:     processBusReverb(bus, buf, numFrames); break;
+            case EffectSlot::Equalizer:  processBusEqualizer(bus, buf, numFrames); break;
             default: break;
         }
     }
+
+    updateBusMeters(bus, numFrames);
 }
 
 void Engine::mixBusIntoParent(Bus& child, Bus& parent, int numFrames)
@@ -1613,6 +1758,35 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
     double baseTime = static_cast<double>(samplesGenerated_.load(std::memory_order_relaxed))
                       / static_cast<double>(sampleRate_);
     double sampleDt = 1.0 / static_cast<double>(sampleRate_);
+    double endTime = baseTime + numFrames * sampleDt;
+
+    // Drain scheduled events and apply them sample-accurately.
+    // Events are sorted by the caller; we apply all events whose timestamp
+    // falls within this callback's time window.
+    {
+        uint32_t r = eventRead_.load(std::memory_order_relaxed);
+        uint32_t w = eventWrite_.load(std::memory_order_acquire);
+        while (r != w) {
+            auto& ev = eventRing_[r];
+            if (ev.when > endTime) break; // future event, leave in queue
+
+            // Find the voice and apply the trigger
+            for (auto& v : *currentVoices) {
+                if (v->id == ev.voiceId) {
+                    if (ev.type == ScheduledEvent::Type::NoteOn) {
+                        v->startTime.store(ev.when, std::memory_order_relaxed);
+                        v->triggerStart.store(true, std::memory_order_release);
+                    } else {
+                        v->triggerRelease.store(true, std::memory_order_release);
+                    }
+                    break;
+                }
+            }
+
+            r = (r + 1) % EVENT_RING_SIZE;
+        }
+        eventRead_.store(r, std::memory_order_release);
+    }
 
     // Build a quick lookup: bus id → buffer pointer
     // Master bus is always present; unknown bus ids fall back to master

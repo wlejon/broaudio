@@ -80,7 +80,7 @@ void Reverb::processStereo(float* buf, int numFrames)
     for (int i = 0; i < numFrames; i++) {
         float inL = buf[i * 2];
         float inR = buf[i * 2 + 1];
-        float mono = (inL + inR) * 0.5f;
+        float mono = (inL + inR) * 0.5f * FIXED_GAIN;
 
         // Sum parallel comb filters
         float outL = 0.0f;

@@ -54,8 +54,6 @@ bool Engine::init()
         return false;
     }
 
-    SDL_ResumeAudioStreamDevice(stream_);
-
     // Create master bus (id 0)
     {
         auto master = std::make_shared<Bus>();
@@ -71,6 +69,10 @@ bool Engine::init()
     // Pre-allocate scratch buffers
     outputScratch_.resize(MAX_SCRATCH_FRAMES * 2, 0.0f);
     micScratch_.resize(MAX_SCRATCH_FRAMES, 0.0f);
+
+    // Resume audio *after* all buffers and buses are ready — starting earlier
+    // would let the audio callback race with init and corrupt the heap.
+    SDL_ResumeAudioStreamDevice(stream_);
 
     initialized_ = true;
     SDL_Log("broaudio: initialized %d Hz stereo", sampleRate_);

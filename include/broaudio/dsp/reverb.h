@@ -19,6 +19,10 @@ struct Reverb {
 private:
     static constexpr int NUM_COMBS = 8;
     static constexpr int NUM_ALLPASS = 4;
+    // Normalize the summed comb filter output. Original Freeverb uses
+    // scalewet = 3/NUM_COMBS; we use a slightly higher value tuned to
+    // keep the wet signal at roughly unity gain relative to the input.
+    static constexpr float SCALE_WET = 3.0f / NUM_COMBS;
 
     struct CombFilter {
         std::vector<float> buffer;

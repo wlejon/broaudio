@@ -74,7 +74,7 @@ void Reverb::processStereo(float* buf, int numFrames)
 {
     float feedback = roomSize;
     float damp1 = damping;
-    float wet = mix;
+    float wet = mix * SCALE_WET;
     float dry = 1.0f - mix;
 
     for (int i = 0; i < numFrames; i++) {

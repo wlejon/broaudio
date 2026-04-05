@@ -1452,6 +1452,13 @@ void Engine::processBusEffects(Bus& bus, int numFrames)
         }
     }
 
+    // Per-bus soft clipper: safety net so no effect combination can produce
+    // samples that clip the output. Transparent below ±0.8, smoothly
+    // saturates above. Runs after all effects, before metering.
+    for (int i = 0; i < numFrames * 2; i++) {
+        buf[i] = softLimit(buf[i]);
+    }
+
     updateBusMeters(bus, numFrames);
 }
 

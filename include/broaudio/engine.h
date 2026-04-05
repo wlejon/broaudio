@@ -50,6 +50,7 @@ public:
     void setDecayTime(int id, float seconds);
     void setSustainLevel(int id, float level);
     void setReleaseTime(int id, float seconds);
+    void setVoiceNote(int id, int noteNumber, float velocity);
     void startVoice(int id, double when);
     void stopVoice(int id, double when);
 

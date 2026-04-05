@@ -122,6 +122,9 @@ int VoiceAllocator::noteOn(int note, float velocity, double when)
     slot.startTime = time;
     slot.active = true;
 
+    // Initialize per-voice modulation state (note number, velocity, LFO phases)
+    engine_.setVoiceNote(slot.voiceId, note, velocity);
+
     // Let the user configure the voice (waveform, bus, ADSR, etc.)
     if (voiceSetup_) {
         voiceSetup_(slot.voiceId, note, velocity);

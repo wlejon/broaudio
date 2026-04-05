@@ -448,6 +448,14 @@ void Engine::setReleaseTime(int id, float seconds)
             : 0.0f, std::memory_order_relaxed);
 }
 
+void Engine::setVoiceNote(int id, int noteNumber, float velocity)
+{
+    if (auto* v = findVoice(id)) {
+        v->modState.reset(noteNumber, velocity);
+        v->modState.resetSyncedPhases(modMatrix_.lfoParamsArray());
+    }
+}
+
 void Engine::startVoice(int id, double when)
 {
     if (auto* v = findVoice(id)) {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "broaudio/types.h"
 #include "broaudio/dsp/params.h"
 #include "broaudio/dsp/biquad.h"
 #include "broaudio/dsp/chorus.h"
@@ -19,6 +20,7 @@ namespace broaudio {
 // Effect state (filter z-values, delay buffer) is audio-thread-only.
 struct Bus {
     static constexpr int MAX_FILTERS = 4;
+    static constexpr int NUM_EFFECT_SLOTS = static_cast<int>(EffectSlot::Count);
 
     int id = 0;
 
@@ -37,6 +39,16 @@ struct Bus {
     ReverbParams reverbParams;
     ChorusParams chorusParams;
 
+    // Effect processing order (main thread writes, audio thread reads)
+    std::atomic<uint8_t> effectOrder[NUM_EFFECT_SLOTS] = {
+        static_cast<uint8_t>(EffectSlot::Filter),
+        static_cast<uint8_t>(EffectSlot::Delay),
+        static_cast<uint8_t>(EffectSlot::Compressor),
+        static_cast<uint8_t>(EffectSlot::Chorus),
+        static_cast<uint8_t>(EffectSlot::Reverb)
+    };
+    std::atomic<uint32_t> effectOrderVersion{0};
+
     // Audio-thread-only effect state — never touched by main thread
     std::vector<float> buffer;       // stereo interleaved scratch, sized at init
     BiquadFilter filters[MAX_FILTERS];
@@ -49,6 +61,8 @@ struct Bus {
     uint32_t reverbVersion = 0;
     Chorus chorus;
     uint32_t chorusVersion = 0;
+    uint8_t effectOrderCache[NUM_EFFECT_SLOTS] = {0, 1, 2, 3, 4};
+    uint32_t effectOrderVersionSeen = 0;
 
     void initAudioState(int sampleRate, int maxFrames) {
         buffer.resize(static_cast<size_t>(maxFrames) * 2, 0.0f);

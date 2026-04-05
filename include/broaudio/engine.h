@@ -57,6 +57,9 @@ public:
     void setVoiceFilterType(int id, BiquadFilter::Type type);
     void setVoiceFilterFrequency(int id, float freq);
     void setVoiceFilterQ(int id, float q);
+    void setVoiceUnisonCount(int id, int count);
+    void setVoiceUnisonDetune(int id, float semitones);
+    void setVoiceUnisonStereoWidth(int id, float width);
     void startVoice(int id, double when);
     void stopVoice(int id, double when);
 
@@ -101,6 +104,9 @@ public:
     void setBusReverbRoomSize(int busId, float size);
     void setBusReverbDamping(int busId, float damping);
     void setBusReverbMix(int busId, float mix);
+
+    // Per-bus effect chain order
+    void setBusEffectOrder(int busId, const EffectSlot* order, int count);
 
     // Per-bus chorus/flanger control
     void setBusChorusEnabled(int busId, bool enabled);
@@ -234,6 +240,11 @@ private:
                               int additional_amount, int total_amount);
     void generateSamples(int numFrames, const BusList& buses);
     void processBusEffects(Bus& bus, int numFrames);
+    void processBusFilters(Bus& bus, float* buf, int numFrames);
+    void processBusDelay(Bus& bus, float* buf, int numFrames);
+    void processBusCompressor(Bus& bus, float* buf, int numFrames);
+    void processBusChorus(Bus& bus, float* buf, int numFrames);
+    void processBusReverb(Bus& bus, float* buf, int numFrames);
     void mixBusIntoParent(Bus& child, Bus& parent, int numFrames);
 
     static void micCallback(void* userdata, SDL_AudioStream* stream,

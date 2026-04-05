@@ -11,6 +11,7 @@ A real-time audio engine library written in C++20. Provides synthesis, sample pl
 - **ADSR envelope** — Per-voice attack/decay/sustain/release
 - **Per-voice filter** — Biquad with 8 types (LP, HP, BP, notch, allpass, peaking, low/high shelf)
 - **Pitch bend and pan** — Per-voice control
+- **Unison / Supersaw** — 1-8 sub-oscillators per voice with configurable detune spread and stereo width; gain-normalized by `1/sqrt(N)`
 
 ### Voice Management
 - **Voice allocator** — Configurable polyphony (default 16 voices)
@@ -23,7 +24,8 @@ A real-time audio engine library written in C++20. Provides synthesis, sample pl
 - **Sources** — LFO 1-4, envelope, velocity, key tracking, mod wheel, aftertouch
 - **Destinations** — Pitch, gain, pan, filter frequency, filter Q, pulse width, delay send
 
-### Effects (per-bus)
+### Effects (per-bus, configurable order)
+- **Configurable effect chain** — Reorder the processing chain per bus via `setBusEffectOrder`
 - **Biquad filters** — Up to 4 slots per bus, 8 filter types
 - **Delay** — Feedback delay with wet/dry mix
 - **Compressor** — Threshold, ratio, attack, release
@@ -56,6 +58,14 @@ A real-time audio engine library written in C++20. Provides synthesis, sample pl
 - **VoiceAllocator integration** — Automatic note on/off routing
 - **CC mapping** — Register per-CC callbacks
 - **Pitch bend and aftertouch** — Dedicated callbacks
+
+### Sequencer
+- **Beat-based timeline** — Schedule note events at beat positions with duration
+- **Tempo control** — Configurable BPM and time signature
+- **Transport** — Play, stop, pause, resume
+- **Looping** — Loop range with automatic wrap-around
+- **VoiceAllocator integration** — Fires noteOn/noteOff at sample-accurate engine time
+- **Main-thread driven** — Call `update(engineTime)` from your frame loop
 
 ### Analysis and Recording
 - **Output and mic analysis buffers** — Ring buffers for visualization

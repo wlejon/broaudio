@@ -110,7 +110,8 @@ int Engine::createBus()
     std::lock_guard<std::mutex> lock(busWriteMutex_);
 
     auto bus = std::make_shared<Bus>();
-    bus->id = nextBusId_++;
+    int id = nextBusId_++;
+    bus->id = id;
     bus->parentId.store(MASTER_BUS_ID, std::memory_order_relaxed);
     bus->initAudioState(sampleRate_, MAX_SCRATCH_FRAMES);
 
@@ -118,7 +119,7 @@ int Engine::createBus()
     newList->push_back(std::move(bus));
     buses_.store(std::move(newList));
 
-    return bus->id;
+    return id;
 }
 
 void Engine::deleteBus(int busId)
@@ -391,6 +392,18 @@ void Engine::setBusChorusBaseDelay(int busId, float seconds)
     bus->chorusParams.version.fetch_add(1, std::memory_order_release);
 }
 
+// --- Per-bus effect chain order ---
+
+void Engine::setBusEffectOrder(int busId, const EffectSlot* order, int count)
+{
+    auto* bus = findBus(busId);
+    if (!bus) return;
+    int n = std::min(count, Bus::NUM_EFFECT_SLOTS);
+    for (int i = 0; i < n; i++)
+        bus->effectOrder[i].store(static_cast<uint8_t>(order[i]), std::memory_order_relaxed);
+    bus->effectOrderVersion.fetch_add(1, std::memory_order_release);
+}
+
 // --- Voice/clip bus routing ---
 
 void Engine::setVoiceBus(int voiceId, int busId)
@@ -607,6 +620,30 @@ void Engine::setVoiceFilterQ(int id, float q)
     if (auto* v = findVoice(id)) {
         v->filterQ.store(std::clamp(q, 0.1f, 30.0f), std::memory_order_relaxed);
         v->filterVersion.fetch_add(1, std::memory_order_release);
+    }
+}
+
+void Engine::setVoiceUnisonCount(int id, int count)
+{
+    if (auto* v = findVoice(id)) {
+        v->unisonCount.store(std::clamp(count, 1, Voice::MAX_UNISON), std::memory_order_relaxed);
+        v->unisonVersion.fetch_add(1, std::memory_order_release);
+    }
+}
+
+void Engine::setVoiceUnisonDetune(int id, float semitones)
+{
+    if (auto* v = findVoice(id)) {
+        v->unisonDetune.store(std::clamp(semitones, 0.0f, 2.0f), std::memory_order_relaxed);
+        v->unisonVersion.fetch_add(1, std::memory_order_release);
+    }
+}
+
+void Engine::setVoiceUnisonStereoWidth(int id, float width)
+{
+    if (auto* v = findVoice(id)) {
+        v->unisonStereoWidth.store(std::clamp(width, 0.0f, 1.0f), std::memory_order_relaxed);
+        v->unisonVersion.fetch_add(1, std::memory_order_release);
     }
 }
 
@@ -1038,11 +1075,8 @@ float Engine::getPlaybackPosition(int instanceId) const
 // Bus effect processing — audio thread only
 // ---------------------------------------------------------------------------
 
-void Engine::processBusEffects(Bus& bus, int numFrames)
+void Engine::processBusFilters(Bus& bus, float* buf, int numFrames)
 {
-    float* buf = bus.buffer.data();
-
-    // Filters
     for (int f = 0; f < Bus::MAX_FILTERS; f++) {
         uint32_t ver = bus.filterParams[f].version.load(std::memory_order_acquire);
         if (ver != bus.filterVersions[f]) {
@@ -1066,72 +1100,94 @@ void Engine::processBusEffects(Bus& bus, int numFrames)
             buf[i * 2 + 1] = bus.filters[f].process(buf[i * 2 + 1], 1);
         }
     }
+}
 
-    // Delay
-    {
-        uint32_t ver = bus.delayParams.version.load(std::memory_order_acquire);
-        if (ver != bus.delayVersion) {
-            bus.delayVersion = ver;
-            bus.delay.enabled = bus.delayParams.enabled.load(std::memory_order_relaxed);
-            float delaySec = bus.delayParams.time.load(std::memory_order_relaxed);
-            int maxSamples = static_cast<int>(bus.delay.buffer.size());
-            bus.delay.delaySamples = std::clamp(
-                static_cast<int>(delaySec * sampleRate_), 1, maxSamples - 1);
-            bus.delay.feedback = bus.delayParams.feedback.load(std::memory_order_relaxed);
-            bus.delay.mix = bus.delayParams.mix.load(std::memory_order_relaxed);
-        }
-        if (bus.delay.enabled) {
-            bus.delay.processStereo(buf, numFrames);
-        }
+void Engine::processBusDelay(Bus& bus, float* buf, int numFrames)
+{
+    uint32_t ver = bus.delayParams.version.load(std::memory_order_acquire);
+    if (ver != bus.delayVersion) {
+        bus.delayVersion = ver;
+        bus.delay.enabled = bus.delayParams.enabled.load(std::memory_order_relaxed);
+        float delaySec = bus.delayParams.time.load(std::memory_order_relaxed);
+        int maxSamples = static_cast<int>(bus.delay.buffer.size());
+        bus.delay.delaySamples = std::clamp(
+            static_cast<int>(delaySec * sampleRate_), 1, maxSamples - 1);
+        bus.delay.feedback = bus.delayParams.feedback.load(std::memory_order_relaxed);
+        bus.delay.mix = bus.delayParams.mix.load(std::memory_order_relaxed);
+    }
+    if (bus.delay.enabled) {
+        bus.delay.processStereo(buf, numFrames);
+    }
+}
+
+void Engine::processBusCompressor(Bus& bus, float* buf, int numFrames)
+{
+    uint32_t ver = bus.compressorParams.version.load(std::memory_order_acquire);
+    if (ver != bus.compressorVersion) {
+        bus.compressorVersion = ver;
+        bus.compressor.threshold = bus.compressorParams.threshold.load(std::memory_order_relaxed);
+        bus.compressor.ratio = bus.compressorParams.ratio.load(std::memory_order_relaxed);
+        float attackMs = bus.compressorParams.attackMs.load(std::memory_order_relaxed);
+        float releaseMs = bus.compressorParams.releaseMs.load(std::memory_order_relaxed);
+        bus.compressor.attackCoeff = 1.0f - std::exp(-1.0f / (attackMs * 0.001f * static_cast<float>(sampleRate_)));
+        bus.compressor.releaseCoeff = 1.0f - std::exp(-1.0f / (releaseMs * 0.001f * static_cast<float>(sampleRate_)));
+    }
+    if (bus.compressorParams.enabled.load(std::memory_order_relaxed)) {
+        bus.compressor.processStereo(buf, numFrames);
+    }
+}
+
+void Engine::processBusChorus(Bus& bus, float* buf, int numFrames)
+{
+    uint32_t ver = bus.chorusParams.version.load(std::memory_order_acquire);
+    if (ver != bus.chorusVersion) {
+        bus.chorusVersion = ver;
+        bus.chorus.enabled = bus.chorusParams.enabled.load(std::memory_order_relaxed);
+        bus.chorus.rate = bus.chorusParams.rate.load(std::memory_order_relaxed);
+        bus.chorus.depth = bus.chorusParams.depth.load(std::memory_order_relaxed);
+        bus.chorus.mix = bus.chorusParams.mix.load(std::memory_order_relaxed);
+        bus.chorus.feedback = bus.chorusParams.feedback.load(std::memory_order_relaxed);
+        bus.chorus.baseDelay = bus.chorusParams.baseDelay.load(std::memory_order_relaxed);
+    }
+    if (bus.chorus.enabled) {
+        bus.chorus.processStereo(buf, numFrames);
+    }
+}
+
+void Engine::processBusReverb(Bus& bus, float* buf, int numFrames)
+{
+    uint32_t ver = bus.reverbParams.version.load(std::memory_order_acquire);
+    if (ver != bus.reverbVersion) {
+        bus.reverbVersion = ver;
+        bus.reverb.enabled = bus.reverbParams.enabled.load(std::memory_order_relaxed);
+        bus.reverb.roomSize = bus.reverbParams.roomSize.load(std::memory_order_relaxed);
+        bus.reverb.damping = bus.reverbParams.damping.load(std::memory_order_relaxed);
+        bus.reverb.mix = bus.reverbParams.mix.load(std::memory_order_relaxed);
+    }
+    if (bus.reverb.enabled) {
+        bus.reverb.processStereo(buf, numFrames);
+    }
+}
+
+void Engine::processBusEffects(Bus& bus, int numFrames)
+{
+    float* buf = bus.buffer.data();
+
+    uint32_t ver = bus.effectOrderVersion.load(std::memory_order_acquire);
+    if (ver != bus.effectOrderVersionSeen) {
+        bus.effectOrderVersionSeen = ver;
+        for (int i = 0; i < Bus::NUM_EFFECT_SLOTS; i++)
+            bus.effectOrderCache[i] = bus.effectOrder[i].load(std::memory_order_relaxed);
     }
 
-    // Compressor
-    {
-        uint32_t ver = bus.compressorParams.version.load(std::memory_order_acquire);
-        if (ver != bus.compressorVersion) {
-            bus.compressorVersion = ver;
-            bus.compressor.threshold = bus.compressorParams.threshold.load(std::memory_order_relaxed);
-            bus.compressor.ratio = bus.compressorParams.ratio.load(std::memory_order_relaxed);
-            // Recompute attack/release coefficients
-            float attackMs = bus.compressorParams.attackMs.load(std::memory_order_relaxed);
-            float releaseMs = bus.compressorParams.releaseMs.load(std::memory_order_relaxed);
-            bus.compressor.attackCoeff = 1.0f - std::exp(-1.0f / (attackMs * 0.001f * static_cast<float>(sampleRate_)));
-            bus.compressor.releaseCoeff = 1.0f - std::exp(-1.0f / (releaseMs * 0.001f * static_cast<float>(sampleRate_)));
-        }
-        if (bus.compressorParams.enabled.load(std::memory_order_relaxed)) {
-            bus.compressor.processStereo(buf, numFrames);
-        }
-    }
-
-    // Chorus
-    {
-        uint32_t ver = bus.chorusParams.version.load(std::memory_order_acquire);
-        if (ver != bus.chorusVersion) {
-            bus.chorusVersion = ver;
-            bus.chorus.enabled = bus.chorusParams.enabled.load(std::memory_order_relaxed);
-            bus.chorus.rate = bus.chorusParams.rate.load(std::memory_order_relaxed);
-            bus.chorus.depth = bus.chorusParams.depth.load(std::memory_order_relaxed);
-            bus.chorus.mix = bus.chorusParams.mix.load(std::memory_order_relaxed);
-            bus.chorus.feedback = bus.chorusParams.feedback.load(std::memory_order_relaxed);
-            bus.chorus.baseDelay = bus.chorusParams.baseDelay.load(std::memory_order_relaxed);
-        }
-        if (bus.chorus.enabled) {
-            bus.chorus.processStereo(buf, numFrames);
-        }
-    }
-
-    // Reverb (last in chain — after all other effects)
-    {
-        uint32_t ver = bus.reverbParams.version.load(std::memory_order_acquire);
-        if (ver != bus.reverbVersion) {
-            bus.reverbVersion = ver;
-            bus.reverb.enabled = bus.reverbParams.enabled.load(std::memory_order_relaxed);
-            bus.reverb.roomSize = bus.reverbParams.roomSize.load(std::memory_order_relaxed);
-            bus.reverb.damping = bus.reverbParams.damping.load(std::memory_order_relaxed);
-            bus.reverb.mix = bus.reverbParams.mix.load(std::memory_order_relaxed);
-        }
-        if (bus.reverb.enabled) {
-            bus.reverb.processStereo(buf, numFrames);
+    for (int i = 0; i < Bus::NUM_EFFECT_SLOTS; i++) {
+        switch (static_cast<EffectSlot>(bus.effectOrderCache[i])) {
+            case EffectSlot::Filter:     processBusFilters(bus, buf, numFrames); break;
+            case EffectSlot::Delay:      processBusDelay(bus, buf, numFrames); break;
+            case EffectSlot::Compressor: processBusCompressor(bus, buf, numFrames); break;
+            case EffectSlot::Chorus:     processBusChorus(bus, buf, numFrames); break;
+            case EffectSlot::Reverb:     processBusReverb(bus, buf, numFrames); break;
+            default: break;
         }
     }
 }
@@ -1443,7 +1499,8 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
                 // Fresh start from silence.
                 voice.started = true;
                 voice.active = true;
-                voice.phase = 0.0f;
+                for (int u = 0; u < Voice::MAX_UNISON; u++)
+                    voice.phases[u] = 0.0f;
                 voice.envStage = EnvStage::Attack;
                 voice.envLevel = 0.0f;
             }
@@ -1500,6 +1557,30 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
         bool isNoise = (wf == Waveform::WhiteNoise || wf == Waveform::PinkNoise
                         || wf == Waveform::BrownNoise);
 
+        // Update unison cache if parameters changed
+        int unisonN = voice.unisonCountCached;
+        {
+            uint32_t uv = voice.unisonVersion.load(std::memory_order_acquire);
+            if (uv != voice.unisonVersionSeen) {
+                voice.unisonVersionSeen = uv;
+                unisonN = voice.unisonCount.load(std::memory_order_relaxed);
+                voice.unisonCountCached = unisonN;
+                float detune = voice.unisonDetune.load(std::memory_order_relaxed);
+                float width = voice.unisonStereoWidth.load(std::memory_order_relaxed);
+                for (int u = 0; u < unisonN; u++) {
+                    if (unisonN > 1) {
+                        float t = static_cast<float>(u) / static_cast<float>(unisonN - 1);
+                        voice.unisonDetunes[u] = detune * (t - 0.5f);
+                        voice.unisonPans[u] = width * (t * 2.0f - 1.0f);
+                    } else {
+                        voice.unisonDetunes[u] = 0.0f;
+                        voice.unisonPans[u] = 0.0f;
+                    }
+                }
+            }
+        }
+        float unisonGainNorm = 1.0f / std::sqrt(static_cast<float>(unisonN));
+
         for (int i = 0; i < numFrames; i++) {
             double t = baseTime + i * sampleDt;
             if (t < startTime) continue;
@@ -1544,7 +1625,6 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
             // Apply pitch bend + mod pitch to frequency
             float totalPitchSemitones = pitchBendSemitones + mod.pitch;
             float freq = baseFreq * std::exp2(totalPitchSemitones / 12.0f);
-            float phaseInc = freq / static_cast<float>(sampleRate_);
 
             // Apply mod gain and pan
             float finalGain = gain * voice.envLevel * mod.gain;
@@ -1558,19 +1638,45 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
                 finalPan = std::clamp(spatialPan + mod.pan, -1.0f, 1.0f);
             }
 
-            float panL, panR;
-            panGains(finalPan, panL, panR);
+            // Generate sample(s) — unison sums N oscillators with per-osc pan
+            float sumL = 0.0f, sumR = 0.0f;
+            float monoSum = 0.0f;
 
-            float sample;
             if (isNoise) {
-                sample = generateNoise(wf, voice.noiseState);
-            } else if (wf == Waveform::Wavetable) {
-                sample = wtBank->sample(voice.phase, phaseInc);
+                // Noise doesn't benefit from unison — generate once
+                float s = generateNoise(wf, voice.noiseState);
+                monoSum = s;
+                float panL, panR;
+                panGains(finalPan, panL, panR);
+                sumL = s * panL;
+                sumR = s * panR;
             } else {
-                sample = generateSample(wf, voice.phase, phaseInc);
+                for (int u = 0; u < unisonN; u++) {
+                    float uFreq = freq * std::exp2(voice.unisonDetunes[u] / 12.0f);
+                    float uPhaseInc = uFreq / static_cast<float>(sampleRate_);
+
+                    float s;
+                    if (wf == Waveform::Wavetable) {
+                        s = wtBank->sample(voice.phases[u], uPhaseInc);
+                    } else {
+                        s = generateSample(wf, voice.phases[u], uPhaseInc);
+                    }
+
+                    s *= unisonGainNorm;
+                    monoSum += s;
+
+                    float uPan = std::clamp(finalPan + voice.unisonPans[u], -1.0f, 1.0f);
+                    float panL, panR;
+                    panGains(uPan, panL, panR);
+                    sumL += s * panL;
+                    sumR += s * panR;
+
+                    voice.phases[u] += uPhaseInc;
+                    if (voice.phases[u] >= 1.0f) voice.phases[u] -= 1.0f;
+                }
             }
 
-            // Per-voice filter (modulated by mod matrix)
+            // Per-voice filter (modulated by mod matrix) — runs on mono sum
             if (voice.filter.enabled) {
                 uint32_t fv = voice.filterVersion.load(std::memory_order_acquire);
                 if (fv != voice.filterVersionSeen) {
@@ -1590,8 +1696,13 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
                     voice.filter.Q = std::clamp(baseQ * mod.filterQ, 0.1f, 30.0f);
                     voice.filter.computeCoefficients(sampleRate_);
                 }
-                if (voice.filter.enabled)
-                    sample = voice.filter.process(sample, 0);
+                if (voice.filter.enabled) {
+                    // Apply filter ratio to L/R (preserves stereo image)
+                    float filteredMono = voice.filter.process(monoSum, 0);
+                    float ratio = (monoSum != 0.0f) ? filteredMono / monoSum : 0.0f;
+                    sumL *= ratio;
+                    sumR *= ratio;
+                }
             } else {
                 // Check if filter was just enabled
                 uint32_t fv = voice.filterVersion.load(std::memory_order_acquire);
@@ -1607,25 +1718,24 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
                         voice.filter.Q = std::clamp(baseQ * mod.filterQ, 0.1f, 30.0f);
                         voice.filter.computeCoefficients(sampleRate_);
                         voice.filter.reset();
-                        sample = voice.filter.process(sample, 0);
+                        float filteredMono = voice.filter.process(monoSum, 0);
+                        float ratio = (monoSum != 0.0f) ? filteredMono / monoSum : 0.0f;
+                        sumL *= ratio;
+                        sumR *= ratio;
                     }
                 }
             }
 
-            float s = sample * finalGain;
-            buf[i * 2]     += s * panL;
-            buf[i * 2 + 1] += s * panR;
+            buf[i * 2]     += sumL * finalGain;
+            buf[i * 2 + 1] += sumR * finalGain;
 
             // Aux send (base amount + mod matrix delaySend)
             if (sendBuf) {
                 float sendLevel = std::clamp(baseSendAmt + mod.delaySend, 0.0f, 1.0f);
-                float sendSample = sample * gain * voice.envLevel * sendLevel;
-                sendBuf[i * 2]     += sendSample * panL;
-                sendBuf[i * 2 + 1] += sendSample * panR;
+                float sendGain = gain * voice.envLevel * sendLevel;
+                sendBuf[i * 2]     += sumL * sendGain;
+                sendBuf[i * 2 + 1] += sumR * sendGain;
             }
-
-            voice.phase += phaseInc;
-            if (voice.phase >= 1.0f) voice.phase -= 1.0f;
         }
     }
 

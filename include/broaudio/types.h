@@ -17,4 +17,13 @@ enum class DistanceModel : uint8_t {
     Exponential
 };
 
+enum class EffectSlot : uint8_t {
+    Filter,
+    Delay,
+    Compressor,
+    Chorus,
+    Reverb,
+    Count
+};
+
 } // namespace broaudio

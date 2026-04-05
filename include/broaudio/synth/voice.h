@@ -52,12 +52,25 @@ struct Voice {
     // Shared ownership: multiple voices can reference the same bank.
     std::atomic<std::shared_ptr<const WavetableBank>> wavetable{nullptr};
 
+    // Unison parameters (main thread writes, audio thread reads)
+    static constexpr int MAX_UNISON = 8;
+    std::atomic<int>   unisonCount{1};          // 1 = off, 2-8 = unison voices
+    std::atomic<float> unisonDetune{0.15f};     // total detune spread in semitones
+    std::atomic<float> unisonStereoWidth{0.7f}; // 0 = mono center, 1 = full L/R spread
+    std::atomic<uint32_t> unisonVersion{0};
+
     // Audio thread state (only touched by callback)
-    float phase = 0.0f;
+    float phases[MAX_UNISON] = {};
     bool active = false;
     bool started = false;
     EnvStage envStage = EnvStage::Idle;
     float envLevel = 0.0f;
+
+    // Audio-thread-only unison cache
+    int unisonCountCached = 1;
+    float unisonDetunes[MAX_UNISON] = {};   // semitone offsets per sub-osc
+    float unisonPans[MAX_UNISON] = {};      // pan offsets per sub-osc
+    uint32_t unisonVersionSeen = 0;
 
     // Per-voice modulation state (LFO phases, velocity, note context)
     ModState modState;

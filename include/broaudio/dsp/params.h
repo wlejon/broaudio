@@ -23,7 +23,7 @@ struct DelayParams {
 };
 
 struct CompressorParams {
-    std::atomic<bool> enabled{true};
+    std::atomic<bool> enabled{false};
     std::atomic<float> threshold{0.7f};
     std::atomic<float> ratio{4.0f};
     std::atomic<float> attackMs{1.0f};

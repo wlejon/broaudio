@@ -16,6 +16,7 @@ set(BROAUDIO_TESTS
     test_reverb
     test_chorus
     test_ring_buffer
+    test_voice_allocator
 )
 
 foreach(test ${BROAUDIO_TESTS})

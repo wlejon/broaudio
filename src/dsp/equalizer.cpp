@@ -24,7 +24,7 @@ void Equalizer::setSampleRate(int sampleRate)
 
 void Equalizer::setMasterGain(float gain)
 {
-    masterGain_ = std::max(0.0f, std::min(11.0f, gain));
+    masterGain_ = std::max(-24.0f, std::min(11.0f, gain));
 }
 
 void Equalizer::setBandGain(int bandIndex, float gain)

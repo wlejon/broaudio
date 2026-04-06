@@ -195,6 +195,24 @@ TEST(eq_boost_is_localized_to_target_band) {
     PASS();
 }
 
+TEST(eq_negative_master_gain_reduces_volume) {
+    Equalizer eqFlat(TEST_SR);
+    eqFlat.setEnabled(true);
+    eqFlat.setMasterGain(0.0f);
+    float ampFlat = measureEqResponse(eqFlat, 440.0f);
+
+    Equalizer eqCut(TEST_SR);
+    eqCut.setEnabled(true);
+    eqCut.setMasterGain(-6.0f);
+    float ampCut = measureEqResponse(eqCut, 440.0f);
+
+    // -6dB should halve amplitude (±tolerance)
+    ASSERT_GT(ampFlat, 0.01f);  // sanity: flat signal is non-zero
+    ASSERT_LT(ampCut, ampFlat * 0.65f);  // at least ~35% reduction
+    ASSERT_GT(ampCut, ampFlat * 0.35f);  // not more than ~65% reduction
+    PASS();
+}
+
 TEST(eq_master_gain_applies_uniformly) {
     // +6dB master gain should double amplitude at all frequencies
     Equalizer eqFlat(TEST_SR);

@@ -112,7 +112,44 @@ TEST(bus_default_order_includes_eq) {
 
 static constexpr int TEST_SR = 44100;
 
-// Helper: measure amplitude of a sine at a given frequency after EQ processing
+// Helper: measure amplitude of a sine at a given frequency after mono EQ processing
+static float measureEqResponseMono(Equalizer& eq, float freq) {
+    const int frames = 4096;
+    std::vector<float> buf(frames);
+    for (int i = 0; i < frames; i++)
+        buf[i] = std::sin(2.0f * 3.14159265f * freq * i / TEST_SR) * 0.5f;
+    eq.reset();
+    eq.process(buf.data(), frames);
+
+    float peak = 0.0f;
+    for (int i = frames / 2; i < frames; i++) {
+        float a = std::fabs(buf[i]);
+        if (a > peak) peak = a;
+    }
+    return peak;
+}
+
+// Helper: measure amplitude of a sine at a given frequency after split-stereo EQ processing
+static float measureEqResponseStereo(Equalizer& eq, float freq) {
+    const int frames = 4096;
+    std::vector<float> left(frames), right(frames);
+    for (int i = 0; i < frames; i++) {
+        float s = std::sin(2.0f * 3.14159265f * freq * i / TEST_SR) * 0.5f;
+        left[i] = s;
+        right[i] = s;
+    }
+    eq.reset();
+    eq.processStereo(left.data(), right.data(), frames);
+
+    float peak = 0.0f;
+    for (int i = frames / 2; i < frames; i++) {
+        float a = std::fabs(left[i]);
+        if (a > peak) peak = a;
+    }
+    return peak;
+}
+
+// Helper: measure amplitude of a sine at a given frequency after interleaved stereo EQ processing
 static float measureEqResponse(Equalizer& eq, float freq) {
     const int frames = 4096;
     std::vector<float> buf(frames * 2);
@@ -230,6 +267,76 @@ TEST(eq_master_gain_applies_uniformly) {
     // Both should roughly double (±1dB tolerance)
     ASSERT_NEAR(amp440Gain / amp440Flat, 2.0f, 0.3f);
     ASSERT_NEAR(amp2kGain / amp2kFlat, 2.0f, 0.3f);
+    PASS();
+}
+
+TEST(eq_master_gain_clamps_at_boundaries) {
+    Equalizer eq(TEST_SR);
+
+    // Below minimum: should clamp to -24 dB
+    eq.setMasterGain(-100.0f);
+    ASSERT_NEAR(eq.getMasterGain(), -24.0f, 0.001f);
+
+    // Above maximum: should clamp to +11 dB
+    eq.setMasterGain(50.0f);
+    ASSERT_NEAR(eq.getMasterGain(), 11.0f, 0.001f);
+
+    // Within range: should be stored as-is
+    eq.setMasterGain(-12.0f);
+    ASSERT_NEAR(eq.getMasterGain(), -12.0f, 0.001f);
+    PASS();
+}
+
+TEST(eq_combined_master_and_band_gain) {
+    // -6 dB master + 12 dB band boost at 1kHz: net effect at 1kHz should be ~+6 dB
+    Equalizer eqFlat(TEST_SR);
+    eqFlat.setEnabled(true);
+    float ampFlat = measureEqResponse(eqFlat, 1000.0f);
+
+    Equalizer eqCombined(TEST_SR);
+    eqCombined.setEnabled(true);
+    eqCombined.setMasterGain(-6.0f);
+    eqCombined.setBandGain(3, 12.0f);  // band 3 = 1kHz
+    float ampCombined = measureEqResponse(eqCombined, 1000.0f);
+
+    // Net ~+6 dB should roughly double amplitude
+    float ratio = ampCombined / ampFlat;
+    ASSERT_GT(ratio, 1.4f);   // at least ~+3 dB
+    ASSERT_LT(ratio, 2.8f);   // no more than ~+9 dB
+    PASS();
+}
+
+TEST(eq_negative_master_gain_mono_path) {
+    Equalizer eqFlat(TEST_SR);
+    eqFlat.setEnabled(true);
+    eqFlat.setMasterGain(0.0f);
+    float ampFlat = measureEqResponseMono(eqFlat, 440.0f);
+
+    Equalizer eqCut(TEST_SR);
+    eqCut.setEnabled(true);
+    eqCut.setMasterGain(-6.0f);
+    float ampCut = measureEqResponseMono(eqCut, 440.0f);
+
+    ASSERT_GT(ampFlat, 0.01f);
+    ASSERT_LT(ampCut, ampFlat * 0.65f);
+    ASSERT_GT(ampCut, ampFlat * 0.35f);
+    PASS();
+}
+
+TEST(eq_negative_master_gain_stereo_path) {
+    Equalizer eqFlat(TEST_SR);
+    eqFlat.setEnabled(true);
+    eqFlat.setMasterGain(0.0f);
+    float ampFlat = measureEqResponseStereo(eqFlat, 440.0f);
+
+    Equalizer eqCut(TEST_SR);
+    eqCut.setEnabled(true);
+    eqCut.setMasterGain(-6.0f);
+    float ampCut = measureEqResponseStereo(eqCut, 440.0f);
+
+    ASSERT_GT(ampFlat, 0.01f);
+    ASSERT_LT(ampCut, ampFlat * 0.65f);
+    ASSERT_GT(ampCut, ampFlat * 0.35f);
     PASS();
 }
 

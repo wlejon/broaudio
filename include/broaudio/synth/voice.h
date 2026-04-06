@@ -2,6 +2,7 @@
 
 #include "broaudio/types.h"
 #include "broaudio/dsp/biquad.h"
+#include "broaudio/dsp/smoother.h"
 #include "broaudio/spatial/listener.h"
 #include "broaudio/synth/modulation.h"
 #include "broaudio/synth/oscillator.h"
@@ -77,6 +78,11 @@ struct Voice {
 
     // Per-voice noise state (pink/brown noise accumulators)
     NoiseState noiseState;
+
+    // Per-voice parameter smoothers (audio thread only)
+    Smoother smoothGain;
+    Smoother smoothPan;
+    Smoother smoothFreq;
 
     // Per-voice filter state (audio thread only)
     BiquadFilter filter;

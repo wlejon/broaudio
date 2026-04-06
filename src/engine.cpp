@@ -71,6 +71,10 @@ bool Engine::init()
     outputScratch_.resize(MAX_SCRATCH_FRAMES * 2, 0.0f);
     micScratch_.resize(MAX_SCRATCH_FRAMES, 0.0f);
 
+    // Initialize master gain smoother
+    smoothMasterGain_.init(sampleRate_);
+    smoothMasterGain_.snap(masterGain_.load(std::memory_order_relaxed));
+
     // Resume audio *after* all buffers and buses are ready — starting earlier
     // would let the audio callback race with init and corrupt the heap.
     SDL_ResumeAudioStreamDevice(stream_);
@@ -98,6 +102,10 @@ bool Engine::initHeadless()
 
     outputScratch_.resize(MAX_SCRATCH_FRAMES * 2, 0.0f);
     micScratch_.resize(MAX_SCRATCH_FRAMES, 0.0f);
+
+    // Initialize master gain smoother
+    smoothMasterGain_.init(sampleRate_);
+    smoothMasterGain_.snap(masterGain_.load(std::memory_order_relaxed));
 
     initialized_ = true;
     SDL_Log("broaudio: initialized headless %d Hz stereo (no audio device)", sampleRate_);
@@ -165,24 +173,26 @@ void Engine::renderInternal(int numFrames)
             if (len <= 0) continue;
 
             uint64_t pos = pb->playPos.load(std::memory_order_relaxed);
-            float g = pb->gain.load(std::memory_order_relaxed);
             float rate = pb->rate.load(std::memory_order_relaxed);
             bool looping = pb->looping.load(std::memory_order_relaxed);
-            float clipPan = pb->pan.load(std::memory_order_relaxed);
             int ch = clip->channels;
+
+            // Set smoother targets for gain and pan
+            float targetGain = pb->gain.load(std::memory_order_relaxed);
+            float targetPan = pb->pan.load(std::memory_order_relaxed);
 
             HeadParams headParams;
             bool spatialFilterActive = false;
             if (pb->spatial.spatialEnabled.load(std::memory_order_relaxed)) {
                 auto sr = computeSpatial(listener_, pb->spatial);
-                g *= sr.gain;
-                clipPan = 0.0f; // center — head model does L/R
+                targetGain *= sr.gain;
+                targetPan = 0.0f; // center — head model does L/R
                 headParams = computeHeadParams(sr, headModel_, sampleRate_);
                 spatialFilterActive = true;
             }
 
-            float panL, panR;
-            panGains(clipPan, panL, panR);
+            pb->smoothGain.set(targetGain);
+            pb->smoothPan.set(targetPan);
 
             int clipSendId = pb->sendBusId.load(std::memory_order_relaxed);
             float clipSendAmt = pb->sendAmount.load(std::memory_order_relaxed);
@@ -209,6 +219,11 @@ void Engine::renderInternal(int numFrames)
                 float frac = static_cast<float>(pos & FRAC_MASK) / (1 << FRAC_BITS);
                 int nextIdx = intPos + 1;
                 if (nextIdx >= len) nextIdx = looping ? 0 : intPos;
+
+                float g = pb->smoothGain.next();
+                float clipPan = pb->smoothPan.next();
+                float panL, panR;
+                panGains(clipPan, panL, panR);
 
                 float outL, outR;
                 if (ch == 2) {
@@ -298,11 +313,13 @@ void Engine::renderInternal(int numFrames)
         processBusEffects(*masterBus, numFrames);
     }
 
-    // Apply master gain + limiter
+    // Apply master gain (smoothed) + limiter
     if (masterBus) {
-        float mg = masterGain_.load(std::memory_order_relaxed);
-        for (int i = 0; i < numFloats; i++) {
-            buffer[i] = masterBus->buffer[i] * mg;
+        smoothMasterGain_.set(masterGain_.load(std::memory_order_relaxed));
+        for (int i = 0; i < numFrames; i++) {
+            float mg = smoothMasterGain_.next();
+            buffer[i * 2]     = masterBus->buffer[i * 2]     * mg;
+            buffer[i * 2 + 1] = masterBus->buffer[i * 2 + 1] * mg;
         }
         masterLimiter_.process(buffer, static_cast<size_t>(numFrames));
     } else {
@@ -1806,15 +1823,18 @@ void Engine::mixBusIntoParent(Bus& child, Bus& parent, int numFrames)
 {
     if (child.muted.load(std::memory_order_relaxed)) return;
 
-    float g = child.gain.load(std::memory_order_relaxed);
-    float panVal = child.pan.load(std::memory_order_relaxed);
-    float panL, panR;
-    panGains(panVal, panL, panR);
+    child.smoothGain.set(child.gain.load(std::memory_order_relaxed));
+    child.smoothPan.set(child.pan.load(std::memory_order_relaxed));
 
     float* src = child.buffer.data();
     float* dst = parent.buffer.data();
 
     for (int i = 0; i < numFrames; i++) {
+        float g = child.smoothGain.next();
+        float panVal = child.smoothPan.next();
+        float panL, panR;
+        panGains(panVal, panL, panR);
+
         float L = src[i * 2]     * g;
         float R = src[i * 2 + 1] * g;
         // Apply bus panning (cross-mix stereo signal)
@@ -1886,25 +1906,27 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
             if (len <= 0) continue;
 
             uint64_t pos = pb->playPos.load(std::memory_order_relaxed);
-            float g = pb->gain.load(std::memory_order_relaxed);
             float rate = pb->rate.load(std::memory_order_relaxed);
             bool looping = pb->looping.load(std::memory_order_relaxed);
-            float clipPan = pb->pan.load(std::memory_order_relaxed);
             int ch = clip->channels;
+
+            // Set smoother targets for gain and pan
+            float targetGain2 = pb->gain.load(std::memory_order_relaxed);
+            float targetPan2 = pb->pan.load(std::memory_order_relaxed);
 
             // Spatial override for clip playback
             HeadParams headParams2;
             bool spatialFilterActive2 = false;
             if (pb->spatial.spatialEnabled.load(std::memory_order_relaxed)) {
                 auto sr = computeSpatial(engine->listener_, pb->spatial);
-                g *= sr.gain;
-                clipPan = 0.0f; // center — head model does L/R
+                targetGain2 *= sr.gain;
+                targetPan2 = 0.0f; // center — head model does L/R
                 headParams2 = computeHeadParams(sr, engine->headModel_, engine->sampleRate_);
                 spatialFilterActive2 = true;
             }
 
-            float panL, panR;
-            panGains(clipPan, panL, panR);
+            pb->smoothGain.set(targetGain2);
+            pb->smoothPan.set(targetPan2);
 
             // Find clip send bus buffer (if configured)
             int clipSendId = pb->sendBusId.load(std::memory_order_relaxed);
@@ -1932,6 +1954,11 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
                 float frac = static_cast<float>(pos & FRAC_MASK) / (1 << FRAC_BITS);
                 int nextIdx = intPos + 1;
                 if (nextIdx >= len) nextIdx = looping ? 0 : intPos;
+
+                float g = pb->smoothGain.next();
+                float clipPan = pb->smoothPan.next();
+                float panL, panR;
+                panGains(clipPan, panL, panR);
 
                 float outL, outR;
                 if (ch == 2) {
@@ -2060,11 +2087,13 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
         engine->processBusEffects(*masterBus, numFrames);
     }
 
-    // Copy master bus to output buffer, apply master gain + limiter
+    // Copy master bus to output buffer, apply master gain (smoothed) + limiter
     if (masterBus) {
-        float mg = engine->masterGain_.load(std::memory_order_relaxed);
-        for (int i = 0; i < numFloats; i++) {
-            buffer[i] = masterBus->buffer[i] * mg;
+        engine->smoothMasterGain_.set(engine->masterGain_.load(std::memory_order_relaxed));
+        for (int i = 0; i < numFrames; i++) {
+            float mg = engine->smoothMasterGain_.next();
+            buffer[i * 2]     = masterBus->buffer[i * 2]     * mg;
+            buffer[i * 2 + 1] = masterBus->buffer[i * 2 + 1] * mg;
         }
         engine->masterLimiter_.process(buffer, static_cast<size_t>(numFrames));
     } else {
@@ -2169,6 +2198,13 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
                     voice.phases[u] = 0.0f;
                 voice.envStage = EnvStage::Attack;
                 voice.envLevel = 0.0f;
+                // Snap smoothers to initial values (no fade-in from 0)
+                voice.smoothGain.init(sampleRate_);
+                voice.smoothGain.snap(VOICE_AMPLITUDE * voice.gain.load(std::memory_order_relaxed));
+                voice.smoothPan.init(sampleRate_);
+                voice.smoothPan.snap(voice.pan.load(std::memory_order_relaxed));
+                voice.smoothFreq.init(sampleRate_);
+                voice.smoothFreq.snap(voice.frequency.load(std::memory_order_relaxed));
             }
         }
 
@@ -2202,10 +2238,10 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
             }
         }
 
-        float baseFreq = voice.frequency.load(std::memory_order_relaxed);
-        float gain = VOICE_AMPLITUDE * voice.gain.load(std::memory_order_relaxed);
+        voice.smoothFreq.set(voice.frequency.load(std::memory_order_relaxed));
+        voice.smoothGain.set(VOICE_AMPLITUDE * voice.gain.load(std::memory_order_relaxed));
+        voice.smoothPan.set(voice.pan.load(std::memory_order_relaxed));
         float pitchBendSemitones = voice.pitchBend.load(std::memory_order_relaxed);
-        float basePan = voice.pan.load(std::memory_order_relaxed);
         float attRate = voice.attackRate.load(std::memory_order_relaxed);
         float decCoeff = voice.decayCoeff.load(std::memory_order_relaxed);
         float susLevel = voice.sustainLevel.load(std::memory_order_relaxed);
@@ -2299,6 +2335,11 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
             // Run modulation matrix for this sample
             ModValues mod;
             modMatrix_.process(mod, voice.modState, voice.envLevel, sampleRate_);
+
+            // Step smoothers per sample
+            float baseFreq = voice.smoothFreq.next();
+            float gain = voice.smoothGain.next();
+            float basePan = voice.smoothPan.next();
 
             // Apply pitch bend + mod pitch to frequency
             float totalPitchSemitones = pitchBendSemitones + mod.pitch;

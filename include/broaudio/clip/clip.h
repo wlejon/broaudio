@@ -1,5 +1,6 @@
 #pragma once
 
+#include "broaudio/dsp/smoother.h"
 #include "broaudio/spatial/listener.h"
 #include <atomic>
 #include <cstdint>
@@ -30,6 +31,10 @@ struct ClipPlayback {
     std::atomic<bool> playing{false};
     std::atomic<bool> looping{false};
     std::atomic<bool> active{true};
+
+    // Parameter smoothers (audio thread only)
+    Smoother smoothGain;
+    Smoother smoothPan;
 
     // Spatial source and directional filter (audio-thread only)
     SpatialSource spatial;

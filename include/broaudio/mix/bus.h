@@ -9,6 +9,7 @@
 #include "broaudio/dsp/distortion.h"
 #include "broaudio/dsp/equalizer.h"
 #include "broaudio/dsp/reverb.h"
+#include "broaudio/dsp/smoother.h"
 
 #include <atomic>
 #include <cstring>
@@ -74,6 +75,10 @@ struct Bus {
     uint8_t effectOrderCache[NUM_EFFECT_SLOTS] = {0, 1, 2, 3, 4, 5, 6};
     uint32_t effectOrderVersionSeen = 0;
 
+    // Parameter smoothers (audio thread only)
+    Smoother smoothGain;
+    Smoother smoothPan;
+
     // Metering (audio thread writes, main thread reads)
     std::atomic<float> peakL{0.0f};
     std::atomic<float> peakR{0.0f};
@@ -86,6 +91,8 @@ struct Bus {
         compressor.init(sampleRate);
         reverb.init(sampleRate);
         chorus.init(sampleRate);
+        smoothGain.init(sampleRate);
+        smoothPan.init(sampleRate);
     }
 
     void clearBuffer(int numFrames) {

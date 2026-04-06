@@ -379,6 +379,7 @@ private:
     uint64_t micPlaybackReadPos_ = 0;
 
     std::atomic<float> masterGain_{0.5f};
+    Smoother smoothMasterGain_;
     Limiter masterLimiter_{44100, 2};
     std::atomic<bool> micMuted_{true};
     std::atomic<float> micMonitorGain_{0.5f};

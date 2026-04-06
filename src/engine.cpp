@@ -4,6 +4,7 @@
 #include "broaudio/dsp/equalizer.h"
 #include "broaudio/dsp/fft.h"
 #include "broaudio/dsp/limiter.h"
+#include "broaudio/dsp/resampler.h"
 
 #include <SDL3/SDL.h>
 #include <cmath>
@@ -2460,6 +2461,17 @@ int Engine::createClipFromFile(const char* path)
 {
     AudioFileData data = loadAudioFile(path);
     if (!data.valid()) return -1;
+
+    // Resample to engine sample rate if needed
+    if (data.sampleRate != sampleRate_) {
+        auto resampled = resample(data.samples.data(), data.numFrames,
+                                  data.channels, data.sampleRate, sampleRate_);
+        if (resampled.empty()) return -1;
+        return createClip(resampled.data(),
+                          static_cast<int>(resampled.size()),
+                          data.channels);
+    }
+
     return createClip(data.samples.data(),
                       static_cast<int>(data.samples.size()),
                       data.channels);

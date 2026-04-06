@@ -58,6 +58,7 @@ add_library(broaudio STATIC
     src/dsp/equalizer.cpp
     src/dsp/fft.cpp
     src/dsp/limiter.cpp
+    src/dsp/resampler.cpp
     src/dsp/reverb.cpp
     src/synth/oscillator.cpp
     src/synth/modulation.cpp

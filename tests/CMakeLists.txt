@@ -27,6 +27,7 @@ set(BROAUDIO_TESTS
     test_sidechain
     test_scheduled_events
     test_signal_chain
+    test_resampler
     test_audio_file
     test_serialization
 )

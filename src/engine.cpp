@@ -176,7 +176,7 @@ void Engine::renderInternal(int numFrames)
                 auto sr = computeSpatial(listener_, pb->spatial);
                 g *= sr.gain;
                 clipPan = 0.0f; // center — head model does L/R
-                headParams = computeHeadParams(sr, sampleRate_);
+                headParams = computeHeadParams(sr, headModel_, sampleRate_);
                 spatialFilterActive = true;
             }
 
@@ -1203,6 +1203,25 @@ void Engine::setListenerOrientation(float fx, float fy, float fz,
     listener_.upZ.store(uz, std::memory_order_relaxed);
 }
 
+// --- Head model ---
+
+void Engine::setHeadModelEnabled(bool enabled) { headModel_.enabled.store(enabled, std::memory_order_relaxed); }
+void Engine::setHeadModelIldStrength(float s) { headModel_.ildStrength.store(s, std::memory_order_relaxed); }
+void Engine::setHeadModelBehindAttenuation(float a) { headModel_.behindAttenuation.store(a, std::memory_order_relaxed); }
+void Engine::setHeadModelNearCutoff(float front, float behind) {
+    headModel_.nearCutoffFront.store(front, std::memory_order_relaxed);
+    headModel_.nearCutoffBehind.store(behind, std::memory_order_relaxed);
+}
+void Engine::setHeadModelFarCutoffRatio(float r) { headModel_.farCutoffRatio.store(r, std::memory_order_relaxed); }
+void Engine::setHeadModelElevation(float nearHz, float farHz) {
+    headModel_.elevationNear.store(nearHz, std::memory_order_relaxed);
+    headModel_.elevationFar.store(farHz, std::memory_order_relaxed);
+}
+void Engine::setHeadModelCutoffRange(float minHz, float maxHz) {
+    headModel_.minCutoff.store(minHz, std::memory_order_relaxed);
+    headModel_.maxCutoff.store(maxHz, std::memory_order_relaxed);
+}
+
 // --- Spatial sources (voice) ---
 
 static void setSpatialEnabled(SpatialSource& s, bool enabled) { s.spatialEnabled.store(enabled, std::memory_order_relaxed); }
@@ -1879,7 +1898,7 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
                 auto sr = computeSpatial(engine->listener_, pb->spatial);
                 g *= sr.gain;
                 clipPan = 0.0f; // center — head model does L/R
-                headParams2 = computeHeadParams(sr, engine->sampleRate_);
+                headParams2 = computeHeadParams(sr, engine->headModel_, engine->sampleRate_);
                 spatialFilterActive2 = true;
             }
 
@@ -2236,7 +2255,7 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
             auto sr = computeSpatial(listener_, voice.spatial);
             voiceSpatialGain = sr.gain;
             voiceSpatialPan = sr.pan;
-            voiceHeadParams = computeHeadParams(sr, sampleRate_);
+            voiceHeadParams = computeHeadParams(sr, headModel_, sampleRate_);
         }
 
         for (int i = 0; i < numFrames; i++) {

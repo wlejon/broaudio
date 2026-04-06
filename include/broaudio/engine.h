@@ -254,6 +254,18 @@ public:
     void setListenerOrientation(float fx, float fy, float fz, float ux, float uy, float uz);
     const Listener& listener() const { return listener_; }
 
+    // --- Head model (spatial filtering) ---
+
+    HeadModel& headModel() { return headModel_; }
+    const HeadModel& headModel() const { return headModel_; }
+    void setHeadModelEnabled(bool enabled);
+    void setHeadModelIldStrength(float strength);
+    void setHeadModelBehindAttenuation(float atten);
+    void setHeadModelNearCutoff(float front, float behind);
+    void setHeadModelFarCutoffRatio(float ratio);
+    void setHeadModelElevation(float nearHz, float farHz);
+    void setHeadModelCutoffRange(float minHz, float maxHz);
+
     // --- Spatial sources (voice) ---
 
     void setVoiceSpatialEnabled(int voiceId, bool enabled);
@@ -329,6 +341,7 @@ private:
 
     // Spatial
     Listener listener_;
+    HeadModel headModel_;
 
     SDL_AudioStream* stream_ = nullptr;
     SDL_AudioStream* micStream_ = nullptr;

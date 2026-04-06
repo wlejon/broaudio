@@ -160,29 +160,60 @@ inline SpatialResult computeSpatial(const Listener& listener, const SpatialSourc
     return result;
 }
 
+// Configurable head shadow model parameters.
+// All fields are atomic for lock-free main→audio thread access.
+// Set from main thread, read from audio thread during spatial processing.
+struct HeadModel {
+    // ILD: far-ear gain reduction at 90 degrees (0 = silent, 1 = no reduction)
+    std::atomic<float> ildStrength{0.85f};      // far ear gain = 1 - |pan| * ildStrength
+
+    // Behind attenuation: both-ear gain reduction when source is directly behind
+    std::atomic<float> behindAttenuation{0.45f}; // gain = 1 - behindAttenuation when directly behind
+
+    // Near ear cutoff range (Hz): modulated by front/back
+    std::atomic<float> nearCutoffFront{18000.0f};  // cutoff when source is directly in front
+    std::atomic<float> nearCutoffBehind{2000.0f};   // cutoff when source is directly behind
+
+    // Far ear shadow: how much the far-ear cutoff drops relative to near ear at 90 degrees
+    std::atomic<float> farCutoffRatio{0.95f};     // far cutoff = near * (1 - |pan| * ratio)
+
+    // Elevation influence on cutoff (Hz shift)
+    std::atomic<float> elevationNear{5000.0f};    // near ear cutoff += elevation * this
+    std::atomic<float> elevationFar{2000.0f};     // far ear cutoff += elevation * this
+
+    // Cutoff clamps (Hz)
+    std::atomic<float> minCutoff{200.0f};
+    std::atomic<float> maxCutoff{20000.0f};
+
+    // Master enable — when false, no head filtering is applied (but distance/pan still work)
+    std::atomic<bool> enabled{true};
+};
+
 // Compute one-pole coefficient from cutoff frequency.
 inline float onePoleCoeff(float cutoffHz, int sampleRate) {
     float w = 6.2831853f * cutoffHz / static_cast<float>(sampleRate);
     return std::exp(-w);
 }
 
-// Compute per-ear head shadow parameters from a spatial result.
-// Models three effects:
-//   1. ILD (interaural level difference) — far ear is quieter
-//   2. ITF (interaural transfer function) — far ear is lowpass filtered (head shadow)
-//   3. Front/back cue — sounds behind are muffled in both ears
-//   4. Elevation cue — above is brighter, below is darker
-inline HeadParams computeHeadParams(const SpatialResult& sr, int sampleRate) {
+// Compute per-ear head shadow parameters from a spatial result and head model config.
+inline HeadParams computeHeadParams(const SpatialResult& sr, const HeadModel& hm, int sampleRate) {
     HeadParams hp;
 
-    // pan: -1 = hard left, +1 = hard right
-    // |pan| is how far off-center the source is (0 = center, 1 = 90 degrees)
+    if (!hm.enabled.load(std::memory_order_relaxed)) return hp;
+
     float absPan = std::abs(sr.pan);
+    float ildStr = hm.ildStrength.load(std::memory_order_relaxed);
+    float behindAtt = hm.behindAttenuation.load(std::memory_order_relaxed);
+    float nearFront = hm.nearCutoffFront.load(std::memory_order_relaxed);
+    float nearBehind = hm.nearCutoffBehind.load(std::memory_order_relaxed);
+    float farRatio = hm.farCutoffRatio.load(std::memory_order_relaxed);
+    float elevNear = hm.elevationNear.load(std::memory_order_relaxed);
+    float elevFar = hm.elevationFar.load(std::memory_order_relaxed);
+    float minCut = hm.minCutoff.load(std::memory_order_relaxed);
+    float maxCut = hm.maxCutoff.load(std::memory_order_relaxed);
 
     // ── ILD: interaural level difference ──
-    // At 90 degrees off-axis, the far ear loses ~12-15 dB (factor ~0.15-0.25)
-    // Near ear is unaffected. Center = both ears equal.
-    float shadow = 1.0f - absPan * 0.85f;  // 0.15 at hard left/right
+    float shadow = 1.0f - absPan * ildStr;
     if (sr.pan > 0.0f) {
         hp.gainL = shadow;
         hp.gainR = 1.0f;
@@ -191,34 +222,29 @@ inline HeadParams computeHeadParams(const SpatialResult& sr, int sampleRate) {
         hp.gainR = shadow;
     }
 
-    // Behind penalty: both ears lose gain
+    // Behind penalty
     if (sr.frontBack < 0.0f) {
-        float behindAtten = 1.0f + sr.frontBack * 0.45f; // down to 0.55 directly behind
-        hp.gainL *= behindAtten;
-        hp.gainR *= behindAtten;
+        float behindGain = 1.0f + sr.frontBack * behindAtt;
+        hp.gainL *= behindGain;
+        hp.gainR *= behindGain;
     }
 
     // ── ITF: head shadow lowpass ──
-    // Near ear cutoff: high (transparent), modulated by front/back
-    //   front: 18kHz, behind: 2kHz
-    float nearCutoff = 10000.0f + sr.frontBack * 8000.0f;
+    float nearRange = (nearFront - nearBehind) * 0.5f;
+    float nearMid = (nearFront + nearBehind) * 0.5f;
+    float nearCutoff = nearMid + sr.frontBack * nearRange;
+    float farCutoff = nearCutoff * (1.0f - absPan * farRatio);
 
-    // Far ear cutoff: aggressively low — head blocks high frequencies
-    //   center: same as near, 90 degrees: ~400 Hz
-    float farCutoff = nearCutoff * (1.0f - absPan * 0.95f);
+    nearCutoff += sr.elevation * elevNear;
+    farCutoff  += sr.elevation * elevFar;
 
-    // Elevation: above = brighter, below = darker
-    nearCutoff += sr.elevation * 5000.0f;
-    farCutoff  += sr.elevation * 2000.0f;
-
-    nearCutoff = std::max(400.0f, std::min(20000.0f, nearCutoff));
-    farCutoff  = std::max(200.0f, std::min(20000.0f, farCutoff));
+    nearCutoff = std::max(minCut, std::min(maxCut, nearCutoff));
+    farCutoff  = std::max(minCut, std::min(maxCut, farCutoff));
 
     float nearCoeff = onePoleCoeff(nearCutoff, sampleRate);
     float farCoeff  = onePoleCoeff(farCutoff, sampleRate);
 
     if (sr.pan > 0.0f) {
-        // Source on right: left ear = far, right ear = near
         hp.coeffL = farCoeff;
         hp.coeffR = nearCoeff;
     } else {

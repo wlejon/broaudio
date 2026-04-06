@@ -79,6 +79,238 @@ bool Engine::init()
     return true;
 }
 
+bool Engine::initHeadless()
+{
+    if (initialized_) return true;
+
+    // Create master bus (id 0) — same as init() but no SDL audio device
+    {
+        auto master = std::make_shared<Bus>();
+        master->id = MASTER_BUS_ID;
+        master->parentId.store(-1, std::memory_order_relaxed);
+        master->initAudioState(sampleRate_, MAX_SCRATCH_FRAMES);
+
+        auto list = std::make_shared<BusList>();
+        list->push_back(std::move(master));
+        buses_.store(std::move(list));
+    }
+
+    outputScratch_.resize(MAX_SCRATCH_FRAMES * 2, 0.0f);
+    micScratch_.resize(MAX_SCRATCH_FRAMES, 0.0f);
+
+    initialized_ = true;
+    SDL_Log("broaudio: initialized headless %d Hz stereo (no audio device)", sampleRate_);
+    return true;
+}
+
+void Engine::renderBlock(int numFrames)
+{
+    if (!initialized_ || numFrames <= 0) return;
+
+    // Process in chunks up to scratch buffer size
+    while (numFrames > 0) {
+        int chunk = std::min(numFrames, MAX_SCRATCH_FRAMES);
+        renderInternal(chunk);
+        numFrames -= chunk;
+    }
+}
+
+void Engine::renderInternal(int numFrames)
+{
+    int numFloats = numFrames * 2;
+    if (static_cast<size_t>(numFloats) > outputScratch_.size())
+        outputScratch_.resize(numFloats);
+    float* buffer = outputScratch_.data();
+
+    auto currentBuses = buses_.load();
+
+    for (auto& bus : *currentBuses) {
+        int frames = std::min(numFrames, static_cast<int>(bus->buffer.size()) / 2);
+        bus->clearBuffer(frames);
+    }
+
+    generateSamples(numFrames, *currentBuses);
+
+    // Mix clip playback into target bus buffers
+    {
+        auto currentClips = clips_.load();
+        auto currentPlaybacks = playbacks_.load();
+        for (auto& pb : *currentPlaybacks) {
+            if (!pb->active.load(std::memory_order_relaxed)) continue;
+            if (!pb->playing.load(std::memory_order_relaxed)) continue;
+
+            AudioClip* clip = nullptr;
+            for (auto& c : *currentClips) {
+                if (c->id == pb->clipId) { clip = c.get(); break; }
+            }
+            if (!clip) continue;
+
+            int targetBusId = pb->busId.load(std::memory_order_relaxed);
+            float* targetBuf = nullptr;
+            for (auto& bus : *currentBuses) {
+                if (bus->id == targetBusId) { targetBuf = bus->buffer.data(); break; }
+            }
+            if (!targetBuf) {
+                for (auto& bus : *currentBuses) {
+                    if (bus->id == MASTER_BUS_ID) { targetBuf = bus->buffer.data(); break; }
+                }
+            }
+            if (!targetBuf) continue;
+
+            int start = pb->regionStart.load(std::memory_order_relaxed);
+            int end = pb->regionEnd.load(std::memory_order_relaxed);
+            end = end > 0 ? end : clip->numFrames();
+            int len = end - start;
+            if (len <= 0) continue;
+
+            uint64_t pos = pb->playPos.load(std::memory_order_relaxed);
+            float g = pb->gain.load(std::memory_order_relaxed);
+            float rate = pb->rate.load(std::memory_order_relaxed);
+            bool looping = pb->looping.load(std::memory_order_relaxed);
+            float clipPan = pb->pan.load(std::memory_order_relaxed);
+            int ch = clip->channels;
+
+            if (pb->spatial.spatialEnabled.load(std::memory_order_relaxed)) {
+                float spatialPan = 0.0f;
+                float spatialGain = computeSpatial(listener_, pb->spatial, spatialPan);
+                g *= spatialGain;
+                clipPan = spatialPan;
+            }
+
+            float panL, panR;
+            panGains(clipPan, panL, panR);
+
+            int clipSendId = pb->sendBusId.load(std::memory_order_relaxed);
+            float clipSendAmt = pb->sendAmount.load(std::memory_order_relaxed);
+            float* clipSendBuf = nullptr;
+            if (clipSendId >= 0 && clipSendAmt > 0.0f) {
+                for (auto& bus : *currentBuses) {
+                    if (bus->id == clipSendId) { clipSendBuf = bus->buffer.data(); break; }
+                }
+            }
+
+            constexpr int FRAC_BITS = 16;
+            constexpr uint64_t FRAC_MASK = (1ULL << FRAC_BITS) - 1;
+            uint64_t increment = static_cast<uint64_t>(rate * (1 << FRAC_BITS) + 0.5f);
+
+            for (int i = 0; i < numFrames; i++) {
+                int intPos = static_cast<int>(pos >> FRAC_BITS);
+                if (looping) {
+                    intPos = intPos % len;
+                } else if (intPos >= len) {
+                    pb->playing.store(false, std::memory_order_relaxed);
+                    pb->active.store(false, std::memory_order_relaxed);
+                    break;
+                }
+                float frac = static_cast<float>(pos & FRAC_MASK) / (1 << FRAC_BITS);
+                int nextIdx = intPos + 1;
+                if (nextIdx >= len) nextIdx = looping ? 0 : intPos;
+
+                float outL, outR;
+                if (ch == 2) {
+                    int idx0 = (start + intPos) * 2;
+                    int idx1 = (start + nextIdx) * 2;
+                    float L0 = clip->samples[idx0];
+                    float R0 = clip->samples[idx0 + 1];
+                    float L1 = clip->samples[idx1];
+                    float R1 = clip->samples[idx1 + 1];
+                    float sL = (L0 + frac * (L1 - L0)) * g;
+                    float sR = (R0 + frac * (R1 - R0)) * g;
+                    outL = sL * panL + sR * (1.0f - panR);
+                    outR = sR * panR + sL * (1.0f - panL);
+                } else {
+                    float s0 = clip->samples[start + intPos];
+                    float s1 = clip->samples[start + nextIdx];
+                    float sample = (s0 + frac * (s1 - s0)) * g;
+                    outL = sample * panL;
+                    outR = sample * panR;
+                }
+
+                targetBuf[i * 2]     += outL;
+                targetBuf[i * 2 + 1] += outR;
+
+                if (clipSendBuf) {
+                    clipSendBuf[i * 2]     += outL * clipSendAmt;
+                    clipSendBuf[i * 2 + 1] += outR * clipSendAmt;
+                }
+
+                pos += increment;
+            }
+            pb->playPos.store(pos, std::memory_order_relaxed);
+        }
+    }
+
+    // Record tap (mono mixdown from master bus, before effects)
+    Bus* masterBus = nullptr;
+    for (auto& bus : *currentBuses) {
+        if (bus->id == MASTER_BUS_ID) { masterBus = bus.get(); break; }
+    }
+
+    if (recording_.load(std::memory_order_relaxed) && masterBus) {
+        uint64_t wp = recordWritePos_.load(std::memory_order_relaxed);
+        for (int i = 0; i < numFrames; i++) {
+            float mono = (masterBus->buffer[i * 2] + masterBus->buffer[i * 2 + 1]) * 0.5f;
+            recordRing_[static_cast<int>((wp + i) % RECORD_RING_SIZE)] = mono;
+        }
+        recordWritePos_.store(wp + numFrames, std::memory_order_release);
+    }
+
+    // Process child buses
+    for (auto& bus : *currentBuses) {
+        if (bus->id == MASTER_BUS_ID) continue;
+
+        processBusEffects(*bus, numFrames);
+
+        int parentId = bus->parentId.load(std::memory_order_relaxed);
+        for (auto& parent : *currentBuses) {
+            if (parent->id == parentId) {
+                mixBusIntoParent(*bus, *parent, numFrames);
+                break;
+            }
+        }
+
+        int busSendId = bus->sendBusId.load(std::memory_order_relaxed);
+        float busSendAmt = bus->sendAmount.load(std::memory_order_relaxed);
+        if (busSendId >= 0 && busSendAmt > 0.0f) {
+            for (auto& sendTarget : *currentBuses) {
+                if (sendTarget->id == busSendId) {
+                    float busGain = bus->gain.load(std::memory_order_relaxed) * busSendAmt;
+                    float* src = bus->buffer.data();
+                    float* dst = sendTarget->buffer.data();
+                    for (int i = 0; i < numFrames * 2; i++) {
+                        dst[i] += src[i] * busGain;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    // Process master bus effects
+    if (masterBus) {
+        processBusEffects(*masterBus, numFrames);
+    }
+
+    // Apply master gain + limiter
+    if (masterBus) {
+        float mg = masterGain_.load(std::memory_order_relaxed);
+        for (int i = 0; i < numFloats; i++) {
+            buffer[i] = masterBus->buffer[i] * mg;
+        }
+        masterLimiter_.process(buffer, static_cast<size_t>(numFrames));
+    } else {
+        std::memset(buffer, 0, numFloats * sizeof(float));
+    }
+
+    // Mono mixdown to output ring buffer for analysis
+    for (int i = 0; i < numFrames; i++) {
+        buffer[i] = (buffer[i * 2] + buffer[i * 2 + 1]) * 0.5f;
+    }
+    outputBuffer_.write(buffer, numFrames);
+
+    samplesGenerated_.fetch_add(numFrames, std::memory_order_relaxed);
+}
+
 void Engine::shutdown()
 {
     stopMicCapture();

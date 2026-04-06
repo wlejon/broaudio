@@ -108,4 +108,111 @@ TEST(bus_default_order_includes_eq) {
     PASS();
 }
 
+// --- Per-band frequency response verification ---
+
+static constexpr int TEST_SR = 44100;
+
+// Helper: measure amplitude of a sine at a given frequency after EQ processing
+static float measureEqResponse(Equalizer& eq, float freq) {
+    const int frames = 4096;
+    std::vector<float> buf(frames * 2);
+    for (int i = 0; i < frames; i++) {
+        float s = std::sin(2.0f * 3.14159265f * freq * i / TEST_SR) * 0.5f;
+        buf[i * 2] = s;
+        buf[i * 2 + 1] = s;
+    }
+    eq.reset();
+    eq.processStereoInterleaved(buf.data(), frames);
+
+    // Measure peak amplitude in the second half (after filter settles)
+    float peak = 0.0f;
+    for (int i = frames / 2; i < frames; i++) {
+        float a = std::fabs(buf[i * 2]);
+        if (a > peak) peak = a;
+    }
+    return peak;
+}
+
+TEST(eq_band_boost_increases_amplitude_at_center_freq) {
+    // Boost each band by +12dB and verify the signal at that frequency gets louder
+    for (int band = 0; band < Equalizer::NUM_BANDS; band++) {
+        float centerFreq = Equalizer::BAND_FREQUENCIES[band];
+        if (centerFreq > TEST_SR / 2.5f) continue;  // skip near-Nyquist
+
+        // Flat EQ reference
+        Equalizer eqFlat(TEST_SR);
+        eqFlat.setEnabled(true);
+        float ampFlat = measureEqResponse(eqFlat, centerFreq);
+
+        // Boosted band
+        Equalizer eqBoosted(TEST_SR);
+        eqBoosted.setEnabled(true);
+        eqBoosted.setBandGain(band, 12.0f);
+        float ampBoosted = measureEqResponse(eqBoosted, centerFreq);
+
+        // +12dB should roughly quadruple amplitude (4x). Require at least 2x.
+        ASSERT_GT(ampBoosted, ampFlat * 2.0f);
+    }
+    PASS();
+}
+
+TEST(eq_band_cut_decreases_amplitude_at_center_freq) {
+    for (int band = 0; band < Equalizer::NUM_BANDS; band++) {
+        float centerFreq = Equalizer::BAND_FREQUENCIES[band];
+        if (centerFreq > TEST_SR / 2.5f) continue;
+
+        Equalizer eqFlat(TEST_SR);
+        eqFlat.setEnabled(true);
+        float ampFlat = measureEqResponse(eqFlat, centerFreq);
+
+        Equalizer eqCut(TEST_SR);
+        eqCut.setEnabled(true);
+        eqCut.setBandGain(band, -12.0f);
+        float ampCut = measureEqResponse(eqCut, centerFreq);
+
+        // -12dB should reduce to roughly 1/4. Require at least 50% reduction.
+        ASSERT_LT(ampCut, ampFlat * 0.5f);
+    }
+    PASS();
+}
+
+TEST(eq_boost_is_localized_to_target_band) {
+    // Boosting 1kHz (band 3) should not significantly affect 60Hz (band 0)
+    Equalizer eq(TEST_SR);
+    eq.setEnabled(true);
+    eq.setBandGain(3, 12.0f);  // boost 1kHz
+
+    float ampAt60 = measureEqResponse(eq, 60.0f);
+
+    Equalizer eqFlat(TEST_SR);
+    eqFlat.setEnabled(true);
+    float ampAt60Flat = measureEqResponse(eqFlat, 60.0f);
+
+    // 60Hz should be within ±3dB of flat response
+    float ratio = ampAt60 / (ampAt60Flat + 1e-10f);
+    ASSERT_GT(ratio, 0.7f);   // not more than ~3dB down
+    ASSERT_LT(ratio, 1.41f);  // not more than ~3dB up
+    PASS();
+}
+
+TEST(eq_master_gain_applies_uniformly) {
+    // +6dB master gain should double amplitude at all frequencies
+    Equalizer eqFlat(TEST_SR);
+    eqFlat.setEnabled(true);
+    eqFlat.setMasterGain(0.0f);
+    float amp440Flat = measureEqResponse(eqFlat, 440.0f);
+    float amp2kFlat = measureEqResponse(eqFlat, 2000.0f);
+
+    Equalizer eqGain(TEST_SR);
+    eqGain.setEnabled(true);
+    eqGain.setMasterGain(6.0f);
+    float amp440Gain = measureEqResponse(eqGain, 440.0f);
+    float amp2kGain = measureEqResponse(eqGain, 2000.0f);
+
+    // Both should roughly double (±1dB tolerance)
+    ASSERT_NEAR(amp440Gain / amp440Flat, 2.0f, 0.3f);
+    ASSERT_NEAR(amp2kGain / amp2kFlat, 2.0f, 0.3f);
+    PASS();
+}
+
 int main() { return runAllTests(); }

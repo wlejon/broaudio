@@ -32,6 +32,7 @@ public:
     Engine& operator=(const Engine&) = delete;
 
     bool init();
+    bool initHeadless();
     void shutdown();
 
     double currentTime() const;
@@ -209,6 +210,12 @@ public:
 
     // --- Offline processing ---
 
+    // Render numFrames of audio without outputting to any device.
+    // Drives the full pipeline (voices, clips, bus effects, mix, limiter)
+    // and updates metering, analysis buffers, and recording.
+    // Use in headless mode (after initHeadless()) to pump the audio engine.
+    void renderBlock(int numFrames);
+
     // Process mono samples through a bus's effect chain offline (non-realtime).
     // Creates a temporary bus with cloned params, processes in chunks, returns mono output.
     // Safe to call from the main thread. Does not affect live audio.
@@ -274,6 +281,7 @@ private:
 
     static void audioCallback(void* userdata, SDL_AudioStream* stream,
                               int additional_amount, int total_amount);
+    void renderInternal(int numFrames);
     void generateSamples(int numFrames, const BusList& buses);
     void processBusEffects(Bus& bus, int numFrames);
     void processBusFilters(Bus& bus, float* buf, int numFrames);

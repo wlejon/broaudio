@@ -11,6 +11,22 @@ if(NOT TARGET SDL3::SDL3 AND NOT TARGET SDL3::SDL3-static)
     find_package(SDL3 REQUIRED)
 endif()
 
+# opusfile — optional OGG Opus support
+option(BROAUDIO_OPUS "Enable OGG Opus loading via opusfile" OFF)
+if(BROAUDIO_OPUS)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(OPUSFILE IMPORTED_TARGET opusfile)
+    endif()
+    if(NOT OPUSFILE_FOUND)
+        find_package(OpusFile QUIET)
+    endif()
+    if(NOT OPUSFILE_FOUND AND NOT TARGET OpusFile::opusfile)
+        set(BROAUDIO_OPUS OFF)
+        message(STATUS "broaudio: opusfile not found, OGG Opus support disabled")
+    endif()
+endif()
+
 # libremidi — optional MIDI support
 option(BROAUDIO_MIDI "Enable MIDI input via libremidi" ON)
 if(BROAUDIO_MIDI)
@@ -51,6 +67,8 @@ add_library(broaudio STATIC
     src/clip/clip.cpp
     src/sequencer/automation.cpp
     src/sequencer/sequence.cpp
+    src/io/audio_file.cpp
+    src/io/serialization.cpp
     src/engine.cpp
 )
 
@@ -63,6 +81,9 @@ endif()
 # works correctly both standalone and when included via add_subdirectory.
 target_compile_features(broaudio PUBLIC cxx_std_20)
 target_include_directories(broaudio PUBLIC include)
+target_include_directories(broaudio PRIVATE
+    third_party/dr_libs
+    third_party)
 
 if(MSVC)
     target_compile_options(broaudio PRIVATE /MP /permissive- /utf-8)
@@ -79,6 +100,15 @@ endif()
 
 if(BROAUDIO_MIDI AND TARGET libremidi::libremidi)
     target_link_libraries(broaudio PUBLIC libremidi::libremidi)
+endif()
+
+if(BROAUDIO_OPUS)
+    target_compile_definitions(broaudio PUBLIC BROAUDIO_HAS_OPUS=1)
+    if(TARGET PkgConfig::OPUSFILE)
+        target_link_libraries(broaudio PRIVATE PkgConfig::OPUSFILE)
+    elseif(TARGET OpusFile::opusfile)
+        target_link_libraries(broaudio PRIVATE OpusFile::opusfile)
+    endif()
 endif()
 
 # Tests

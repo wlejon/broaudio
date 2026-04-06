@@ -13,6 +13,8 @@
 #include "broaudio/synth/wavetable.h"
 #include "broaudio/clip/clip.h"
 #include "broaudio/spatial/listener.h"
+#include "broaudio/io/audio_file.h"
+#include "broaudio/io/serialization.h"
 
 #include <atomic>
 #include <memory>
@@ -283,6 +285,23 @@ public:
     void setPlaybackSpatialMaxDistance(int instanceId, float dist);
     void setPlaybackSpatialRolloff(int instanceId, float rolloff);
     void setPlaybackSpatialDistanceModel(int instanceId, DistanceModel model);
+
+    // --- Audio file I/O ---
+
+    // Create a clip by loading an audio file (WAV, FLAC, MP3, OGG/Opus).
+    // Returns clip id on success, -1 on failure.
+    int createClipFromFile(const char* path);
+
+    // Export the current recording buffer to a WAV file.
+    // Returns true on success. Call after stopRecording().
+    bool exportRecordingToWav(const char* path);
+
+    // --- Preset application ---
+
+    void applyVoicePreset(int voiceId, const VoicePreset& preset);
+    void applyBusPreset(int busId, const BusPreset& preset);
+    void applyModPreset(const ModPreset& preset);
+    void applyEnginePreset(const EnginePreset& preset);
 
 private:
     // Type aliases (must precede method declarations that use them)

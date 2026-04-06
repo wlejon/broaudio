@@ -170,11 +170,14 @@ void Engine::renderInternal(int numFrames)
             float clipPan = pb->pan.load(std::memory_order_relaxed);
             int ch = clip->channels;
 
+            HeadParams headParams;
+            bool spatialFilterActive = false;
             if (pb->spatial.spatialEnabled.load(std::memory_order_relaxed)) {
-                float spatialPan = 0.0f;
-                float spatialGain = computeSpatial(listener_, pb->spatial, spatialPan);
-                g *= spatialGain;
-                clipPan = spatialPan;
+                auto sr = computeSpatial(listener_, pb->spatial);
+                g *= sr.gain;
+                clipPan = 0.0f; // center — head model does L/R
+                headParams = computeHeadParams(sr, sampleRate_);
+                spatialFilterActive = true;
             }
 
             float panL, panR;
@@ -225,6 +228,9 @@ void Engine::renderInternal(int numFrames)
                     outL = sample * panL;
                     outR = sample * panR;
                 }
+
+                if (spatialFilterActive)
+                    pb->spatialFilter.process(outL, outR, headParams);
 
                 targetBuf[i * 2]     += outL;
                 targetBuf[i * 2 + 1] += outR;
@@ -1867,11 +1873,14 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
             int ch = clip->channels;
 
             // Spatial override for clip playback
+            HeadParams headParams2;
+            bool spatialFilterActive2 = false;
             if (pb->spatial.spatialEnabled.load(std::memory_order_relaxed)) {
-                float spatialPan = 0.0f;
-                float spatialGain = computeSpatial(engine->listener_, pb->spatial, spatialPan);
-                g *= spatialGain;
-                clipPan = spatialPan;
+                auto sr = computeSpatial(engine->listener_, pb->spatial);
+                g *= sr.gain;
+                clipPan = 0.0f; // center — head model does L/R
+                headParams2 = computeHeadParams(sr, engine->sampleRate_);
+                spatialFilterActive2 = true;
             }
 
             float panL, panR;
@@ -1926,6 +1935,9 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
                     outL = sample * panL;
                     outR = sample * panR;
                 }
+
+                if (spatialFilterActive2)
+                    pb->spatialFilter.process(outL, outR, headParams2);
 
                 targetBuf[i * 2]     += outL;
                 targetBuf[i * 2 + 1] += outR;
@@ -2215,6 +2227,18 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
         }
         float unisonGainNorm = 1.0f / std::sqrt(static_cast<float>(unisonN));
 
+        // Pre-compute spatial result once per block (positions don't change within a callback)
+        float voiceSpatialGain = 1.0f;
+        float voiceSpatialPan = 0.0f;
+        HeadParams voiceHeadParams;
+        bool voiceSpatialActive = voice.spatial.spatialEnabled.load(std::memory_order_relaxed);
+        if (voiceSpatialActive) {
+            auto sr = computeSpatial(listener_, voice.spatial);
+            voiceSpatialGain = sr.gain;
+            voiceSpatialPan = sr.pan;
+            voiceHeadParams = computeHeadParams(sr, sampleRate_);
+        }
+
         for (int i = 0; i < numFrames; i++) {
             double t = baseTime + i * sampleDt;
             if (t < startTime) continue;
@@ -2264,12 +2288,11 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
             float finalGain = gain * voice.envLevel * mod.gain;
             float finalPan = std::clamp(basePan + mod.pan, -1.0f, 1.0f);
 
-            // Spatial override: if enabled, compute pan and attenuation from 3D position
-            if (voice.spatial.spatialEnabled.load(std::memory_order_relaxed)) {
-                float spatialPan = 0.0f;
-                float spatialGain = computeSpatial(listener_, voice.spatial, spatialPan);
-                finalGain *= spatialGain;
-                finalPan = std::clamp(spatialPan + mod.pan, -1.0f, 1.0f);
+            // Spatial override: if enabled, apply distance attenuation but skip panGains —
+            // the head model handles all L/R differentiation.
+            if (voiceSpatialActive) {
+                finalGain *= voiceSpatialGain;
+                finalPan = 0.0f; // center — head model does L/R
             }
 
             // Generate sample(s) — unison sums N oscillators with per-osc pan
@@ -2360,8 +2383,15 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
                 }
             }
 
-            buf[i * 2]     += sumL * finalGain;
-            buf[i * 2 + 1] += sumR * finalGain;
+            float outL = sumL * finalGain;
+            float outR = sumR * finalGain;
+
+            // Directional filter: front/back + elevation cues
+            if (voiceSpatialActive)
+                voice.spatialFilter.process(outL, outR, voiceHeadParams);
+
+            buf[i * 2]     += outL;
+            buf[i * 2 + 1] += outR;
 
             // Aux send (base amount + mod matrix delaySend)
             if (sendBuf) {

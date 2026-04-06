@@ -82,8 +82,9 @@ struct Voice {
     BiquadFilter filter;
     uint32_t filterVersionSeen = 0;
 
-    // Spatial source
+    // Spatial source and directional filter (audio-thread only)
     SpatialSource spatial;
+    SpatialFilter spatialFilter;
 };
 
 } // namespace broaudio

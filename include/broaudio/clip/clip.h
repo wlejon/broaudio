@@ -31,8 +31,9 @@ struct ClipPlayback {
     std::atomic<bool> looping{false};
     std::atomic<bool> active{true};
 
-    // Spatial source
+    // Spatial source and directional filter (audio-thread only)
     SpatialSource spatial;
+    SpatialFilter spatialFilter;
 };
 
 } // namespace broaudio

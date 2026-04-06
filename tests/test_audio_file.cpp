@@ -1,6 +1,8 @@
 #include "test_harness.h"
 #include "broaudio/io/audio_file.h"
+#include "broaudio/engine.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <numbers>
@@ -131,6 +133,94 @@ TEST(save_wav_rejects_bad_params) {
     ASSERT_FALSE(saveWav(TEST_WAV_PATH, &dummy, 0, 1, 44100));
     ASSERT_FALSE(saveWav(TEST_WAV_PATH, &dummy, 1, 0, 44100));
     ASSERT_FALSE(saveWav(TEST_WAV_PATH, &dummy, 1, 1, 0));
+    PASS();
+}
+
+// ---------------------------------------------------------------------------
+// Async loading & size limit (require Engine in headless mode)
+// ---------------------------------------------------------------------------
+
+TEST(create_clip_from_file_async) {
+    // Save a test WAV
+    int sr = 44100;
+    auto sine = generateSine(sr);
+    saveWav(TEST_WAV_PATH, sine.data(), static_cast<int>(sine.size()), 1, sr);
+
+    Engine engine;
+    ASSERT_TRUE(engine.initHeadless());
+
+    auto future = engine.createClipFromFileAsync(TEST_WAV_PATH);
+    int clipId = future.get();
+    ASSERT_TRUE(clipId >= 0);
+    ASSERT_EQ(engine.getClipChannels(clipId), 1);
+    ASSERT_EQ(engine.getClipSampleCount(clipId), static_cast<int>(sine.size()));
+
+    engine.shutdown();
+    std::remove(TEST_WAV_PATH);
+    PASS();
+}
+
+TEST(async_load_nonexistent_returns_negative) {
+    Engine engine;
+    ASSERT_TRUE(engine.initHeadless());
+
+    auto future = engine.createClipFromFileAsync("does_not_exist.wav");
+    int clipId = future.get();
+    ASSERT_EQ(clipId, -1);
+
+    engine.shutdown();
+    PASS();
+}
+
+TEST(async_load_null_path_returns_negative) {
+    Engine engine;
+    ASSERT_TRUE(engine.initHeadless());
+
+    auto future = engine.createClipFromFileAsync(nullptr);
+    int clipId = future.get();
+    ASSERT_EQ(clipId, -1);
+
+    engine.shutdown();
+    PASS();
+}
+
+TEST(size_limit_rejects_large_clip) {
+    int sr = 44100;
+    auto sine = generateSine(sr);
+    saveWav(TEST_WAV_PATH, sine.data(), static_cast<int>(sine.size()), 1, sr);
+
+    Engine engine;
+    ASSERT_TRUE(engine.initHeadless());
+
+    // Set a tiny limit (1 KB) — the 1-second 44100-sample clip will exceed it
+    engine.setMaxClipDecodedBytes(1024);
+    int clipId = engine.createClipFromFile(TEST_WAV_PATH);
+    ASSERT_EQ(clipId, -1);
+
+    // Disable limit — should succeed
+    engine.setMaxClipDecodedBytes(0);
+    clipId = engine.createClipFromFile(TEST_WAV_PATH);
+    ASSERT_TRUE(clipId >= 0);
+
+    engine.shutdown();
+    std::remove(TEST_WAV_PATH);
+    PASS();
+}
+
+TEST(size_limit_rejects_large_clip_async) {
+    int sr = 44100;
+    auto sine = generateSine(sr);
+    saveWav(TEST_WAV_PATH, sine.data(), static_cast<int>(sine.size()), 1, sr);
+
+    Engine engine;
+    ASSERT_TRUE(engine.initHeadless());
+
+    engine.setMaxClipDecodedBytes(1024);
+    auto future = engine.createClipFromFileAsync(TEST_WAV_PATH);
+    ASSERT_EQ(future.get(), -1);
+
+    engine.shutdown();
+    std::remove(TEST_WAV_PATH);
     PASS();
 }
 

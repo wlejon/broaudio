@@ -2503,6 +2503,11 @@ int Engine::createClipFromFile(const char* path)
     AudioFileData data = loadAudioFile(path);
     if (!data.valid()) return -1;
 
+    // Reject clips that exceed the decoded size limit
+    if (maxClipDecodedBytes_ > 0 &&
+        data.samples.size() * sizeof(float) > maxClipDecodedBytes_)
+        return -1;
+
     // Resample to engine sample rate if needed
     if (data.sampleRate != sampleRate_) {
         auto resampled = resample(data.samples.data(), data.numFrames,
@@ -2516,6 +2521,35 @@ int Engine::createClipFromFile(const char* path)
     return createClip(data.samples.data(),
                       static_cast<int>(data.samples.size()),
                       data.channels);
+}
+
+std::future<int> Engine::createClipFromFileAsync(const char* path)
+{
+    // Capture what we need: a copy of the path, engine state for resampling
+    std::string pathStr(path ? path : "");
+    int engineRate = sampleRate_;
+    size_t maxBytes = maxClipDecodedBytes_;
+
+    return std::async(std::launch::async, [this, pathStr, engineRate, maxBytes]() -> int {
+        AudioFileData data = loadAudioFile(pathStr.c_str());
+        if (!data.valid()) return -1;
+
+        if (maxBytes > 0 && data.samples.size() * sizeof(float) > maxBytes)
+            return -1;
+
+        if (data.sampleRate != engineRate) {
+            auto resampled = resample(data.samples.data(), data.numFrames,
+                                      data.channels, data.sampleRate, engineRate);
+            if (resampled.empty()) return -1;
+            return createClip(resampled.data(),
+                              static_cast<int>(resampled.size()),
+                              data.channels);
+        }
+
+        return createClip(data.samples.data(),
+                          static_cast<int>(data.samples.size()),
+                          data.channels);
+    });
 }
 
 bool Engine::exportRecordingToWav(const char* path)

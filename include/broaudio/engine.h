@@ -17,6 +17,7 @@
 #include "broaudio/io/serialization.h"
 
 #include <atomic>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -292,6 +293,16 @@ public:
     // Returns clip id on success, -1 on failure.
     int createClipFromFile(const char* path);
 
+    // Async version — decodes and resamples on a background thread.
+    // Returns a future that resolves to the clip id (-1 on failure).
+    std::future<int> createClipFromFileAsync(const char* path);
+
+    // Maximum decoded clip size in bytes. Files exceeding this after decode
+    // are rejected (createClipFromFile returns -1). Default ~200 MB.
+    // Set to 0 to disable the limit.
+    void setMaxClipDecodedBytes(size_t bytes) { maxClipDecodedBytes_ = bytes; }
+    size_t maxClipDecodedBytes() const { return maxClipDecodedBytes_; }
+
     // Export the current recording buffer to a WAV file.
     // Returns true on success. Call after stopRecording().
     bool exportRecordingToWav(const char* path);
@@ -407,6 +418,9 @@ private:
     // Pre-allocated scratch buffers for audio callbacks (avoids heap allocs on audio thread)
     std::vector<float> outputScratch_;
     std::vector<float> micScratch_;
+
+    // Max decoded clip size (bytes). 0 = unlimited.
+    size_t maxClipDecodedBytes_ = 200 * 1024 * 1024;  // 200 MB
 };
 
 } // namespace broaudio

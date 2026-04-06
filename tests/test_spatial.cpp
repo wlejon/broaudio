@@ -25,28 +25,25 @@ static void initSource(SpatialSource& s, float x, float y, float z, DistanceMode
 TEST(inverse_at_ref_distance) {
     Listener l; initDefaultListener(l);
     SpatialSource s; initSource(s, 0.0f, 0.0f, -1.0f);  // 1 unit in front
-    float pan;
-    float gain = computeSpatial(l, s, pan);
-    ASSERT_NEAR(gain, 1.0f, 0.01f);
+    auto r = computeSpatial(l, s);
+    ASSERT_NEAR(r.gain, 1.0f, 0.01f);
     PASS();
 }
 
 TEST(inverse_at_double_ref_distance) {
     Listener l; initDefaultListener(l);
     SpatialSource s; initSource(s, 0.0f, 0.0f, -2.0f);
-    float pan;
-    float gain = computeSpatial(l, s, pan);
+    auto r = computeSpatial(l, s);
     // Inverse: ref / (ref + rolloff * (d - ref)) = 1 / (1 + 1*(2-1)) = 0.5
-    ASSERT_NEAR(gain, 0.5f, 0.01f);
+    ASSERT_NEAR(r.gain, 0.5f, 0.01f);
     PASS();
 }
 
 TEST(inverse_at_large_distance) {
     Listener l; initDefaultListener(l);
     SpatialSource s; initSource(s, 0.0f, 0.0f, -50.0f);
-    float pan;
-    float gain = computeSpatial(l, s, pan);
-    ASSERT_LT(gain, 0.05f);
+    auto r = computeSpatial(l, s);
+    ASSERT_LT(r.gain, 0.05f);
     PASS();
 }
 
@@ -55,27 +52,24 @@ TEST(inverse_at_large_distance) {
 TEST(linear_at_ref_distance) {
     Listener l; initDefaultListener(l);
     SpatialSource s; initSource(s, 0.0f, 0.0f, -1.0f, DistanceModel::Linear);
-    float pan;
-    float gain = computeSpatial(l, s, pan);
-    ASSERT_NEAR(gain, 1.0f, 0.01f);
+    auto r = computeSpatial(l, s);
+    ASSERT_NEAR(r.gain, 1.0f, 0.01f);
     PASS();
 }
 
 TEST(linear_at_max_distance) {
     Listener l; initDefaultListener(l);
     SpatialSource s; initSource(s, 0.0f, 0.0f, -100.0f, DistanceModel::Linear);
-    float pan;
-    float gain = computeSpatial(l, s, pan);
-    ASSERT_NEAR(gain, 0.0f, 0.01f);
+    auto r = computeSpatial(l, s);
+    ASSERT_NEAR(r.gain, 0.0f, 0.01f);
     PASS();
 }
 
 TEST(linear_halfway) {
     Listener l; initDefaultListener(l);
     SpatialSource s; initSource(s, 0.0f, 0.0f, -50.5f, DistanceModel::Linear);
-    float pan;
-    float gain = computeSpatial(l, s, pan);
-    ASSERT_NEAR(gain, 0.5f, 0.02f);
+    auto r = computeSpatial(l, s);
+    ASSERT_NEAR(r.gain, 0.5f, 0.02f);
     PASS();
 }
 
@@ -84,19 +78,17 @@ TEST(linear_halfway) {
 TEST(exponential_at_ref_distance) {
     Listener l; initDefaultListener(l);
     SpatialSource s; initSource(s, 0.0f, 0.0f, -1.0f, DistanceModel::Exponential);
-    float pan;
-    float gain = computeSpatial(l, s, pan);
-    ASSERT_NEAR(gain, 1.0f, 0.01f);
+    auto r = computeSpatial(l, s);
+    ASSERT_NEAR(r.gain, 1.0f, 0.01f);
     PASS();
 }
 
 TEST(exponential_at_double_ref) {
     Listener l; initDefaultListener(l);
     SpatialSource s; initSource(s, 0.0f, 0.0f, -2.0f, DistanceModel::Exponential);
-    float pan;
-    float gain = computeSpatial(l, s, pan);
+    auto r = computeSpatial(l, s);
     // (d/ref)^-rolloff = (2/1)^-1 = 0.5
-    ASSERT_NEAR(gain, 0.5f, 0.01f);
+    ASSERT_NEAR(r.gain, 0.5f, 0.01f);
     PASS();
 }
 
@@ -105,9 +97,8 @@ TEST(exponential_at_double_ref) {
 TEST(source_directly_ahead_pans_center) {
     Listener l; initDefaultListener(l);
     SpatialSource s; initSource(s, 0.0f, 0.0f, -5.0f);
-    float pan;
-    computeSpatial(l, s, pan);
-    ASSERT_NEAR(pan, 0.0f, 0.01f);
+    auto r = computeSpatial(l, s);
+    ASSERT_NEAR(r.pan, 0.0f, 0.01f);
     PASS();
 }
 
@@ -115,27 +106,24 @@ TEST(source_to_right_pans_right) {
     Listener l; initDefaultListener(l);
     // Listener faces -Z, so right is +X
     SpatialSource s; initSource(s, 5.0f, 0.0f, 0.0f);
-    float pan;
-    computeSpatial(l, s, pan);
-    ASSERT_GT(pan, 0.9f);
+    auto r = computeSpatial(l, s);
+    ASSERT_GT(r.pan, 0.9f);
     PASS();
 }
 
 TEST(source_to_left_pans_left) {
     Listener l; initDefaultListener(l);
     SpatialSource s; initSource(s, -5.0f, 0.0f, 0.0f);
-    float pan;
-    computeSpatial(l, s, pan);
-    ASSERT_LT(pan, -0.9f);
+    auto r = computeSpatial(l, s);
+    ASSERT_LT(r.pan, -0.9f);
     PASS();
 }
 
 TEST(source_behind_pans_near_zero) {
     Listener l; initDefaultListener(l);
     SpatialSource s; initSource(s, 0.0f, 0.0f, 5.0f);  // behind
-    float pan;
-    computeSpatial(l, s, pan);
-    ASSERT_NEAR(pan, 0.0f, 0.05f);
+    auto r = computeSpatial(l, s);
+    ASSERT_NEAR(r.pan, 0.0f, 0.05f);
     PASS();
 }
 

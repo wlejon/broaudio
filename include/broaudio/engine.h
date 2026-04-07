@@ -377,8 +377,8 @@ private:
     SDL_AudioStream* micStream_ = nullptr;
     std::atomic<uint64_t> samplesGenerated_{0};
     int sampleRate_ = 44100;
-    bool initialized_ = false;
-    bool micCapturing_ = false;
+    std::atomic<bool> initialized_{false};
+    std::atomic<bool> micCapturing_{false};
 
     AnalysisBuffer outputBuffer_{16384};
     AnalysisBuffer micBuffer_{16384};
@@ -387,7 +387,7 @@ private:
     static constexpr int MIC_FIFO_SIZE = 22050;
     std::vector<float> micPlayback_ = std::vector<float>(MIC_FIFO_SIZE, 0.0f);
     std::atomic<uint64_t> micPlaybackWritePos_{0};
-    uint64_t micPlaybackReadPos_ = 0;
+    std::atomic<uint64_t> micPlaybackReadPos_{0};
 
     std::atomic<float> masterGain_{0.5f};
     Smoother smoothMasterGain_;
@@ -399,7 +399,7 @@ private:
     static constexpr int RECORD_RING_SIZE = 44100 * 60;
     std::vector<float> recordRing_ = std::vector<float>(RECORD_RING_SIZE, 0.0f);
     std::atomic<uint64_t> recordWritePos_{0};
-    uint64_t recordStartPos_ = 0;
+    std::atomic<uint64_t> recordStartPos_{0};
     std::atomic<bool> recording_{false};
     std::vector<float> recordOutput_;
 

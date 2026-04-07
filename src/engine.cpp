@@ -1341,7 +1341,8 @@ void Engine::micCallback(void* userdata, SDL_AudioStream* stream,
 
 void Engine::startRecording()
 {
-    recordStartPos_ = recordWritePos_.load(std::memory_order_relaxed);
+    recordStartPos_.store(recordWritePos_.load(std::memory_order_relaxed),
+                          std::memory_order_relaxed);
     recording_.store(true, std::memory_order_release);
 }
 
@@ -1350,7 +1351,7 @@ void Engine::stopRecording()
     recording_.store(false, std::memory_order_release);
 
     uint64_t endPos = recordWritePos_.load(std::memory_order_acquire);
-    uint64_t startPos = recordStartPos_;
+    uint64_t startPos = recordStartPos_.load(std::memory_order_relaxed);
     int count = static_cast<int>(endPos - startPos);
     if (count <= 0) {
         recordOutput_.clear();
@@ -2006,7 +2007,7 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
     if (micBusId >= 0 && !engine->micMuted_.load(std::memory_order_relaxed)) {
         float micGain = engine->micMonitorGain_.load(std::memory_order_relaxed);
         uint64_t wp = engine->micPlaybackWritePos_.load(std::memory_order_acquire);
-        uint64_t rp = engine->micPlaybackReadPos_;
+        uint64_t rp = engine->micPlaybackReadPos_.load(std::memory_order_relaxed);
         int cap = Engine::MIC_FIFO_SIZE;
         uint64_t available = wp - rp;
 
@@ -2031,7 +2032,7 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
                 micBus->buffer[i * 2 + 1] += s;
             }
         }
-        engine->micPlaybackReadPos_ = rp + toRead;
+        engine->micPlaybackReadPos_.store(rp + toRead, std::memory_order_relaxed);
     }
 
     // Record tap (mono mixdown from master bus, before effects)
@@ -2104,7 +2105,7 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
     if (micBusId < 0 && !engine->micMuted_.load(std::memory_order_relaxed)) {
         float micGain = engine->micMonitorGain_.load(std::memory_order_relaxed);
         uint64_t wp = engine->micPlaybackWritePos_.load(std::memory_order_acquire);
-        uint64_t rp = engine->micPlaybackReadPos_;
+        uint64_t rp = engine->micPlaybackReadPos_.load(std::memory_order_relaxed);
         int cap = Engine::MIC_FIFO_SIZE;
         uint64_t available = wp - rp;
 
@@ -2121,7 +2122,7 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
             buffer[i * 2]     += s;
             buffer[i * 2 + 1] += s;
         }
-        engine->micPlaybackReadPos_ = rp + toRead;
+        engine->micPlaybackReadPos_.store(rp + toRead, std::memory_order_relaxed);
     }
 
     SDL_PutAudioStreamData(stream, buffer, numFloats * sizeof(float));

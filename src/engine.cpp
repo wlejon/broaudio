@@ -1192,9 +1192,11 @@ void Engine::startVoice(int id, double when)
     }
 }
 
-void Engine::stopVoice(int id, double /*when*/)
+void Engine::stopVoice(int id, double when)
 {
-    if (auto* v = findVoice(id)) {
+    if (when > currentTime()) {
+        scheduleNoteOff(id, when);
+    } else if (auto* v = findVoice(id)) {
         v->triggerRelease.store(true, std::memory_order_release);
     }
 }
@@ -2317,6 +2319,11 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
                     break;
                 case EnvStage::Sustain:
                     voice.envLevel = susLevel;
+                    if (susLevel < 0.0001f) {
+                        voice.envLevel = 0.0f;
+                        voice.envStage = EnvStage::Done;
+                        voice.active = false;
+                    }
                     break;
                 case EnvStage::Release:
                     voice.envLevel *= relCoeff;

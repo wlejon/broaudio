@@ -15,6 +15,16 @@ void Sequence::setBPM(double bpm)
     bpm_ = std::max(1.0, std::min(bpm, 999.0));
 }
 
+void Sequence::setBPM(double bpm, double engineTime)
+{
+    if (playing_ && !paused_) {
+        // Snapshot current beat position so it stays continuous across tempo change
+        pauseOffsetBeats_ = currentBeat(engineTime);
+        playStartEngineTime_ = engineTime;
+    }
+    bpm_ = std::max(1.0, std::min(bpm, 999.0));
+}
+
 void Sequence::setTimeSignature(int numerator, int denominator)
 {
     if (numerator > 0 && denominator > 0) {
@@ -155,17 +165,22 @@ void Sequence::update(double engineTime)
     if (loopEnabled_) {
         double loopEnd = effectiveLoopEnd();
         if (beat >= loopEnd) {
-            // Release all active notes at loop boundary
+            // Release all active notes at the loop boundary time
+            double boundaryTime = beatToEngineTime(loopEnd);
             for (auto& an : activeNotes_) {
-                allocator_.noteOff(an.note, 0.0);
+                allocator_.noteOff(an.note, boundaryTime);
             }
             activeNotes_.clear();
 
-            // Wrap back to loop start
+            // Anchor the new loop at the exact boundary crossing time,
+            // not the current update time, to prevent cumulative drift.
             pauseOffsetBeats_ = loopStartBeat_;
-            playStartEngineTime_ = engineTime;
+            playStartEngineTime_ = boundaryTime;
             lastUpdateBeat_ = loopStartBeat_ - 1e-9;
-            return;
+
+            // Recalculate beat from the new origin so notes at the start
+            // of the loop fire this frame instead of waiting for the next.
+            beat = currentBeat(engineTime);
         }
     }
 

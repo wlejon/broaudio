@@ -22,6 +22,7 @@ public:
 
     // Tempo
     void setBPM(double bpm);
+    void setBPM(double bpm, double engineTime);
     double bpm() const { return bpm_; }
 
     // Time signature (informational — beat timing is always quarter-note based)

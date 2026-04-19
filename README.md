@@ -152,4 +152,4 @@ engine.setVoiceSend(voice, reverbBus, 0.5f);
 
 ## License
 
-MIT
+[MIT](LICENSE)

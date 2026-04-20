@@ -1,6 +1,7 @@
 #pragma once
 
 #include "broaudio/types.h"
+#include "broaudio/atomic_shared_ptr.h"
 #include "broaudio/dsp/biquad.h"
 #include "broaudio/dsp/smoother.h"
 #include "broaudio/spatial/listener.h"
@@ -51,7 +52,7 @@ struct Voice {
 
     // Wavetable (set from main thread, read from audio thread)
     // Shared ownership: multiple voices can reference the same bank.
-    std::atomic<std::shared_ptr<const WavetableBank>> wavetable{nullptr};
+    AtomicSharedPtr<const WavetableBank> wavetable{nullptr};
 
     // Unison parameters (main thread writes, audio thread reads)
     static constexpr int MAX_UNISON = 8;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "broaudio/types.h"
+#include "broaudio/atomic_shared_ptr.h"
 #include "broaudio/core/ring_buffer.h"
 #include "broaudio/dsp/params.h"
 #include "broaudio/dsp/biquad.h"
@@ -340,18 +341,18 @@ private:
                             int additional_amount, int total_amount);
 
     // RCU voice list
-    std::atomic<std::shared_ptr<const VoiceList>> voices_{std::make_shared<const VoiceList>()};
+    AtomicSharedPtr<const VoiceList> voices_{std::make_shared<const VoiceList>()};
     std::mutex voiceWriteMutex_;
     int nextVoiceId_ = 1;
 
     Voice* findVoice(int id);
 
     // RCU clip list
-    std::atomic<std::shared_ptr<const ClipList>> clips_{std::make_shared<const ClipList>()};
+    AtomicSharedPtr<const ClipList> clips_{std::make_shared<const ClipList>()};
     std::mutex mediaWriteMutex_;
 
     // RCU playback list
-    std::atomic<std::shared_ptr<const PlaybackList>> playbacks_{std::make_shared<const PlaybackList>()};
+    AtomicSharedPtr<const PlaybackList> playbacks_{std::make_shared<const PlaybackList>()};
 
     int nextClipId_ = 1;
     int nextPlaybackId_ = 1;
@@ -360,7 +361,7 @@ private:
     ClipPlayback* findPlayback(int instanceId) const;
 
     // RCU bus list — master bus is always id 0
-    std::atomic<std::shared_ptr<const BusList>> buses_{std::make_shared<const BusList>()};
+    AtomicSharedPtr<const BusList> buses_{std::make_shared<const BusList>()};
     std::mutex busWriteMutex_;
     int nextBusId_ = 1;   // 0 is reserved for master
 

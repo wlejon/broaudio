@@ -1,4 +1,5 @@
 #include "broaudio/engine.h"
+#include "broaudio/log.h"
 #include "broaudio/synth/oscillator.h"
 #include "broaudio/synth/wavetable.h"
 #include "broaudio/dsp/equalizer.h"
@@ -36,7 +37,7 @@ bool Engine::init()
     if (initialized_) return true;
 
     if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
-        SDL_Log("broaudio: Failed to init SDL audio: %s", SDL_GetError());
+        log(LogLevel::Error, "broaudio: Failed to init SDL audio: %s", SDL_GetError());
         return false;
     }
 
@@ -51,7 +52,7 @@ bool Engine::init()
         SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, audioCallback, this);
 
     if (!stream_) {
-        SDL_Log("broaudio: Failed to open audio device: %s", SDL_GetError());
+        log(LogLevel::Error, "broaudio: Failed to open audio device: %s", SDL_GetError());
         return false;
     }
 
@@ -80,7 +81,7 @@ bool Engine::init()
     SDL_ResumeAudioStreamDevice(stream_);
 
     initialized_ = true;
-    SDL_Log("broaudio: initialized %d Hz stereo", sampleRate_);
+    log(LogLevel::Info, "broaudio: initialized %d Hz stereo", sampleRate_);
     return true;
 }
 
@@ -108,7 +109,7 @@ bool Engine::initHeadless()
     smoothMasterGain_.snap(masterGain_.load(std::memory_order_relaxed));
 
     initialized_ = true;
-    SDL_Log("broaudio: initialized headless %d Hz stereo (no audio device)", sampleRate_);
+    log(LogLevel::Info, "broaudio: initialized headless %d Hz stereo (no audio device)", sampleRate_);
     return true;
 }
 
@@ -1289,7 +1290,7 @@ bool Engine::startMicCapture()
         SDL_AUDIO_DEVICE_DEFAULT_RECORDING, &spec, micCallback, this);
 
     if (!micStream_) {
-        SDL_Log("broaudio: Failed to open mic device: %s", SDL_GetError());
+        log(LogLevel::Error, "broaudio: Failed to open mic device: %s", SDL_GetError());
         return false;
     }
 

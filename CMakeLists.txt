@@ -71,6 +71,7 @@ add_library(broaudio STATIC
     src/io/audio_file.cpp
     src/io/serialization.cpp
     src/engine.cpp
+    src/log.cpp
 )
 
 if(BROAUDIO_MIDI)

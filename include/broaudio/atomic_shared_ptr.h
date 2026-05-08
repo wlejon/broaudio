@@ -14,6 +14,32 @@
 
 namespace broaudio {
 
+// Returns true if shared_ptr atomic ops on this platform are lock-free.
+// On libstdc++ and MSVC STL the free-function atomic_load/atomic_store for
+// shared_ptr typically dispatch to a hidden mutex pool, which is not safe
+// for the audio thread. Engines should warn at init when this returns false.
+inline bool sharedPtrAtomicsAreLockFree()
+{
+    static const bool lf = []() {
+        std::shared_ptr<int> probe;
+#if defined(__clang__)
+#  pragma clang diagnostic push
+#  pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#elif defined(__GNUC__)
+#  pragma GCC diagnostic push
+#  pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+        bool result = std::atomic_is_lock_free(&probe);
+#if defined(__clang__)
+#  pragma clang diagnostic pop
+#elif defined(__GNUC__)
+#  pragma GCC diagnostic pop
+#endif
+        return result;
+    }();
+    return lf;
+}
+
 template <class T>
 class AtomicSharedPtr {
 public:

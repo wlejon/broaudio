@@ -31,6 +31,7 @@ TEST(lowpass_passes_low_frequencies) {
     f.frequency = 5000.0f;
     f.Q = 0.707f;
     f.computeCoefficients(SR);
+    f.snapToTarget();
 
     float amp = measureFilteredAmplitude(f, 100.0f, SR);
     ASSERT_GT(amp, 0.9f);
@@ -43,6 +44,7 @@ TEST(lowpass_attenuates_high_frequencies) {
     f.frequency = 1000.0f;
     f.Q = 0.707f;
     f.computeCoefficients(SR);
+    f.snapToTarget();
 
     float amp = measureFilteredAmplitude(f, 10000.0f, SR);
     ASSERT_LT(amp, 0.1f);
@@ -55,6 +57,7 @@ TEST(highpass_passes_high_frequencies) {
     f.frequency = 1000.0f;
     f.Q = 0.707f;
     f.computeCoefficients(SR);
+    f.snapToTarget();
 
     float amp = measureFilteredAmplitude(f, 10000.0f, SR);
     ASSERT_GT(amp, 0.9f);
@@ -67,6 +70,7 @@ TEST(highpass_attenuates_low_frequencies) {
     f.frequency = 5000.0f;
     f.Q = 0.707f;
     f.computeCoefficients(SR);
+    f.snapToTarget();
 
     float amp = measureFilteredAmplitude(f, 100.0f, SR);
     ASSERT_LT(amp, 0.1f);
@@ -79,6 +83,7 @@ TEST(bandpass_passes_center_frequency) {
     f.frequency = 1000.0f;
     f.Q = 2.0f;
     f.computeCoefficients(SR);
+    f.snapToTarget();
 
     float amp = measureFilteredAmplitude(f, 1000.0f, SR);
     ASSERT_GT(amp, 0.3f);
@@ -91,6 +96,7 @@ TEST(bandpass_attenuates_far_frequencies) {
     f.frequency = 1000.0f;
     f.Q = 2.0f;
     f.computeCoefficients(SR);
+    f.snapToTarget();
 
     float amp = measureFilteredAmplitude(f, 10000.0f, SR);
     ASSERT_LT(amp, 0.15f);
@@ -103,6 +109,7 @@ TEST(notch_attenuates_center_frequency) {
     f.frequency = 1000.0f;
     f.Q = 5.0f;
     f.computeCoefficients(SR);
+    f.snapToTarget();
 
     float amp = measureFilteredAmplitude(f, 1000.0f, SR);
     ASSERT_LT(amp, 0.15f);
@@ -115,6 +122,7 @@ TEST(notch_passes_distant_frequencies) {
     f.frequency = 1000.0f;
     f.Q = 5.0f;
     f.computeCoefficients(SR);
+    f.snapToTarget();
 
     float amp = measureFilteredAmplitude(f, 5000.0f, SR);
     ASSERT_GT(amp, 0.8f);
@@ -127,6 +135,7 @@ TEST(allpass_preserves_amplitude) {
     f.frequency = 1000.0f;
     f.Q = 0.707f;
     f.computeCoefficients(SR);
+    f.snapToTarget();
 
     float amp = measureFilteredAmplitude(f, 500.0f, SR);
     ASSERT_NEAR(amp, 1.0f, 0.05f);
@@ -139,6 +148,7 @@ TEST(filter_reset_clears_state) {
     f.frequency = 1000.0f;
     f.Q = 0.707f;
     f.computeCoefficients(SR);
+    f.snapToTarget();
 
     // Run some signal through
     for (int i = 0; i < 100; i++) f.process(1.0f, 0);

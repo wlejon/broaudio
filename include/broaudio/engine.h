@@ -39,6 +39,11 @@ public:
     bool initHeadless();
     void shutdown();
 
+    // Non-realtime maintenance — reaps finished voices, etc. Call from a
+    // non-audio thread (e.g., UI tick). Safe to call frequently; each call
+    // is cheap when no work is pending.
+    void update();
+
     double currentTime() const;
     int sampleRate() const { return sampleRate_; }
 
@@ -324,6 +329,7 @@ private:
 
     static void audioCallback(void* userdata, SDL_AudioStream* stream,
                               int additional_amount, int total_amount);
+    void processOutputChunk(SDL_AudioStream* stream, int numFrames);
     void renderInternal(int numFrames);
     void generateSamples(int numFrames, const BusList& buses);
     void processBusEffects(Bus& bus, int numFrames);
@@ -344,6 +350,9 @@ private:
     AtomicSharedPtr<const VoiceList> voices_{std::make_shared<const VoiceList>()};
     std::mutex voiceWriteMutex_;
     int nextVoiceId_ = 1;
+    // Set by audio thread when one-shot voices finish; cleared by update().
+    std::atomic<bool> voiceCleanupNeeded_{false};
+    void reapFinishedVoicesLocked();
 
     Voice* findVoice(int id);
 

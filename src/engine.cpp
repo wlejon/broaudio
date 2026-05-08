@@ -81,6 +81,11 @@ bool Engine::init()
     SDL_ResumeAudioStreamDevice(stream_);
 
     initialized_ = true;
+    if (!sharedPtrAtomicsAreLockFree()) {
+        log(LogLevel::Warn,
+            "broaudio: shared_ptr atomics are not lock-free on this platform; "
+            "RCU loads on the audio thread may take a hidden mutex.");
+    }
     log(LogLevel::Info, "broaudio: initialized %d Hz stereo", sampleRate_);
     return true;
 }
@@ -109,6 +114,11 @@ bool Engine::initHeadless()
     smoothMasterGain_.snap(masterGain_.load(std::memory_order_relaxed));
 
     initialized_ = true;
+    if (!sharedPtrAtomicsAreLockFree()) {
+        log(LogLevel::Warn,
+            "broaudio: shared_ptr atomics are not lock-free on this platform; "
+            "RCU loads on the audio thread may take a hidden mutex.");
+    }
     log(LogLevel::Info, "broaudio: initialized headless %d Hz stereo (no audio device)", sampleRate_);
     return true;
 }
@@ -127,9 +137,8 @@ void Engine::renderBlock(int numFrames)
 
 void Engine::renderInternal(int numFrames)
 {
-    int numFloats = numFrames * 2;
-    if (static_cast<size_t>(numFloats) > outputScratch_.size())
-        outputScratch_.resize(numFloats);
+    // numFrames is bounded by MAX_SCRATCH_FRAMES (renderBlock chunks above
+    // us), so outputScratch_ — pre-sized in init — is always large enough.
     float* buffer = outputScratch_.data();
 
     auto currentBuses = buses_.load();
@@ -324,7 +333,7 @@ void Engine::renderInternal(int numFrames)
         }
         masterLimiter_.process(buffer, static_cast<size_t>(numFrames));
     } else {
-        std::memset(buffer, 0, numFloats * sizeof(float));
+        std::memset(buffer, 0, numFrames * 2 * sizeof(float));
     }
 
     // Mono mixdown to output ring buffer for analysis
@@ -1007,9 +1016,20 @@ int Engine::createVoice()
     voice->sustainLevel.store(DEFAULT_SUSTAIN, std::memory_order_relaxed);
     voice->releaseCoeff.store(std::exp(-3.0f / (DEFAULT_RELEASE * sr)), std::memory_order_relaxed);
 
-    auto newList = std::make_shared<VoiceList>(*voices_.load());
+    // Build new list, dropping any one-shot voices that have finished —
+    // this amortizes the cleanup the audio thread used to do, so hosts that
+    // never call update() still don't accumulate dead voices indefinitely.
+    auto current = voices_.load();
+    auto newList = std::make_shared<VoiceList>();
+    newList->reserve(current->size() + 1);
+    for (auto& v : *current) {
+        bool finished = v->started && (v->envStage == EnvStage::Done || !v->active);
+        bool persistent = v->persistent.load(std::memory_order_relaxed);
+        if (!finished || persistent) newList->push_back(v);
+    }
     newList->push_back(voice);
     voices_.store(std::move(newList));
+    voiceCleanupNeeded_.store(false, std::memory_order_relaxed);
 
     return voice->id;
 }
@@ -1648,6 +1668,7 @@ void Engine::processBusFilters(Bus& bus, float* buf, int numFrames)
                 bus.filters[f].Q = bus.filterParams[f].Q.load(std::memory_order_relaxed);
                 bus.filters[f].gainDB = bus.filterParams[f].gainDB.load(std::memory_order_relaxed);
                 bus.filters[f].computeCoefficients(sampleRate_);
+                bus.filters[f].snapToTarget();
             } else {
                 bus.filters[f].reset();
             }
@@ -1855,13 +1876,26 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
                             int additional_amount, int /*total_amount*/)
 {
     auto* engine = static_cast<Engine*>(userdata);
-    int numFloats = additional_amount / static_cast<int>(sizeof(float));
-    int numFrames = numFloats / 2;
-    if (numFrames <= 0) return;
+    int totalFloats = additional_amount / static_cast<int>(sizeof(float));
+    int totalFrames = totalFloats / 2;
+    if (totalFrames <= 0) return;
 
-    if (static_cast<size_t>(numFloats) > engine->outputScratch_.size())
-        engine->outputScratch_.resize(numFloats);
-    float* buffer = engine->outputScratch_.data();
+    // Chunk to MAX_SCRATCH_FRAMES so we never need to allocate on the audio
+    // thread. Bus buffers are sized for MAX_SCRATCH_FRAMES, so this is also
+    // a hard ceiling on what the pipeline can process per pass.
+    int remaining = totalFrames;
+    while (remaining > 0) {
+        int chunk = std::min(remaining, MAX_SCRATCH_FRAMES);
+        engine->processOutputChunk(stream, chunk);
+        remaining -= chunk;
+    }
+}
+
+void Engine::processOutputChunk(SDL_AudioStream* stream, int numFrames)
+{
+    auto* engine = this;
+    int numFloats = numFrames * 2;
+    float* buffer = outputScratch_.data();
 
     // Load bus list (lock-free RCU read)
     auto currentBuses = engine->buses_.load();
@@ -2299,6 +2333,31 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
             voiceHeadParams = computeHeadParams(sr, headModel_, sampleRate_);
         }
 
+        // Filter parameter pickup (block-rate). Coefficients are recomputed
+        // once per block when modulation is non-unity, then smoothly
+        // interpolated across the block by stepSmoothing(). Per-sample
+        // recompute (sin/cos/pow) is too expensive at polyphony.
+        bool filterStateChanged = false;
+        float filterBaseCutoff = 1000.0f;
+        float filterBaseQ = 1.0f;
+        {
+            uint32_t fv = voice.filterVersion.load(std::memory_order_acquire);
+            if (fv != voice.filterVersionSeen) {
+                voice.filterVersionSeen = fv;
+                bool wasEnabled = voice.filter.enabled;
+                voice.filter.enabled = voice.filterEnabled.load(std::memory_order_relaxed);
+                voice.filter.type = static_cast<BiquadFilter::Type>(
+                    voice.filterType.load(std::memory_order_relaxed));
+                filterStateChanged = true;
+                if (voice.filter.enabled && !wasEnabled) {
+                    voice.filter.reset();
+                    voice.filter.primed = false; // snap on first compute
+                }
+            }
+            filterBaseCutoff = voice.filterFrequency.load(std::memory_order_relaxed);
+            filterBaseQ = voice.filterQ.load(std::memory_order_relaxed);
+        }
+
         for (int i = 0; i < numFrames; i++) {
             double t = baseTime + i * sampleDt;
             if (t < startTime) continue;
@@ -2403,54 +2462,23 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
                 }
             }
 
-            // Per-voice filter (modulated by mod matrix) — runs on mono sum
+            // Per-voice filter (modulated by mod matrix) — runs on mono sum.
+            // Coefficients are recomputed at block start (i == 0) using mod
+            // values from this sample, then smoothly interpolated across the
+            // block. This keeps the expensive sin/cos out of the inner loop.
             if (voice.filter.enabled) {
-                uint32_t fv = voice.filterVersion.load(std::memory_order_acquire);
-                if (fv != voice.filterVersionSeen) {
-                    voice.filterVersionSeen = fv;
-                    voice.filter.enabled = voice.filterEnabled.load(std::memory_order_relaxed);
-                    voice.filter.type = static_cast<BiquadFilter::Type>(
-                        voice.filterType.load(std::memory_order_relaxed));
-                    float baseCutoff = voice.filterFrequency.load(std::memory_order_relaxed);
-                    float baseQ = voice.filterQ.load(std::memory_order_relaxed);
-                    voice.filter.frequency = std::clamp(baseCutoff * mod.filterFreq, 20.0f, 20000.0f);
-                    voice.filter.Q = std::clamp(baseQ * mod.filterQ, 0.1f, 30.0f);
+                if (i == 0 || filterStateChanged) {
+                    voice.filter.frequency = std::clamp(filterBaseCutoff * mod.filterFreq, 20.0f, 20000.0f);
+                    voice.filter.Q = std::clamp(filterBaseQ * mod.filterQ, 0.1f, 30.0f);
                     voice.filter.computeCoefficients(sampleRate_);
-                } else if (mod.filterFreq != 1.0f || mod.filterQ != 1.0f) {
-                    float baseCutoff = voice.filterFrequency.load(std::memory_order_relaxed);
-                    float baseQ = voice.filterQ.load(std::memory_order_relaxed);
-                    voice.filter.frequency = std::clamp(baseCutoff * mod.filterFreq, 20.0f, 20000.0f);
-                    voice.filter.Q = std::clamp(baseQ * mod.filterQ, 0.1f, 30.0f);
-                    voice.filter.computeCoefficients(sampleRate_);
+                    voice.filter.prepareSmoothing(numFrames);
+                    filterStateChanged = false;
                 }
-                if (voice.filter.enabled) {
-                    // Apply filter ratio to L/R (preserves stereo image)
-                    float filteredMono = voice.filter.process(monoSum, 0);
-                    float ratio = (monoSum != 0.0f) ? filteredMono / monoSum : 0.0f;
-                    sumL *= ratio;
-                    sumR *= ratio;
-                }
-            } else {
-                // Check if filter was just enabled
-                uint32_t fv = voice.filterVersion.load(std::memory_order_acquire);
-                if (fv != voice.filterVersionSeen) {
-                    voice.filterVersionSeen = fv;
-                    voice.filter.enabled = voice.filterEnabled.load(std::memory_order_relaxed);
-                    if (voice.filter.enabled) {
-                        voice.filter.type = static_cast<BiquadFilter::Type>(
-                            voice.filterType.load(std::memory_order_relaxed));
-                        float baseCutoff = voice.filterFrequency.load(std::memory_order_relaxed);
-                        float baseQ = voice.filterQ.load(std::memory_order_relaxed);
-                        voice.filter.frequency = std::clamp(baseCutoff * mod.filterFreq, 20.0f, 20000.0f);
-                        voice.filter.Q = std::clamp(baseQ * mod.filterQ, 0.1f, 30.0f);
-                        voice.filter.computeCoefficients(sampleRate_);
-                        voice.filter.reset();
-                        float filteredMono = voice.filter.process(monoSum, 0);
-                        float ratio = (monoSum != 0.0f) ? filteredMono / monoSum : 0.0f;
-                        sumL *= ratio;
-                        sumR *= ratio;
-                    }
-                }
+                float filteredMono = voice.filter.process(monoSum, 0);
+                voice.filter.stepSmoothing();
+                float ratio = (monoSum != 0.0f) ? filteredMono / monoSum : 0.0f;
+                sumL *= ratio;
+                sumR *= ratio;
             }
 
             float outL = sumL * finalGain;
@@ -2473,34 +2501,53 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
         }
     }
 
-    // Clean up finished voices via RCU write (only if needed)
-    // Purge one-shot voices that have finished their release envelope.
-    // Persistent voices (managed by VoiceAllocator) are never purged — they
-    // stay in the list for reuse.
-    bool hasFinished = false;
-    for (auto& v : *currentVoices) {
-        if (v->started && (v->envStage == EnvStage::Done || !v->active)
-            && !v->persistent.load(std::memory_order_relaxed)) {
-            hasFinished = true;
-            break;
-        }
-    }
-    if (hasFinished) {
-        std::unique_lock<std::mutex> lock(voiceWriteMutex_, std::try_to_lock);
-        if (lock.owns_lock()) {
-            auto freshVoices = voices_.load();
-            auto newList = std::make_shared<VoiceList>();
-            for (auto& v : *freshVoices) {
-                bool finished = v->started && (v->envStage == EnvStage::Done || !v->active);
-                bool persistent = v->persistent.load(std::memory_order_relaxed);
-                if (!finished || persistent)
-                    newList->push_back(v);
+    // Flag finished voices for non-realtime cleanup. The actual list rebuild
+    // (which involves heap alloc/dealloc) happens in Engine::update() on a
+    // non-audio thread. Persistent voices (VoiceAllocator-managed) are
+    // ignored here — they stay in the list for reuse.
+    if (!voiceCleanupNeeded_.load(std::memory_order_relaxed)) {
+        for (auto& v : *currentVoices) {
+            if (v->started && (v->envStage == EnvStage::Done || !v->active)
+                && !v->persistent.load(std::memory_order_relaxed)) {
+                voiceCleanupNeeded_.store(true, std::memory_order_release);
+                break;
             }
-            voices_.store(std::move(newList));
         }
     }
 
     samplesGenerated_.fetch_add(static_cast<uint64_t>(numFrames), std::memory_order_relaxed);
+}
+
+void Engine::reapFinishedVoicesLocked()
+{
+    // Caller must hold voiceWriteMutex_.
+    auto current = voices_.load();
+    bool needRebuild = false;
+    for (auto& v : *current) {
+        if (v->started && (v->envStage == EnvStage::Done || !v->active)
+            && !v->persistent.load(std::memory_order_relaxed)) {
+            needRebuild = true;
+            break;
+        }
+    }
+    if (!needRebuild) return;
+
+    auto newList = std::make_shared<VoiceList>();
+    newList->reserve(current->size());
+    for (auto& v : *current) {
+        bool finished = v->started && (v->envStage == EnvStage::Done || !v->active);
+        bool persistent = v->persistent.load(std::memory_order_relaxed);
+        if (!finished || persistent) newList->push_back(v);
+    }
+    voices_.store(std::move(newList));
+}
+
+void Engine::update()
+{
+    if (voiceCleanupNeeded_.exchange(false, std::memory_order_acquire)) {
+        std::lock_guard<std::mutex> lock(voiceWriteMutex_);
+        reapFinishedVoicesLocked();
+    }
 }
 
 // ---------------------------------------------------------------------------

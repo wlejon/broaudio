@@ -2,6 +2,7 @@
 
 #include "broaudio/types.h"
 #include "broaudio/atomic_shared_ptr.h"
+#include "broaudio/rcu.h"
 #include "broaudio/core/ring_buffer.h"
 #include "broaudio/dsp/params.h"
 #include "broaudio/dsp/biquad.h"
@@ -346,8 +347,12 @@ private:
     static void micCallback(void* userdata, SDL_AudioStream* stream,
                             int additional_amount, int total_amount);
 
+    // RCU reclamation domain — must be declared before any AtomicSharedPtr
+    // member so the slots can bind to it in their initializers.
+    RcuDomain rcu_;
+
     // RCU voice list
-    AtomicSharedPtr<const VoiceList> voices_{std::make_shared<const VoiceList>()};
+    AtomicSharedPtr<const VoiceList> voices_{rcu_, std::make_shared<const VoiceList>()};
     std::mutex voiceWriteMutex_;
     int nextVoiceId_ = 1;
     // Set by audio thread when one-shot voices finish; cleared by update().
@@ -357,11 +362,11 @@ private:
     Voice* findVoice(int id);
 
     // RCU clip list
-    AtomicSharedPtr<const ClipList> clips_{std::make_shared<const ClipList>()};
+    AtomicSharedPtr<const ClipList> clips_{rcu_, std::make_shared<const ClipList>()};
     std::mutex mediaWriteMutex_;
 
     // RCU playback list
-    AtomicSharedPtr<const PlaybackList> playbacks_{std::make_shared<const PlaybackList>()};
+    AtomicSharedPtr<const PlaybackList> playbacks_{rcu_, std::make_shared<const PlaybackList>()};
 
     int nextClipId_ = 1;
     int nextPlaybackId_ = 1;
@@ -370,7 +375,7 @@ private:
     ClipPlayback* findPlayback(int instanceId) const;
 
     // RCU bus list — master bus is always id 0
-    AtomicSharedPtr<const BusList> buses_{std::make_shared<const BusList>()};
+    AtomicSharedPtr<const BusList> buses_{rcu_, std::make_shared<const BusList>()};
     std::mutex busWriteMutex_;
     int nextBusId_ = 1;   // 0 is reserved for master
 

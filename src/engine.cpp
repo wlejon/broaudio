@@ -81,11 +81,6 @@ bool Engine::init()
     SDL_ResumeAudioStreamDevice(stream_);
 
     initialized_ = true;
-    if (!sharedPtrAtomicsAreLockFree()) {
-        log(LogLevel::Warn,
-            "broaudio: shared_ptr atomics are not lock-free on this platform; "
-            "RCU loads on the audio thread may take a hidden mutex.");
-    }
     log(LogLevel::Info, "broaudio: initialized %d Hz stereo", sampleRate_);
     return true;
 }
@@ -114,11 +109,6 @@ bool Engine::initHeadless()
     smoothMasterGain_.snap(masterGain_.load(std::memory_order_relaxed));
 
     initialized_ = true;
-    if (!sharedPtrAtomicsAreLockFree()) {
-        log(LogLevel::Warn,
-            "broaudio: shared_ptr atomics are not lock-free on this platform; "
-            "RCU loads on the audio thread may take a hidden mutex.");
-    }
     log(LogLevel::Info, "broaudio: initialized headless %d Hz stereo (no audio device)", sampleRate_);
     return true;
 }
@@ -126,6 +116,10 @@ bool Engine::initHeadless()
 void Engine::renderBlock(int numFrames)
 {
     if (!initialized_ || numFrames <= 0) return;
+
+    // Reader scope for host-driven (non-SDL) rendering — covers
+    // renderInternal / generateSamples / processBusEffects transitively.
+    RcuDomain::ReadScope rcuScope(rcu_);
 
     // Process in chunks up to scratch buffer size
     while (numFrames > 0) {
@@ -420,6 +414,10 @@ void Engine::deleteBus(int busId)
 
 std::vector<float> Engine::processEffectsOffline(int busId, const float* monoInput, int numSamples)
 {
+    // Reader scope: findBus and any bus loads inside this routine need
+    // their snapshots pinned for the duration.
+    RcuDomain::ReadScope rcuScope(rcu_);
+
     auto* srcBus = findBus(busId);
     if (!srcBus || numSamples <= 0) return {};
 
@@ -1010,6 +1008,11 @@ int Engine::createVoice()
 
     auto voice = std::make_shared<Voice>();
     voice->id = nextVoiceId_++;
+    // Bind the wavetable RCU slot to the engine's domain before publishing
+    // the voice — once the voice is in voices_ the audio thread may load
+    // wavetable, and any later setVoiceWavetable() needs a domain to retire
+    // old snapshots into.
+    voice->wavetable.setDomain(rcu_);
     float sr = static_cast<float>(sampleRate_);
     voice->attackRate.store(1.0f / (DEFAULT_ATTACK * sr), std::memory_order_relaxed);
     voice->decayCoeff.store(std::exp(-3.0f / (DEFAULT_DECAY * sr)), std::memory_order_relaxed);
@@ -1880,6 +1883,10 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
     int totalFrames = totalFloats / 2;
     if (totalFrames <= 0) return;
 
+    // Reader scope: brackets every RCU load on the audio thread so writers
+    // can safely retire old snapshots without freeing them out from under us.
+    RcuDomain::ReadScope rcuScope(engine->rcu_);
+
     // Chunk to MAX_SCRATCH_FRAMES so we never need to allocate on the audio
     // thread. Bus buffers are sized for MAX_SCRATCH_FRAMES, so this is also
     // a hard ceiling on what the pipeline can process per pass.
@@ -2548,6 +2555,7 @@ void Engine::update()
         std::lock_guard<std::mutex> lock(voiceWriteMutex_);
         reapFinishedVoicesLocked();
     }
+    rcu_.reclaim();
 }
 
 // ---------------------------------------------------------------------------

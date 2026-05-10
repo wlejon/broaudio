@@ -72,6 +72,7 @@ add_library(broaudio STATIC
     src/io/serialization.cpp
     src/engine.cpp
     src/log.cpp
+    src/rcu.cpp
 )
 
 if(BROAUDIO_MIDI)

@@ -35,6 +35,7 @@ set(BROAUDIO_TESTS
     test_clip_playback
     test_engine_spatial
     test_engine_routing
+    test_engine_presets
 )
 
 foreach(test ${BROAUDIO_TESTS})

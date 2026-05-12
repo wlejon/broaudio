@@ -33,6 +33,7 @@ set(BROAUDIO_TESTS
     test_serialization
     test_atomic_shared_ptr
     test_clip_playback
+    test_engine_spatial
 )
 
 foreach(test ${BROAUDIO_TESTS})

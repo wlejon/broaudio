@@ -266,19 +266,13 @@ void Engine::renderInternal(int numFrames)
         }
     }
 
-    // Record tap (mono mixdown from master bus, before effects)
+    // Locate the master bus for the bus-graph mixdown below. The record tap
+    // happens after the master limiter (further down) so it captures voices
+    // routed through user-created buses, not just voices that bypassed the
+    // bus tree.
     Bus* masterBus = nullptr;
     for (auto& bus : *currentBuses) {
         if (bus->id == MASTER_BUS_ID) { masterBus = bus.get(); break; }
-    }
-
-    if (recording_.load(std::memory_order_relaxed) && masterBus) {
-        uint64_t wp = recordWritePos_.load(std::memory_order_relaxed);
-        for (int i = 0; i < numFrames; i++) {
-            float mono = (masterBus->buffer[i * 2] + masterBus->buffer[i * 2 + 1]) * 0.5f;
-            recordRing_[static_cast<int>((wp + i) % RECORD_RING_SIZE)] = mono;
-        }
-        recordWritePos_.store(wp + numFrames, std::memory_order_release);
     }
 
     // Process child buses
@@ -328,6 +322,18 @@ void Engine::renderInternal(int numFrames)
         masterLimiter_.process(buffer, static_cast<size_t>(numFrames));
     } else {
         std::memset(buffer, 0, numFrames * 2 * sizeof(float));
+    }
+
+    // Record tap (mono mixdown of final stereo output). Lives here, after
+    // the bus graph + master gain + limiter, so it captures voices routed
+    // through user buses — not just voices on the master bus.
+    if (recording_.load(std::memory_order_relaxed)) {
+        uint64_t wp = recordWritePos_.load(std::memory_order_relaxed);
+        for (int i = 0; i < numFrames; i++) {
+            float mono = (buffer[i * 2] + buffer[i * 2 + 1]) * 0.5f;
+            recordRing_[static_cast<int>((wp + i) % RECORD_RING_SIZE)] = mono;
+        }
+        recordWritePos_.store(wp + numFrames, std::memory_order_release);
     }
 
     // Mono mixdown to output ring buffer for analysis
@@ -1401,16 +1407,18 @@ int Engine::getSpectrum(float* outMagnitudes, int numBins) const
 {
     if (numBins <= 0 || numBins > 8192) return 0;
 
-    // Ensure power of 2
+    // numBins is the count of magnitude bins to fill, all spanning
+    // [0, Nyquist] — i.e. the Web Audio convention where bin k represents
+    // frequency k * sampleRate / fftSize for an FFT of size 2 * numBins.
+    // Choose the smallest power-of-2 FFT that yields at least numBins of
+    // unique magnitudes.
     int n = 1;
-    while (n < numBins) n <<= 1;
-    if (n > 8192) n = 8192;
+    while (n < numBins * 2) n <<= 1;
+    if (n > 16384) n = 16384;
 
-    // Read recent samples from the analysis buffer
     std::vector<float> real(n, 0.0f);
     std::vector<float> imag(n, 0.0f);
 
-    // Read latest samples from the analysis ring buffer (benign tearing acceptable for viz)
     outputBuffer_.readLatest(real.data(), n);
 
     // Apply Hann window
@@ -1421,7 +1429,6 @@ int Engine::getSpectrum(float* outMagnitudes, int numBins) const
 
     fft(real.data(), imag.data(), n);
 
-    // Compute magnitudes (only first half — Nyquist)
     int outBins = n / 2;
     if (outBins > numBins) outBins = numBins;
     float invN = 1.0f / static_cast<float>(n);

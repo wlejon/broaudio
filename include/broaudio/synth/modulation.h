@@ -127,7 +127,10 @@ struct ModState {
 class ModMatrix {
 public:
     static constexpr int MAX_LFOS = ModState::MAX_LFOS;
-    static constexpr int MAX_ROUTES = 16;
+    // Documented surface is 9 sources × 7 destinations = 63 combos; bumped
+    // from 16 to 64 so every (src, dest) pair plus a little headroom is
+    // representable.
+    static constexpr int MAX_ROUTES = 64;
 
     ModMatrix() = default;
 

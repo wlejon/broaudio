@@ -1,22 +1,12 @@
 #pragma once
 
 #include "broaudio/types.h"
+#include <bromath/vec.h>
 #include <algorithm>
 #include <atomic>
 #include <cmath>
 
 namespace broaudio {
-
-struct Vec3 {
-    float x = 0.0f, y = 0.0f, z = 0.0f;
-
-    Vec3 operator-(const Vec3& o) const { return {x - o.x, y - o.y, z - o.z}; }
-    float dot(const Vec3& o) const { return x * o.x + y * o.y + z * o.z; }
-    float length() const { return std::sqrt(x * x + y * y + z * z); }
-    Vec3 cross(const Vec3& o) const {
-        return {y * o.z - z * o.y, z * o.x - x * o.z, x * o.y - y * o.x};
-    }
-};
 
 // Per-source spatial parameters. Voices and clips each own one of these.
 // All fields are atomic for lock-free main -> audio thread access.
@@ -28,7 +18,7 @@ struct SpatialSource {
     std::atomic<float> rolloff{1.0f};
     std::atomic<int> distanceModel{static_cast<int>(DistanceModel::Inverse)};
 
-    Vec3 position() const {
+    bromath::Vec3 position() const {
         return {posX.load(std::memory_order_relaxed),
                 posY.load(std::memory_order_relaxed),
                 posZ.load(std::memory_order_relaxed)};
@@ -43,17 +33,17 @@ struct Listener {
     std::atomic<float> fwdX{0.0f}, fwdY{0.0f}, fwdZ{-1.0f};
     std::atomic<float> upX{0.0f},  upY{1.0f},  upZ{0.0f};
 
-    Vec3 position() const {
+    bromath::Vec3 position() const {
         return {posX.load(std::memory_order_relaxed),
                 posY.load(std::memory_order_relaxed),
                 posZ.load(std::memory_order_relaxed)};
     }
-    Vec3 forward() const {
+    bromath::Vec3 forward() const {
         return {fwdX.load(std::memory_order_relaxed),
                 fwdY.load(std::memory_order_relaxed),
                 fwdZ.load(std::memory_order_relaxed)};
     }
-    Vec3 up() const {
+    bromath::Vec3 up() const {
         return {upX.load(std::memory_order_relaxed),
                 upY.load(std::memory_order_relaxed),
                 upZ.load(std::memory_order_relaxed)};
@@ -102,10 +92,10 @@ inline SpatialResult computeSpatial(const Listener& listener, const SpatialSourc
 {
     SpatialResult result;
 
-    Vec3 lPos = listener.position();
-    Vec3 sPos = src.position();
-    Vec3 dir = sPos - lPos;
-    float dist = dir.length();
+    bromath::Vec3 lPos = listener.position();
+    bromath::Vec3 sPos = src.position();
+    bromath::Vec3 dir = sPos - lPos;
+    float dist = bromath::vlen(dir);
 
     // Distance attenuation
     float refDist = src.refDistance.load(std::memory_order_relaxed);
@@ -132,28 +122,28 @@ inline SpatialResult computeSpatial(const Listener& listener, const SpatialSourc
     result.gain = std::max(0.0f, std::min(1.0f, result.gain));
 
     if (dist > 0.0001f) {
-        Vec3 fwd = listener.forward();
-        Vec3 up = listener.up();
-        Vec3 right = fwd.cross(up);
-        float rightLen = right.length();
-        Vec3 normDir = {dir.x / dist, dir.y / dist, dir.z / dist};
+        bromath::Vec3 fwd = listener.forward();
+        bromath::Vec3 up = listener.up();
+        bromath::Vec3 right = bromath::vcross(fwd, up);
+        float rightLen = bromath::vlen(right);
+        bromath::Vec3 normDir = {dir.x / dist, dir.y / dist, dir.z / dist};
 
         if (rightLen > 0.0001f) {
             right.x /= rightLen; right.y /= rightLen; right.z /= rightLen;
-            result.pan = std::clamp(normDir.dot(right), -1.0f, 1.0f);
+            result.pan = std::clamp(bromath::vdot(normDir, right), -1.0f, 1.0f);
         }
 
         // Front/back: dot with forward vector (relative to gaze direction)
-        float fwdLen = std::sqrt(fwd.x * fwd.x + fwd.y * fwd.y + fwd.z * fwd.z);
+        float fwdLen = bromath::vlen(fwd);
         if (fwdLen > 0.0001f) {
-            result.frontBack = std::clamp(normDir.dot({fwd.x / fwdLen, fwd.y / fwdLen, fwd.z / fwdLen}), -1.0f, 1.0f);
+            result.frontBack = std::clamp(bromath::vdot(normDir, bromath::Vec3{fwd.x / fwdLen, fwd.y / fwdLen, fwd.z / fwdLen}), -1.0f, 1.0f);
         }
 
         // Elevation: dot with listener's up vector (relative to gaze, not world Y).
         // Looking down at something below = it's in front, not "below" your ears.
-        float upLen = std::sqrt(up.x * up.x + up.y * up.y + up.z * up.z);
+        float upLen = bromath::vlen(up);
         if (upLen > 0.0001f) {
-            result.elevation = std::clamp(normDir.dot({up.x / upLen, up.y / upLen, up.z / upLen}), -1.0f, 1.0f);
+            result.elevation = std::clamp(bromath::vdot(normDir, bromath::Vec3{up.x / upLen, up.y / upLen, up.z / upLen}), -1.0f, 1.0f);
         }
     }
 

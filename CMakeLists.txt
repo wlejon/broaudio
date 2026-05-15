@@ -11,6 +11,16 @@ if(NOT TARGET SDL3::SDL3 AND NOT TARGET SDL3::SDL3-static)
     find_package(SDL3 REQUIRED)
 endif()
 
+# bromath — header-only math library (sibling repo)
+set(BROMATH_DIR "${CMAKE_SOURCE_DIR}/../bromath" CACHE PATH "bromath sibling")
+if(NOT TARGET bromath::bromath)
+    if(EXISTS "${BROMATH_DIR}/CMakeLists.txt")
+        add_subdirectory("${BROMATH_DIR}" "${CMAKE_BINARY_DIR}/bromath" EXCLUDE_FROM_ALL)
+    else()
+        message(FATAL_ERROR "bromath not found at ${BROMATH_DIR}")
+    endif()
+endif()
+
 # opusfile — optional OGG Opus support
 option(BROAUDIO_OPUS "Enable OGG Opus loading via opusfile" OFF)
 if(BROAUDIO_OPUS)
@@ -100,6 +110,8 @@ if(TARGET SDL3::SDL3)
 elseif(TARGET SDL3::SDL3-static)
     target_link_libraries(broaudio PUBLIC SDL3::SDL3-static)
 endif()
+
+target_link_libraries(broaudio PUBLIC bromath::bromath)
 
 if(BROAUDIO_MIDI AND TARGET libremidi::libremidi)
     target_link_libraries(broaudio PUBLIC libremidi::libremidi)

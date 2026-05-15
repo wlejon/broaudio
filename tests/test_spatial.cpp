@@ -1,8 +1,10 @@
 #include "test_harness.h"
 #include "broaudio/spatial/listener.h"
+#include <bromath/vec.h>
 #include <cmath>
 
 using namespace broaudio;
+using bromath::Vec3;
 
 // Helper: set up a listener at origin facing -Z, up +Y
 static void initDefaultListener(Listener& l) {
@@ -142,15 +144,15 @@ TEST(vec3_subtract) {
 TEST(vec3_dot) {
     Vec3 a{1.0f, 0.0f, 0.0f};
     Vec3 b{0.0f, 1.0f, 0.0f};
-    ASSERT_NEAR(a.dot(b), 0.0f, 1e-6f);
-    ASSERT_NEAR(a.dot(a), 1.0f, 1e-6f);
+    ASSERT_NEAR(bromath::vdot(a, b), 0.0f, 1e-6f);
+    ASSERT_NEAR(bromath::vdot(a, a), 1.0f, 1e-6f);
     PASS();
 }
 
 TEST(vec3_cross) {
     Vec3 x{1.0f, 0.0f, 0.0f};
     Vec3 y{0.0f, 1.0f, 0.0f};
-    Vec3 z = x.cross(y);
+    Vec3 z = bromath::vcross(x, y);
     ASSERT_NEAR(z.x, 0.0f, 1e-6f);
     ASSERT_NEAR(z.y, 0.0f, 1e-6f);
     ASSERT_NEAR(z.z, 1.0f, 1e-6f);
@@ -159,7 +161,7 @@ TEST(vec3_cross) {
 
 TEST(vec3_length) {
     Vec3 v{3.0f, 4.0f, 0.0f};
-    ASSERT_NEAR(v.length(), 5.0f, 1e-5f);
+    ASSERT_NEAR(bromath::vlen(v), 5.0f, 1e-5f);
     PASS();
 }
 

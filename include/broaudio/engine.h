@@ -14,6 +14,7 @@
 #include "broaudio/synth/voice.h"
 #include "broaudio/synth/wavetable.h"
 #include "broaudio/clip/clip.h"
+#include "broaudio/mic_tap.h"
 #include "broaudio/spatial/listener.h"
 #include "broaudio/io/audio_file.h"
 #include "broaudio/io/serialization.h"
@@ -225,6 +226,23 @@ public:
     using MicFrameCallback = std::function<void(const float* samples, int numSamples)>;
     void setMicFrameCallback(MicFrameCallback cb);
 
+    // Multi-consumer mic-frame dispatch. Each tap describes the rate, frame
+    // size, and AGC it wants; the audio thread fans the raw mic chunk out to
+    // every active tap before falling through to the legacy single-slot
+    // setMicFrameCallback hook, the analysis ring, and the monitor FIFO.
+    //
+    // addMicTap / removeMicTap / getMicTapStats are safe to call from any
+    // single thread (typically the main thread) but must NOT be called
+    // concurrently with each other — the registry is single-writer + multi-
+    // reader (RCU). The audio thread reads via a wait-free snapshot.
+    //
+    // Returns an opaque id; kInvalidMicTapId on failure (callback is null,
+    // targetRate < 0, chunkFrames < 0, or the resampler stream could not be
+    // created). Pass the id to removeMicTap when the consumer goes away.
+    MicTapId addMicTap(const MicTapConfig& cfg, MicTapCallback cb);
+    void     removeMicTap(MicTapId id);
+    MicTapStats getMicTapStats(MicTapId id) const;
+
     // Test seam — drive the mic processing pipeline as if the SDL recording
     // callback had delivered `numSamples` of mono float audio. Exercises the
     // same code path (user mic-frame hook, analysis ring write, monitor FIFO
@@ -428,6 +446,40 @@ private:
     // from the recording callback via the engine's RCU domain. Single-writer
     // (the caller of setMicFrameCallback) — typically the JS/main thread.
     AtomicSharedPtr<const MicFrameCallback> micFrameCallback_{rcu_};
+
+    // Multi-consumer mic-tap registry. Each tap owns its own SDL_AudioStream
+    // (when resampling) + Agc + chunk-buffer state. The audio thread loads a
+    // wait-free snapshot of the list and dispatches to each tap in order.
+    struct MicTap {
+        MicTapId         id          = kInvalidMicTapId;
+        MicTapConfig     cfg{};
+        MicTapCallback   callback;
+        SDL_AudioStream* resampler   = nullptr;   // nullptr when targetRate==0 or matches engine rate
+        int              effectiveRate = 0;       // rate samples arrive at the callback
+        Agc              agc{};
+        std::vector<float> chunkBuf;              // accumulator when cfg.chunkFrames > 0
+        std::vector<float> scratch;               // resample / per-call temp
+        // Stats — audio-thread writer, main-thread reader; relaxed is fine
+        // because the read is purely diagnostic.
+        std::atomic<std::uint64_t> framesDelivered{0};
+        std::atomic<std::uint64_t> samplesDelivered{0};
+        std::atomic<int>           rollingPeakX10000{0};
+
+        MicTap() = default;
+        ~MicTap();
+        MicTap(const MicTap&) = delete;
+        MicTap& operator=(const MicTap&) = delete;
+    };
+    using MicTapList = std::vector<std::shared_ptr<MicTap>>;
+    AtomicSharedPtr<const MicTapList> micTaps_{rcu_, std::make_shared<const MicTapList>()};
+    // Single-writer-per-slot — callers must serialise addMicTap / removeMicTap
+    // externally. nextMicTapId_ is only touched by those calls.
+    MicTapId nextMicTapId_ = 1;
+
+    // Dispatch a raw mic chunk to every active tap. Called by processMicSamples
+    // on the audio thread, before the legacy callback and ring writes.
+    void dispatchMicTaps(const float* samples, int numSamples);
+    void deliverTapChunk(MicTap& tap, const float* samples, int numSamples);
 
     static constexpr int MIC_FIFO_SIZE = 22050;
     std::vector<float> micPlayback_ = std::vector<float>(MIC_FIFO_SIZE, 0.0f);

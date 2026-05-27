@@ -82,6 +82,7 @@ add_library(broaudio STATIC
     src/io/serialization.cpp
     src/engine.cpp
     src/log.cpp
+    src/mic_tap.cpp
     src/rcu.cpp
 )
 

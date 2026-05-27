@@ -1362,11 +1362,12 @@ void Engine::processMicSamples(const float* buffer, int samplesGot)
 {
     if (samplesGot <= 0) return;
 
-    // Fire the user mic-frame hook first, so wake-word/ASR detectors observe
-    // samples with minimum latency (before any analysis buffer or monitor
-    // bookkeeping). Wait-free RCU snapshot — no locks, no blocking.
+    // Fan out to multi-consumer taps + legacy single-slot hook first, before
+    // the analysis ring / monitor bookkeeping, so wake-word and ASR consumers
+    // see samples with minimum latency. Both run under one RCU read scope.
     {
         RcuDomain::ReadScope rcuScope(rcu_);
+        dispatchMicTaps(buffer, samplesGot);
         auto cb = micFrameCallback_.load(std::memory_order_acquire);
         if (cb && *cb) {
             (*cb)(buffer, samplesGot);
@@ -1391,6 +1392,184 @@ void Engine::setMicFrameCallback(MicFrameCallback cb)
         micFrameCallback_.store(std::make_shared<const MicFrameCallback>(std::move(cb)));
     } else {
         micFrameCallback_.store(nullptr);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mic taps (multi-consumer dispatch with per-tap resample + AGC + chunking)
+// ---------------------------------------------------------------------------
+
+Engine::MicTap::~MicTap()
+{
+    if (resampler) {
+        SDL_DestroyAudioStream(resampler);
+        resampler = nullptr;
+    }
+}
+
+MicTapId Engine::addMicTap(const MicTapConfig& cfg, MicTapCallback cb)
+{
+    if (!cb) return kInvalidMicTapId;
+    if (cfg.targetRate < 0 || cfg.chunkFrames < 0) return kInvalidMicTapId;
+
+    auto tap = std::make_shared<MicTap>();
+    tap->cfg      = cfg;
+    tap->callback = std::move(cb);
+    tap->agc.setConfig(cfg.agcCfg);
+
+    const int engineRate    = sampleRate_;
+    const bool needResample =
+        (cfg.targetRate > 0 && cfg.targetRate != engineRate);
+    tap->effectiveRate = needResample ? cfg.targetRate : engineRate;
+
+    if (needResample) {
+        SDL_AudioSpec src{}, dst{};
+        src.format   = SDL_AUDIO_F32;
+        src.channels = 1;
+        src.freq     = engineRate;
+        dst.format   = SDL_AUDIO_F32;
+        dst.channels = 1;
+        dst.freq     = cfg.targetRate;
+        tap->resampler = SDL_CreateAudioStream(&src, &dst);
+        if (!tap->resampler) {
+            log(LogLevel::Error,
+                "broaudio: addMicTap: SDL_CreateAudioStream failed: %s",
+                SDL_GetError());
+            return kInvalidMicTapId;
+        }
+    }
+
+    tap->id = nextMicTapId_++;
+
+    // COW publish: copy the current list, append, store.
+    auto current = micTaps_.load();
+    auto next = std::make_shared<MicTapList>(*current);
+    next->push_back(tap);
+    micTaps_.store(std::shared_ptr<const MicTapList>(std::move(next)));
+    return tap->id;
+}
+
+void Engine::removeMicTap(MicTapId id)
+{
+    if (id == kInvalidMicTapId) return;
+    auto current = micTaps_.load();
+    auto next = std::make_shared<MicTapList>();
+    next->reserve(current->size());
+    for (auto& t : *current) {
+        if (t->id != id) next->push_back(t);
+    }
+    if (next->size() == current->size()) return;  // not found
+    micTaps_.store(std::shared_ptr<const MicTapList>(std::move(next)));
+    // The removed tap's shared_ptr drops off the list here. Any audio-thread
+    // callback that captured an old snapshot still holds it through the
+    // ReadScope; once that scope ends and QSBR observes a quiescent state,
+    // the MicTap destructor runs and frees the SDL_AudioStream.
+}
+
+MicTapStats Engine::getMicTapStats(MicTapId id) const
+{
+    MicTapStats stats{};
+    if (id == kInvalidMicTapId) return stats;
+    auto list = micTaps_.load();
+    for (auto& t : *list) {
+        if (t->id != id) {
+            continue;
+        }
+        stats.framesDelivered  = t->framesDelivered.load(std::memory_order_relaxed);
+        stats.samplesDelivered = t->samplesDelivered.load(std::memory_order_relaxed);
+        stats.rollingPeak      = t->rollingPeakX10000.load(std::memory_order_relaxed) / 10000.0f;
+        break;
+    }
+    return stats;
+}
+
+void Engine::dispatchMicTaps(const float* samples, int numSamples)
+{
+    auto list = micTaps_.load(std::memory_order_acquire);
+    if (!list || list->empty()) return;
+    for (auto& tap : *list) {
+        deliverTapChunk(*tap, samples, numSamples);
+    }
+}
+
+void Engine::deliverTapChunk(MicTap& tap, const float* samples, int numSamples)
+{
+    // Stage 1: resample into a tap-local buffer (or pass-through).
+    const float* feed = samples;
+    int          feedN = numSamples;
+
+    if (tap.resampler) {
+        const int putBytes = numSamples * static_cast<int>(sizeof(float));
+        SDL_PutAudioStreamData(tap.resampler, samples, putBytes);
+        const int availBytes = SDL_GetAudioStreamAvailable(tap.resampler);
+        if (availBytes <= 0) return;
+        const int availSamples = availBytes / static_cast<int>(sizeof(float));
+        if (static_cast<int>(tap.scratch.size()) < availSamples) {
+            tap.scratch.resize(static_cast<std::size_t>(availSamples));
+        }
+        const int gotBytes = SDL_GetAudioStreamData(
+            tap.resampler, tap.scratch.data(), availBytes);
+        if (gotBytes <= 0) return;
+        feed = tap.scratch.data();
+        feedN = gotBytes / static_cast<int>(sizeof(float));
+    }
+
+    // Stage 2: AGC (in-place — promote pass-through samples to scratch first
+    // so we never mutate the caller's buffer).
+    if (tap.cfg.agc) {
+        if (feed != tap.scratch.data()) {
+            if (static_cast<int>(tap.scratch.size()) < feedN) {
+                tap.scratch.resize(static_cast<std::size_t>(feedN));
+            }
+            std::memcpy(tap.scratch.data(), feed,
+                        static_cast<std::size_t>(feedN) * sizeof(float));
+            feed = tap.scratch.data();
+        }
+        tap.agc.apply(tap.scratch.data(), feedN, tap.effectiveRate);
+    }
+
+    // Stage 3: dispatch in chunkFrames-sized slices, or one shot.
+    auto recordStats = [&tap](const float* s, int n) {
+        float p = 0.0f;
+        for (int i = 0; i < n; ++i) {
+            float a = std::fabs(s[i]);
+            if (a > p) p = a;
+        }
+        int pk = static_cast<int>(p * 10000.0f);
+        int prev = tap.rollingPeakX10000.load(std::memory_order_relaxed);
+        while (pk > prev &&
+               !tap.rollingPeakX10000.compare_exchange_weak(prev, pk)) {}
+        tap.framesDelivered.fetch_add(1, std::memory_order_relaxed);
+        tap.samplesDelivered.fetch_add(
+            static_cast<std::uint64_t>(n), std::memory_order_relaxed);
+    };
+
+    if (tap.cfg.chunkFrames <= 0) {
+        recordStats(feed, feedN);
+        tap.callback(feed, feedN);
+        return;
+    }
+
+    const int chunk = tap.cfg.chunkFrames;
+    // Append to the tap's chunk buffer, then emit complete chunks.
+    const std::size_t prevSize = tap.chunkBuf.size();
+    tap.chunkBuf.resize(prevSize + static_cast<std::size_t>(feedN));
+    std::memcpy(tap.chunkBuf.data() + prevSize, feed,
+                static_cast<std::size_t>(feedN) * sizeof(float));
+
+    std::size_t offset = 0;
+    while (tap.chunkBuf.size() - offset >= static_cast<std::size_t>(chunk)) {
+        const float* p = tap.chunkBuf.data() + offset;
+        recordStats(p, chunk);
+        tap.callback(p, chunk);
+        offset += static_cast<std::size_t>(chunk);
+    }
+    if (offset > 0) {
+        const std::size_t remaining = tap.chunkBuf.size() - offset;
+        std::memmove(tap.chunkBuf.data(),
+                     tap.chunkBuf.data() + offset,
+                     remaining * sizeof(float));
+        tap.chunkBuf.resize(remaining);
     }
 }
 

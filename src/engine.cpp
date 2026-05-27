@@ -1354,16 +1354,43 @@ void Engine::micCallback(void* userdata, SDL_AudioStream* stream,
     int got = SDL_GetAudioStreamData(stream, buffer, avail);
     if (got > 0) {
         int samplesGot = got / static_cast<int>(sizeof(float));
-        {
-            std::lock_guard<std::mutex> lock(engine->micMutex_);
-            engine->micBuffer_.write(buffer, samplesGot);
+        engine->processMicSamples(buffer, samplesGot);
+    }
+}
+
+void Engine::processMicSamples(const float* buffer, int samplesGot)
+{
+    if (samplesGot <= 0) return;
+
+    // Fire the user mic-frame hook first, so wake-word/ASR detectors observe
+    // samples with minimum latency (before any analysis buffer or monitor
+    // bookkeeping). Wait-free RCU snapshot — no locks, no blocking.
+    {
+        RcuDomain::ReadScope rcuScope(rcu_);
+        auto cb = micFrameCallback_.load(std::memory_order_acquire);
+        if (cb && *cb) {
+            (*cb)(buffer, samplesGot);
         }
-        int cap = MIC_FIFO_SIZE;
-        uint64_t wp = engine->micPlaybackWritePos_.load(std::memory_order_relaxed);
-        for (int i = 0; i < samplesGot; i++) {
-            engine->micPlayback_[static_cast<int>((wp + i) % cap)] = buffer[i];
-        }
-        engine->micPlaybackWritePos_.store(wp + samplesGot, std::memory_order_release);
+    }
+
+    // Analysis ring — SPSC-safe via AnalysisBuffer's atomic writePos_.
+    micBuffer_.write(buffer, samplesGot);
+
+    // Monitor FIFO (audio thread → output mixer).
+    int cap = MIC_FIFO_SIZE;
+    uint64_t wp = micPlaybackWritePos_.load(std::memory_order_relaxed);
+    for (int i = 0; i < samplesGot; i++) {
+        micPlayback_[static_cast<int>((wp + i) % cap)] = buffer[i];
+    }
+    micPlaybackWritePos_.store(wp + samplesGot, std::memory_order_release);
+}
+
+void Engine::setMicFrameCallback(MicFrameCallback cb)
+{
+    if (cb) {
+        micFrameCallback_.store(std::make_shared<const MicFrameCallback>(std::move(cb)));
+    } else {
+        micFrameCallback_.store(nullptr);
     }
 }
 

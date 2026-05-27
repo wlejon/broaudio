@@ -19,6 +19,7 @@
 #include "broaudio/io/serialization.h"
 
 #include <atomic>
+#include <functional>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -211,6 +212,27 @@ public:
     void setMicBus(int busId) { micBusId_.store(busId, std::memory_order_relaxed); }
     int micBus() const { return micBusId_.load(std::memory_order_relaxed); }
 
+    // Audio-thread mic-frame hook. The callback fires on the SDL recording
+    // callback thread for every chunk pulled from the device, before the
+    // samples are written into the analysis ring or monitor FIFO. Intended
+    // for very-low-latency consumers (e.g. wake-word detectors) that can
+    // afford to do real-time-safe work directly on the audio thread —
+    // no allocations, no locks, no blocking. Pass nullptr to disable.
+    //
+    // Setting the callback is safe from any thread; the audio thread reads
+    // the slot via a wait-free RCU snapshot, so installs/removes never
+    // block the recording callback.
+    using MicFrameCallback = std::function<void(const float* samples, int numSamples)>;
+    void setMicFrameCallback(MicFrameCallback cb);
+
+    // Test seam — drive the mic processing pipeline as if the SDL recording
+    // callback had delivered `numSamples` of mono float audio. Exercises the
+    // same code path (user mic-frame hook, analysis ring write, monitor FIFO
+    // update) as the real audio thread. Intended for unit tests only.
+    void testFeedMicSamples(const float* samples, int numSamples) {
+        processMicSamples(samples, numSamples);
+    }
+
     // --- Sample-accurate event scheduling ---
 
     // Schedule a noteOn/noteOff to be dispatched sample-accurately in the audio callback.
@@ -346,6 +368,7 @@ private:
 
     static void micCallback(void* userdata, SDL_AudioStream* stream,
                             int additional_amount, int total_amount);
+    void processMicSamples(const float* samples, int numSamples);
 
     // RCU reclamation domain — must be declared before any AtomicSharedPtr
     // member so the slots can bind to it in their initializers.
@@ -397,7 +420,14 @@ private:
 
     AnalysisBuffer outputBuffer_{16384};
     AnalysisBuffer micBuffer_{16384};
-    std::mutex micMutex_;
+    // micBuffer_ uses AnalysisBuffer's atomic writePos_ (acquire/release) for
+    // SPSC publication; no lock is required between the recording callback
+    // (writer) and the analysis readers on the main thread.
+
+    // Audio-thread mic-frame hook (see setMicFrameCallback). Wait-free read
+    // from the recording callback via the engine's RCU domain. Single-writer
+    // (the caller of setMicFrameCallback) — typically the JS/main thread.
+    AtomicSharedPtr<const MicFrameCallback> micFrameCallback_{rcu_};
 
     static constexpr int MIC_FIFO_SIZE = 22050;
     std::vector<float> micPlayback_ = std::vector<float>(MIC_FIFO_SIZE, 0.0f);

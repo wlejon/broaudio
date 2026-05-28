@@ -1362,16 +1362,12 @@ void Engine::processMicSamples(const float* buffer, int samplesGot)
 {
     if (samplesGot <= 0) return;
 
-    // Fan out to multi-consumer taps + legacy single-slot hook first, before
-    // the analysis ring / monitor bookkeeping, so wake-word and ASR consumers
-    // see samples with minimum latency. Both run under one RCU read scope.
+    // Fan out to multi-consumer taps first, before the analysis ring / monitor
+    // bookkeeping, so wake-word and ASR consumers see samples with minimum
+    // latency. Runs under one RCU read scope.
     {
         RcuDomain::ReadScope rcuScope(rcu_);
         dispatchMicTaps(buffer, samplesGot);
-        auto cb = micFrameCallback_.load(std::memory_order_acquire);
-        if (cb && *cb) {
-            (*cb)(buffer, samplesGot);
-        }
     }
 
     // Analysis ring — SPSC-safe via AnalysisBuffer's atomic writePos_.
@@ -1386,18 +1382,19 @@ void Engine::processMicSamples(const float* buffer, int samplesGot)
     micPlaybackWritePos_.store(wp + samplesGot, std::memory_order_release);
 }
 
-void Engine::setMicFrameCallback(MicFrameCallback cb)
-{
-    if (cb) {
-        micFrameCallback_.store(std::make_shared<const MicFrameCallback>(std::move(cb)));
-    } else {
-        micFrameCallback_.store(nullptr);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Mic taps (multi-consumer dispatch with per-tap resample + AGC + chunking)
 // ---------------------------------------------------------------------------
+
+void Engine::injectMicSamples(const float* samples, int numSamples)
+{
+    if (numSamples <= 0 || !samples) return;
+    // Tap dispatch only — no analysis-ring or monitor-FIFO writes, so this
+    // never races the SPSC publication the recording callback relies on. The
+    // caller guarantees no live capture is running concurrently (see header).
+    RcuDomain::ReadScope rcuScope(rcu_);
+    dispatchMicTaps(samples, numSamples);
+}
 
 Engine::MicTap::~MicTap()
 {

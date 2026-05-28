@@ -213,23 +213,14 @@ public:
     void setMicBus(int busId) { micBusId_.store(busId, std::memory_order_relaxed); }
     int micBus() const { return micBusId_.load(std::memory_order_relaxed); }
 
-    // Audio-thread mic-frame hook. The callback fires on the SDL recording
-    // callback thread for every chunk pulled from the device, before the
-    // samples are written into the analysis ring or monitor FIFO. Intended
-    // for very-low-latency consumers (e.g. wake-word detectors) that can
-    // afford to do real-time-safe work directly on the audio thread —
-    // no allocations, no locks, no blocking. Pass nullptr to disable.
-    //
-    // Setting the callback is safe from any thread; the audio thread reads
-    // the slot via a wait-free RCU snapshot, so installs/removes never
-    // block the recording callback.
-    using MicFrameCallback = std::function<void(const float* samples, int numSamples)>;
-    void setMicFrameCallback(MicFrameCallback cb);
-
     // Multi-consumer mic-frame dispatch. Each tap describes the rate, frame
     // size, and AGC it wants; the audio thread fans the raw mic chunk out to
-    // every active tap before falling through to the legacy single-slot
-    // setMicFrameCallback hook, the analysis ring, and the monitor FIFO.
+    // every active tap (each resampling / AGC-ing / chunking as configured)
+    // before the samples are written into the analysis ring and monitor FIFO.
+    // This is the sole audio-thread mic hook — very-low-latency consumers
+    // (wake-word detectors, ASR frontends, level meters) attach a tap and do
+    // real-time-safe work directly in the callback (no allocations after
+    // addMicTap, no locks, no blocking).
     //
     // addMicTap / removeMicTap / getMicTapStats are safe to call from any
     // single thread (typically the main thread) but must NOT be called
@@ -243,13 +234,17 @@ public:
     void     removeMicTap(MicTapId id);
     MicTapStats getMicTapStats(MicTapId id) const;
 
-    // Test seam — drive the mic processing pipeline as if the SDL recording
-    // callback had delivered `numSamples` of mono float audio. Exercises the
-    // same code path (user mic-frame hook, analysis ring write, monitor FIFO
-    // update) as the real audio thread. Intended for unit tests only.
-    void testFeedMicSamples(const float* samples, int numSamples) {
-        processMicSamples(samples, numSamples);
-    }
+    // Offline / headless seam — fan `numSamples` of mono FP32 audio out to the
+    // active mic taps exactly as the recording callback would, but WITHOUT
+    // touching the analysis ring or monitor FIFO (so it never races the SPSC
+    // publication those rely on). Lets a headless script or unit test drive
+    // tap consumers (resample → AGC → chunk → callback) with synthetic audio.
+    //
+    // MUST NOT be called concurrently with live capture: it mutates the same
+    // per-tap resampler / AGC / chunk-buffer state the audio thread owns. Use
+    // it only when no recording device is open (the headless default) or while
+    // capture is stopped.
+    void injectMicSamples(const float* samples, int numSamples);
 
     // --- Sample-accurate event scheduling ---
 
@@ -441,11 +436,6 @@ private:
     // micBuffer_ uses AnalysisBuffer's atomic writePos_ (acquire/release) for
     // SPSC publication; no lock is required between the recording callback
     // (writer) and the analysis readers on the main thread.
-
-    // Audio-thread mic-frame hook (see setMicFrameCallback). Wait-free read
-    // from the recording callback via the engine's RCU domain. Single-writer
-    // (the caller of setMicFrameCallback) — typically the JS/main thread.
-    AtomicSharedPtr<const MicFrameCallback> micFrameCallback_{rcu_};
 
     // Multi-consumer mic-tap registry. Each tap owns its own SDL_AudioStream
     // (when resampling) + Agc + chunk-buffer state. The audio thread loads a

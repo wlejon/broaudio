@@ -9,7 +9,7 @@
 // tap resamples (if its targetRate differs from the engine rate), optionally
 // AGCs, slices into the requested chunkFrames, and invokes the user callback.
 //
-// Compared to the older single-slot setMicFrameCallback hook this gives us:
+// This is the single audio-thread mic hook. It gives us:
 //   * Multiple simultaneous consumers (wake + future live whisper, etc.) with
 //     no last-writer-wins races.
 //   * One place that knows about resampling — taps requesting different rates

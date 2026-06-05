@@ -1,6 +1,6 @@
 # broaudio
 
-A real-time audio engine library written in C++20. Provides synthesis, sample playback, effects processing, spatial audio, MIDI input, and a flexible mixing bus architecture — all with a lock-free, audio-thread-safe design built on SDL3.
+A real-time audio engine library written in C++20. Provides synthesis, sample playback, effects processing, spatial audio, MIDI input, audio-file decode/encode, and a flexible mixing bus architecture — all with a lock-free, audio-thread-safe design built on SDL3.
 
 ## Features
 
@@ -28,10 +28,11 @@ A real-time audio engine library written in C++20. Provides synthesis, sample pl
 - **Configurable effect chain** — Reorder the processing chain per bus via `setBusEffectOrder`
 - **Biquad filters** — Up to 4 slots per bus, 8 filter types
 - **Delay** — Feedback delay with wet/dry mix
-- **Compressor** — Threshold, ratio, attack, release
+- **Compressor** — Threshold, ratio, attack, release, with optional **sidechain** from another bus
 - **Reverb** — Freeverb-style stereo algorithmic reverb (8 comb + 4 allpass)
 - **Chorus/Flanger** — Modulated stereo delay lines
-- **Equalizer** — 7-band parametric EQ with presets
+- **Distortion / Waveshaper** — Soft clip (tanh), hard clip, foldback, and bitcrush modes with drive, mix, and output gain
+- **Equalizer** — 7-band parametric EQ (60 Hz–16 kHz) with presets
 - **Master limiter** — Lookahead peak limiter on the master bus
 
 ### Mixing
@@ -39,18 +40,26 @@ A real-time audio engine library written in C++20. Provides synthesis, sample pl
 - **Per-bus controls** — Gain, pan, mute
 - **Aux sends** — From voices, clips, or buses to any other bus
 - **Bus routing** — Voices and clips can target any bus
+- **Bus metering** — Per-bus peak and RMS (L/R) for level visualization
 
 ### Audio Clips
-- **Sample playback** — Load from raw float buffers, play with gain/pan/rate control
+- **Sample playback** — Load from raw float buffers (mono or stereo), play with gain/pan/rate control
 - **Looping and regions** — Loop points and sub-region playback
 - **Variable-rate playback** — Time-stretching via playback rate
 - **Waveform extraction** — Min/max binning for display
+- **Decode from file** — `createClipFromFile` loads WAV/FLAC/MP3/OGG straight into a clip
+
+### Audio File I/O
+- **Decode** — `loadAudioFile` / `loadAudioFileFromMemory` decode WAV, FLAC, MP3, and OGG (Opus requires `BROAUDIO_OPUS`) to interleaved float32 PCM (via dr_libs)
+- **Encode** — `saveWav` writes 32-bit float WAV; `exportRecordingToWav` dumps captured output
+- **Offline resampling** — Polyphase Kaiser-windowed sinc `resample()` for arbitrary-ratio sample-rate conversion
 
 ### Spatial Audio
 - **3D listener** — Position and orientation (forward + up vectors)
 - **Per-source positioning** — On both voices and clip playback instances
 - **Distance models** — Linear, inverse, exponential with configurable ref/max distance and rolloff
 - **Angle-based stereo panning** — Projects source direction onto listener's right vector
+- **Head-shadow model** — Optional HRTF-style ILD (interaural level difference) plus per-ear one-pole lowpass for front/back and elevation cues, all caller-tunable
 
 ### MIDI
 - **Hardware/virtual port input** via libremidi
@@ -64,13 +73,20 @@ A real-time audio engine library written in C++20. Provides synthesis, sample pl
 - **Tempo control** — Configurable BPM and time signature
 - **Transport** — Play, stop, pause, resume
 - **Looping** — Loop range with automatic wrap-around
+- **Automation lanes** — Per-parameter breakpoint envelopes with step/linear/smooth interpolation, applied each `update`
 - **VoiceAllocator integration** — Fires noteOn/noteOff at sample-accurate engine time
 - **Main-thread driven** — Call `update(engineTime)` from your frame loop
 
+### Presets and Serialization
+- **Plain-data preset structs** — `VoicePreset`, `BusPreset`, `ModPreset`, `EnginePreset` describe a full patch with no atomics
+- **Apply to live objects** — `applyVoicePreset` / `applyBusPreset` / `applyModPreset` / `applyEnginePreset`
+- **JSON round-trip** — `toJson` / `*FromJson` plus `savePresetToFile` / `loadPresetFromFile`
+
 ### Analysis and Recording
 - **Output and mic analysis buffers** — Ring buffers for visualization
-- **FFT spectrum** — Radix-2 Cooley-Tukey, up to 8192 bins
-- **Microphone capture** — With monitor gain and mute
+- **FFT spectrum** — Cooley-Tukey, up to 8192 bins
+- **Microphone capture** — With monitor gain, mute, and bus routing
+- **Mic taps** — Multi-consumer audio-thread mic dispatch; each tap requests its own target rate (polyphase resampled), fixed chunk size, and optional AGC, with per-tap stats. Single hook for wake-word detectors, live ASR, custom analyzers
 - **Output recording** — Capture up to 60 seconds of engine output
 
 ## Architecture
@@ -87,9 +103,12 @@ Voices ──┐
 Clips  ──┘         │                │
                    FX chain        FX chain
               (filter/delay/      (filter/delay/
-               comp/reverb/        comp/reverb/
-               chorus)             chorus)
+               comp/chorus/        comp/chorus/
+               distortion/         distortion/
+               reverb/EQ)          reverb/EQ)
 ```
+
+The per-bus FX chain order is configurable via `setBusEffectOrder`.
 
 ## Building
 
@@ -97,6 +116,9 @@ Clips  ──┘         │                │
 - C++20 compiler (MSVC 2022, GCC 12+, Clang 15+)
 - CMake 3.24+
 - SDL3
+- [`bromath`](https://github.com/wlejon/bromath) — header-only math sibling, expected at `../bromath` (or provide a `bromath::bromath` target)
+
+MIDI support pulls in `libremidi` as a submodule under `third_party/`; initialize submodules (`git submodule update --init`) for the default MIDI-enabled build.
 
 ### As a standalone project
 ```bash
@@ -110,17 +132,22 @@ add_subdirectory(broaudio)
 target_link_libraries(your_app PRIVATE broaudio)
 ```
 
-The consumer must provide an SDL3 target (`SDL3::SDL3` or `SDL3::SDL3-static`) before adding the subdirectory.
+The consumer must provide an SDL3 target (`SDL3::SDL3` or `SDL3::SDL3-static`) before adding the subdirectory. If a `bromath::bromath` target already exists in the build it is reused; otherwise broaudio adds the `../bromath` sibling.
 
 ### Options
 | Option | Default | Description |
 |---|---|---|
-| `BROAUDIO_MIDI` | `ON` | Enable MIDI input via libremidi (bundled in `third_party/`) |
+| `BROAUDIO_MIDI` | `ON` | Enable MIDI input via libremidi (submodule in `third_party/`); defines `BROAUDIO_HAS_MIDI` |
+| `BROAUDIO_OPUS` | `OFF` | Enable OGG Opus decoding via opusfile (found via pkg-config / find_package); defines `BROAUDIO_HAS_OPUS` |
 | `BROAUDIO_TESTS` | `ON` | Build test suite (standalone builds only) |
 
+If MIDI or Opus dependencies are not found, the respective option is auto-disabled with a status message rather than failing the configure.
+
 ### Running tests
+Each test is a standalone executable registered with CTest (no aggregate target).
+
 ```bash
-cmake --build build --target broaudio_tests
+cmake --build build
 ctest --test-dir build
 ```
 

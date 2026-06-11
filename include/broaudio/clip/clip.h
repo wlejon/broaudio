@@ -31,6 +31,11 @@ struct ClipPlayback {
     std::atomic<bool> playing{false};
     std::atomic<bool> looping{false};
     std::atomic<bool> active{true};
+    // Sample-accurate scheduled start: absolute engine sample index (cf.
+    // Engine::currentTime) at which mixing begins. 0 = start immediately (the
+    // plain playClip default). Set by playClipAt so a streamed sequence of
+    // clips joins gaplessly on the audio clock instead of via main-thread timers.
+    std::atomic<uint64_t> startSample{0};
 
     // Parameter smoothers (audio thread only)
     Smoother smoothGain;

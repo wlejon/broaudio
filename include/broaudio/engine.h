@@ -284,6 +284,11 @@ public:
     // --- Clip Playback ---
 
     int playClip(int clipId, float gain = 1.0f, bool loop = false);
+    // Sample-accurate scheduled playback: begin the clip when the audio clock
+    // reaches `when` seconds (engine time, from currentTime()). A `when` at or
+    // before now plays immediately. Use this to queue streamed chunks so they
+    // join on the audio thread without main-thread setTimeout jitter or drift.
+    int playClipAt(int clipId, double when, float gain = 1.0f, bool loop = false);
     void stopPlayback(int instanceId);
     void setPlaybackGain(int instanceId, float gain);
     void setPlaybackLoop(int instanceId, bool loop);

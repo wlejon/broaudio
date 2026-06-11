@@ -148,6 +148,12 @@ void Engine::renderInternal(int numFrames)
     {
         auto currentClips = clips_.load();
         auto currentPlaybacks = playbacks_.load();
+        // This block spans absolute samples [blockStart, blockStart+numFrames).
+        // generateSamples() above already advanced samplesGenerated_ by numFrames
+        // (same as the realtime path), so the counter holds the block's END sample.
+        uint64_t blockEnd = samplesGenerated_.load(std::memory_order_relaxed);
+        uint64_t blockStart = blockEnd >= static_cast<uint64_t>(numFrames)
+                                  ? blockEnd - static_cast<uint64_t>(numFrames) : 0;
         for (auto& pb : *currentPlaybacks) {
             if (!pb->active.load(std::memory_order_relaxed)) continue;
             if (!pb->playing.load(std::memory_order_relaxed)) continue;
@@ -211,7 +217,17 @@ void Engine::renderInternal(int numFrames)
             constexpr uint64_t FRAC_MASK = (1ULL << FRAC_BITS) - 1;
             uint64_t increment = static_cast<uint64_t>(rate * (1 << FRAC_BITS) + 0.5f);
 
-            for (int i = 0; i < numFrames; i++) {
+            // Sample-accurate scheduled start (see the realtime path for the rationale):
+            // stay silent until the audio clock reaches startSample, then begin mid-block.
+            int startFrame = 0;
+            uint64_t startS = pb->startSample.load(std::memory_order_relaxed);
+            if (startS > blockStart) {
+                uint64_t off = startS - blockStart;
+                if (off >= static_cast<uint64_t>(numFrames)) continue;  // starts in a later block
+                startFrame = static_cast<int>(off);
+            }
+
+            for (int i = startFrame; i < numFrames; i++) {
                 int intPos = static_cast<int>(pos >> FRAC_BITS);
                 if (looping) {
                     intPos = intPos % len;
@@ -342,7 +358,11 @@ void Engine::renderInternal(int numFrames)
     }
     outputBuffer_.write(buffer, numFrames);
 
-    samplesGenerated_.fetch_add(numFrames, std::memory_order_relaxed);
+    // NOTE: samplesGenerated_ is advanced by generateSamples() above (the single
+    // source of truth, shared with the realtime processOutputChunk path). The
+    // extra fetch_add that used to live here double-counted the offline clock —
+    // currentTime() ran at 2x in headless/renderBlock, and scheduled-event /
+    // clip-start times landed at half their intended sample. Removed.
 }
 
 void Engine::shutdown()
@@ -1781,6 +1801,36 @@ int Engine::playClip(int clipId, float gain, bool loop)
     return id;
 }
 
+int Engine::playClipAt(int clipId, double when, float gain, bool loop)
+{
+    std::lock_guard<std::mutex> lock(mediaWriteMutex_);
+    if (!findClip(clipId)) return -1;
+
+    // Resolve the start to an absolute engine sample. A time at/before now maps
+    // to 0 (immediate); the mixer treats 0 / past samples as "already started".
+    uint64_t startSample = 0;
+    double s = when * static_cast<double>(sampleRate_);
+    if (s > 0.0) startSample = static_cast<uint64_t>(s + 0.5);
+
+    auto pb = std::make_shared<ClipPlayback>();
+    pb->id = nextPlaybackId_++;
+    pb->clipId = clipId;
+    pb->gain.store(gain, std::memory_order_relaxed);
+    pb->looping.store(loop, std::memory_order_relaxed);
+    pb->playing.store(true, std::memory_order_relaxed);
+    pb->active.store(true, std::memory_order_relaxed);
+    pb->playPos.store(0, std::memory_order_relaxed);
+    pb->regionStart.store(0, std::memory_order_relaxed);
+    pb->regionEnd.store(0, std::memory_order_relaxed);
+    pb->startSample.store(startSample, std::memory_order_relaxed);
+
+    int id = pb->id;
+    auto newList = std::make_shared<PlaybackList>(*playbacks_.load());
+    newList->push_back(std::move(pb));
+    playbacks_.store(std::move(newList));
+    return id;
+}
+
 void Engine::stopPlayback(int instanceId)
 {
     std::lock_guard<std::mutex> lock(mediaWriteMutex_);
@@ -2130,6 +2180,12 @@ void Engine::processOutputChunk(SDL_AudioStream* stream, int numFrames)
     {
         auto currentClips = engine->clips_.load();
         auto currentPlaybacks = engine->playbacks_.load();
+        // This block spans absolute samples [blockStart, blockStart+numFrames).
+        // generateSamples() already advanced samplesGenerated_ by numFrames above,
+        // so the counter now holds the block's END sample.
+        uint64_t blockEnd = engine->samplesGenerated_.load(std::memory_order_relaxed);
+        uint64_t blockStart = blockEnd >= static_cast<uint64_t>(numFrames)
+                                  ? blockEnd - static_cast<uint64_t>(numFrames) : 0;
         for (auto& pb : *currentPlaybacks) {
             if (!pb->active.load(std::memory_order_relaxed)) continue;
             if (!pb->playing.load(std::memory_order_relaxed)) continue;
@@ -2197,7 +2253,19 @@ void Engine::processOutputChunk(SDL_AudioStream* stream, int numFrames)
             constexpr uint64_t FRAC_MASK = (1ULL << FRAC_BITS) - 1;
             uint64_t increment = static_cast<uint64_t>(rate * (1 << FRAC_BITS) + 0.5f);
 
-            for (int i = 0; i < numFrames; i++) {
+            // Sample-accurate scheduled start: stay silent until the audio clock
+            // reaches startSample, then begin mid-block at the exact frame. 0 (or
+            // any past sample) starts immediately. Once started, later blocks have
+            // startSample <= blockStart, so startFrame is 0 and playPos continues.
+            int startFrame = 0;
+            uint64_t startS = pb->startSample.load(std::memory_order_relaxed);
+            if (startS > blockStart) {
+                uint64_t off = startS - blockStart;
+                if (off >= static_cast<uint64_t>(numFrames)) continue;  // starts in a later block
+                startFrame = static_cast<int>(off);
+            }
+
+            for (int i = startFrame; i < numFrames; i++) {
                 int intPos = static_cast<int>(pos >> FRAC_BITS);
                 if (looping) {
                     intPos = intPos % len;

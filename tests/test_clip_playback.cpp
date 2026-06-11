@@ -335,4 +335,90 @@ TEST(stereo_clip_playback_produces_stereo_output) {
     PASS();
 }
 
+// ---------------------------------------------------------------------------
+// Sample-accurate scheduled playback (playClipAt) — the streaming join
+// ---------------------------------------------------------------------------
+
+TEST(play_clip_at_invalid_returns_negative) {
+    Engine e; e.initHeadless();
+    ASSERT_EQ(e.playClipAt(9999, 0.5, 1.0f, false), -1);
+    PASS();
+}
+
+TEST(play_clip_at_zero_plays_immediately) {
+    Engine e; e.initHeadless();
+    int sr = e.sampleRate();
+    auto sine = makeSineMono(sr, 440.0f, sr);
+    int cid = e.createClip(sine.data(), (int)sine.size(), 1);
+    e.playClipAt(cid, 0.0, 1.0f, false);              // when <= now → immediate
+    e.renderBlock(512);
+    ASSERT_GT(e.getBusPeakL(Engine::MASTER_BUS_ID), 0.2f);
+    PASS();
+}
+
+TEST(play_clip_at_is_silent_before_scheduled_sample) {
+    Engine e; e.initHeadless();
+    int sr = e.sampleRate();
+    auto sine = makeSineMono(sr, 440.0f, sr);
+    int cid = e.createClip(sine.data(), (int)sine.size(), 1);
+
+    const int startSample = 1000;
+    e.startRecording();
+    int pid = e.playClipAt(cid, (double)startSample / sr, 0.5f, false);
+    ASSERT_TRUE(pid >= 0);
+    e.renderBlock(4096);
+    e.stopRecording();
+    auto out = e.getRecordBuffer();                   // mono, one float per frame
+    ASSERT_TRUE((int)out.size() >= 4096);
+
+    // Exactly silent before the scheduled sample. (The master limiter's lookahead
+    // only ever DELAYS audio further, never advances it, so a clean zero here is
+    // the real guarantee that a scheduled clip can't leak in early.)
+    float before = 0.0f;
+    for (int i = 0; i < startSample; i++) before = std::max(before, std::fabs(out[i]));
+    ASSERT_NEAR(before, 0.0f, 1e-6f);
+    // ...and clearly audible somewhere after it.
+    float after = 0.0f;
+    for (int i = startSample; i < 4096; i++) after = std::max(after, std::fabs(out[i]));
+    ASSERT_GT(after, 0.05f);
+    PASS();
+}
+
+TEST(scheduled_clips_join_gaplessly_at_the_seam) {
+    Engine e; e.initHeadless();
+    int sr = e.sampleRate();
+    const int N = 1500;
+    auto sine = makeSineMono(N, 440.0f, sr);
+    int a = e.createClip(sine.data(), N, 1);
+    int b = e.createClip(sine.data(), N, 1);
+
+    // Two identical clips, B starting exactly where A ends. If the schedule were
+    // off by even a block, the seam would show a silent gap — this is the
+    // streaming chunk-join the lab relies on.
+    e.startRecording();
+    e.playClipAt(a, 0.0, 0.5f, false);                // covers [0, N)
+    e.playClipAt(b, (double)N / sr, 0.5f, false);     // covers [N, 2N)
+    e.renderBlock(2 * N + 512);
+    e.stopRecording();
+    auto out = e.getRecordBuffer();
+    ASSERT_TRUE((int)out.size() >= 2 * N);
+
+    // Interior region, past the limiter's lookahead onset. Self-calibrate the
+    // silence floor to the actual level, then assert there is no long silent run:
+    // a continuous signal only dips near its zero crossings (a handful of samples
+    // every half-period); a real scheduling gap would be hundreds of samples.
+    const int lo = 400, hi = 2 * N;
+    float peak = 0.0f;
+    for (int i = lo; i < hi; i++) peak = std::max(peak, std::fabs(out[i]));
+    ASSERT_GT(peak, 0.02f);
+    const float floorLvl = 0.15f * peak;
+    int run = 0, maxRun = 0;
+    for (int i = lo; i < hi; i++) {
+        if (std::fabs(out[i]) < floorLvl) { run++; maxRun = std::max(maxRun, run); }
+        else run = 0;
+    }
+    ASSERT_LT(maxRun, 80);   // no gap at the A→B seam
+    PASS();
+}
+
 int main() { return runAllTests(); }

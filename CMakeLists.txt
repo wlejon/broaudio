@@ -86,6 +86,15 @@ add_library(broaudio STATIC
     src/rcu.cpp
 )
 
+# Loopback / process-audio capture: Windows uses WASAPI, others get a stub.
+if(WIN32)
+    target_sources(broaudio PRIVATE src/loopback/capture_win.cpp)
+    # ole32: COM; mmdevapi: ActivateAudioInterfaceAsync; uuid: GUIDs.
+    target_link_libraries(broaudio PUBLIC ole32 mmdevapi uuid)
+else()
+    target_sources(broaudio PRIVATE src/loopback/capture_null.cpp)
+endif()
+
 if(BROAUDIO_MIDI)
     target_sources(broaudio PRIVATE src/midi/midi_input.cpp)
     target_compile_definitions(broaudio PUBLIC BROAUDIO_HAS_MIDI=1)

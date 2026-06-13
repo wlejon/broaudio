@@ -86,23 +86,30 @@ add_library(broaudio STATIC
     src/rcu.cpp
 )
 
-# Loopback / process-audio capture: Windows uses WASAPI, Linux uses PulseAudio
-# (when libpulse is available; this also covers pipewire-pulse), everything else
-# gets a stub.
+# Loopback / process-audio capture: Windows uses WASAPI, macOS uses CoreAudio
+# process taps, Linux uses PulseAudio (when libpulse is available; this also
+# covers pipewire-pulse), everything else gets a stub.
 if(WIN32)
     target_sources(broaudio PRIVATE src/loopback/capture_win.cpp)
     # ole32: COM; mmdevapi: ActivateAudioInterfaceAsync; uuid: GUIDs.
     target_link_libraries(broaudio PUBLIC ole32 mmdevapi uuid)
+elseif(APPLE)
+    # Objective-C++: CATapDescription is an ObjC class. Process taps + aggregate
+    # device + HAL IO all live in CoreAudio; Foundation for the ObjC runtime.
+    enable_language(OBJCXX)
+    target_sources(broaudio PRIVATE src/loopback/capture_macos.mm)
+    set_source_files_properties(src/loopback/capture_macos.mm PROPERTIES
+        COMPILE_OPTIONS "-std=gnu++20")
+    target_link_libraries(broaudio PUBLIC "-framework CoreAudio" "-framework Foundation")
+    message(STATUS "broaudio: loopback capture via CoreAudio process taps")
 else()
     set(BROAUDIO_LOOPBACK_BACKEND "stub")
-    if(NOT WIN32 AND NOT APPLE)
-        find_package(PkgConfig QUIET)
-        if(PkgConfig_FOUND)
-            pkg_check_modules(LIBPULSE IMPORTED_TARGET libpulse)
-        endif()
-        if(LIBPULSE_FOUND)
-            set(BROAUDIO_LOOPBACK_BACKEND "pulse")
-        endif()
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(LIBPULSE IMPORTED_TARGET libpulse)
+    endif()
+    if(LIBPULSE_FOUND)
+        set(BROAUDIO_LOOPBACK_BACKEND "pulse")
     endif()
 
     if(BROAUDIO_LOOPBACK_BACKEND STREQUAL "pulse")

@@ -25,6 +25,8 @@
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
 #  include <windows.h>
+#else
+#  include <unistd.h>
 #endif
 
 using namespace broaudio;
@@ -132,17 +134,18 @@ TEST(loopback_system_output_captures_tone) {
 TEST(loopback_process_include_own_pid_captures_tone) {
     if (!LoopbackCapture::isSupported()) { PASS(); return; }
     // Our own process is the one rendering the tone, so include-tree on our pid
-    // should hear it. Requires Win10 2004+; start() degrades to SKIP otherwise.
+    // should hear it. Requires Win10 2004+ / macOS 14.2+; start() degrades to
+    // SKIP otherwise (e.g. no audio-capture permission for the tap).
 #ifdef _WIN32
     std::uint32_t self = static_cast<std::uint32_t>(GetCurrentProcessId());
 #else
-    std::uint32_t self = 0;
+    std::uint32_t self = static_cast<std::uint32_t>(getpid());
 #endif
     float peak = captureWhilePlaying(LoopbackMode::ProcessInclude, self, "process(self)");
     if (peak > 0.001f) {
         ASSERT_GT(peak, 0.001f);
     } else if (peak == 0.0f) {
-        std::printf("  NOTE: no energy (muted) or pre-2004 Windows; "
+        std::printf("  NOTE: no energy (muted) or platform lacks process loopback; "
                     "bring-up still validated\n");
     }
     PASS();

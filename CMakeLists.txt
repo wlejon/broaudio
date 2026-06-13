@@ -86,13 +86,33 @@ add_library(broaudio STATIC
     src/rcu.cpp
 )
 
-# Loopback / process-audio capture: Windows uses WASAPI, others get a stub.
+# Loopback / process-audio capture: Windows uses WASAPI, Linux uses PulseAudio
+# (when libpulse is available; this also covers pipewire-pulse), everything else
+# gets a stub.
 if(WIN32)
     target_sources(broaudio PRIVATE src/loopback/capture_win.cpp)
     # ole32: COM; mmdevapi: ActivateAudioInterfaceAsync; uuid: GUIDs.
     target_link_libraries(broaudio PUBLIC ole32 mmdevapi uuid)
 else()
-    target_sources(broaudio PRIVATE src/loopback/capture_null.cpp)
+    set(BROAUDIO_LOOPBACK_BACKEND "stub")
+    if(NOT WIN32 AND NOT APPLE)
+        find_package(PkgConfig QUIET)
+        if(PkgConfig_FOUND)
+            pkg_check_modules(LIBPULSE IMPORTED_TARGET libpulse)
+        endif()
+        if(LIBPULSE_FOUND)
+            set(BROAUDIO_LOOPBACK_BACKEND "pulse")
+        endif()
+    endif()
+
+    if(BROAUDIO_LOOPBACK_BACKEND STREQUAL "pulse")
+        target_sources(broaudio PRIVATE src/loopback/capture_pulse.cpp)
+        target_link_libraries(broaudio PRIVATE PkgConfig::LIBPULSE)
+        message(STATUS "broaudio: loopback capture via PulseAudio")
+    else()
+        target_sources(broaudio PRIVATE src/loopback/capture_null.cpp)
+        message(STATUS "broaudio: loopback capture unsupported (no backend), using stub")
+    endif()
 endif()
 
 if(BROAUDIO_MIDI)

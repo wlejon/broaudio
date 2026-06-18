@@ -213,6 +213,13 @@ void Engine::renderInternal(int numFrames)
                 }
             }
 
+            // Streaming sources read from a ring instead of a fixed clip.
+            if (clip->streaming) {
+                mixStreamPlayback(pb.get(), clip, targetBuf, clipSendBuf, clipSendAmt,
+                                  spatialFilterActive, headParams, numFrames, 0);
+                continue;
+            }
+
             constexpr int FRAC_BITS = 16;
             constexpr uint64_t FRAC_MASK = (1ULL << FRAC_BITS) - 1;
             uint64_t increment = static_cast<uint64_t>(rate * (1 << FRAC_BITS) + 0.5f);
@@ -1831,6 +1838,145 @@ int Engine::playClipAt(int clipId, double when, float gain, bool loop)
     return id;
 }
 
+// Ring-read mix for a streaming playback. Caller has already set the gain/pan
+// smoother targets and resolved targetBuf / sends / spatial; this just reads the
+// ring and applies the same per-frame gain/pan/spatial/write as the clip path.
+void Engine::mixStreamPlayback(ClipPlayback* pb, AudioClip* clip, float* targetBuf,
+                               float* clipSendBuf, float clipSendAmt,
+                               bool spatialFilterActive, const HeadParams& headParams,
+                               int numFrames, int startFrame)
+{
+    const int cap = clip->ringFrames;
+    const int ch = clip->channels;
+    if (cap <= 0) return;
+
+    uint64_t wf = clip->writeFrames.load(std::memory_order_acquire);
+    uint64_t rf = pb->playPos.load(std::memory_order_relaxed);
+    // Overrun: if the reader has fallen more than a full ring behind, jump
+    // forward (drop the oldest audio) so latency stays bounded.
+    if (wf > rf + static_cast<uint64_t>(cap))
+        rf = wf - static_cast<uint64_t>(cap) / 2;
+
+    for (int i = startFrame; i < numFrames; i++) {
+        float sL = 0.0f, sR = 0.0f;
+        if (rf < wf) { // else underrun → silence, hold the cursor
+            int slot = static_cast<int>(rf % cap);
+            if (ch == 2) { sL = clip->samples[slot * 2]; sR = clip->samples[slot * 2 + 1]; }
+            else { float s = clip->samples[slot]; sL = s; sR = s; }
+            rf++;
+        }
+
+        float g = pb->smoothGain.next();
+        float clipPan = pb->smoothPan.next();
+        float panL, panR;
+        panGains(clipPan, panL, panR);
+
+        float outL, outR;
+        if (ch == 2) {
+            float L = sL * g, R = sR * g;
+            outL = L * panL + R * (1.0f - panR);
+            outR = R * panR + L * (1.0f - panL);
+        } else {
+            float s = sL * g;
+            outL = s * panL;
+            outR = s * panR;
+        }
+
+        if (spatialFilterActive)
+            pb->spatialFilter.process(outL, outR, headParams);
+
+        targetBuf[i * 2]     += outL;
+        targetBuf[i * 2 + 1] += outR;
+        if (clipSendBuf) {
+            clipSendBuf[i * 2]     += outL * clipSendAmt;
+            clipSendBuf[i * 2 + 1] += outR * clipSendAmt;
+        }
+    }
+    pb->playPos.store(rf, std::memory_order_relaxed);
+}
+
+// ---------------------------------------------------------------------------
+// Streaming PCM source — a ring-backed clip + a persistent playback. Reuses the
+// full ClipPlayback machinery (gain/pan/bus/sends/spatial); the mixer takes a
+// ring-read branch when clip->streaming is set.
+// ---------------------------------------------------------------------------
+int Engine::createStream(int channels, int ringFrames)
+{
+    if (channels < 1 || channels > 2) return -1;
+    if (ringFrames <= 0) ringFrames = sampleRate_ * 2; // ~2 s default
+
+    auto clip = std::make_shared<AudioClip>();
+    auto pb   = std::make_shared<ClipPlayback>();
+
+    std::lock_guard<std::mutex> lock(mediaWriteMutex_);
+    clip->id = nextClipId_++;
+    clip->channels = channels;
+    clip->streaming = true;
+    clip->ringFrames = ringFrames;
+    clip->samples.assign(static_cast<size_t>(ringFrames) * channels, 0.0f);
+    clip->writeFrames.store(0, std::memory_order_relaxed);
+    int clipId = clip->id;
+
+    pb->id = nextPlaybackId_++;
+    pb->clipId = clipId;
+    pb->playing.store(true, std::memory_order_relaxed);
+    pb->active.store(true, std::memory_order_relaxed);
+    pb->playPos.store(0, std::memory_order_relaxed); // absolute read-frame cursor
+    int id = pb->id;
+
+    auto newClips = std::make_shared<ClipList>(*clips_.load());
+    newClips->push_back(std::move(clip));
+    clips_.store(std::move(newClips));
+
+    auto newPB = std::make_shared<PlaybackList>(*playbacks_.load());
+    newPB->push_back(std::move(pb));
+    playbacks_.store(std::move(newPB));
+    return id;
+}
+
+int Engine::pushStreamSamples(int instanceId, const float* samples, int numSamples)
+{
+    if (!samples || numSamples <= 0) return 0;
+    // No write lock: this is the single producer. We only read the (stable)
+    // clip pointer + write ring slots, then release-publish writeFrames.
+    ClipPlayback* pb = findPlayback(instanceId);
+    if (!pb) return 0;
+    AudioClip* clip = findClip(pb->clipId);
+    if (!clip || !clip->streaming || clip->ringFrames <= 0) return 0;
+
+    const int cap = clip->ringFrames;
+    const int ch = clip->channels;
+    int numFrames = numSamples / ch;
+    if (numFrames <= 0) return 0;
+    // If a single push exceeds the ring, keep only the most recent capacity.
+    if (numFrames > cap) {
+        samples += static_cast<size_t>(numFrames - cap) * ch;
+        numFrames = cap;
+    }
+
+    uint64_t wf = clip->writeFrames.load(std::memory_order_relaxed);
+    int startSlot = static_cast<int>(wf % cap);
+    int first = std::min(numFrames, cap - startSlot);
+    std::copy(samples, samples + static_cast<size_t>(first) * ch,
+              clip->samples.begin() + static_cast<size_t>(startSlot) * ch);
+    if (numFrames > first) {
+        std::copy(samples + static_cast<size_t>(first) * ch,
+                  samples + static_cast<size_t>(numFrames) * ch,
+                  clip->samples.begin());
+    }
+    // Publish: the audio thread reads slots strictly below the new writeFrames.
+    clip->writeFrames.store(wf + numFrames, std::memory_order_release);
+    return numFrames;
+}
+
+void Engine::closeStream(int instanceId)
+{
+    ClipPlayback* pb = findPlayback(instanceId);
+    int clipId = pb ? pb->clipId : -1;
+    stopPlayback(instanceId);
+    if (clipId >= 0) deleteClip(clipId);
+}
+
 void Engine::stopPlayback(int instanceId)
 {
     std::lock_guard<std::mutex> lock(mediaWriteMutex_);
@@ -2247,6 +2393,13 @@ void Engine::processOutputChunk(SDL_AudioStream* stream, int numFrames)
                 for (auto& bus : *currentBuses) {
                     if (bus->id == clipSendId) { clipSendBuf = bus->buffer.data(); break; }
                 }
+            }
+
+            // Streaming sources read from a ring instead of a fixed clip.
+            if (clip->streaming) {
+                engine->mixStreamPlayback(pb.get(), clip, targetBuf, clipSendBuf, clipSendAmt,
+                                          spatialFilterActive2, headParams2, numFrames, 0);
+                continue;
             }
 
             constexpr int FRAC_BITS = 16;

@@ -13,6 +13,17 @@ struct AudioClip {
     int channels = 1;              // 1 = mono, 2 = stereo (interleaved)
     std::vector<float> samples;    // length = numFrames * channels
 
+    // Streaming source (live PCM push — voice chat, network audio). When true,
+    // `samples` is a fixed-capacity ring of `ringFrames` frames and `writeFrames`
+    // is the monotonic count of frames ever pushed. SPSC: the producer (main
+    // thread, pushStreamSamples) writes ring slots then release-stores
+    // writeFrames; the audio thread acquire-loads writeFrames and reads only
+    // slots below it. The mixer outputs silence on underrun and skips ahead on
+    // overrun to bound latency.
+    bool streaming = false;
+    int  ringFrames = 0;
+    std::atomic<uint64_t> writeFrames{0};
+
     int numFrames() const { return channels > 0 ? static_cast<int>(samples.size()) / channels : 0; }
 };
 

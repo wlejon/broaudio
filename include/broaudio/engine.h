@@ -290,6 +290,31 @@ public:
     // join on the audio thread without main-thread setTimeout jitter or drift.
     int playClipAt(int clipId, double when, float gain = 1.0f, bool loop = false);
     void stopPlayback(int instanceId);
+
+    // --- Streaming PCM source (live voice / network audio) ---
+    //
+    // A persistent, spatializable playback fed PCM frame-by-frame instead of
+    // from a fixed clip. Returns a playback instance id usable with every
+    // setPlayback*/setPlaybackSpatial* method (gain, pan, bus, sends, 3D
+    // position). The audio thread reads a ring the producer appends to, so a
+    // continuous stream plays click-free without per-frame clip churn.
+    //
+    //   int s = createStream(1);                  // mono voice source
+    //   setPlaybackSpatialEnabled(s, true);
+    //   setPlaybackSpatialPosition(s, x, y, z);
+    //   pushStreamSamples(s, pcm, n);             // per received packet
+    //   ...
+    //   closeStream(s);
+    //
+    // ringFrames 0 selects a ~2 s default at the engine rate. Returns -1 on bad
+    // args. pushStreamSamples is single-producer (call from one thread); samples
+    // must be at the engine sample rate (resample on the producer side).
+    int  createStream(int channels = 1, int ringFrames = 0);
+    // `numSamples` is the total interleaved sample count (frames * channels).
+    // Returns frames written.
+    int  pushStreamSamples(int instanceId, const float* samples, int numSamples);
+    void closeStream(int instanceId);
+
     void setPlaybackGain(int instanceId, float gain);
     void setPlaybackLoop(int instanceId, bool loop);
     void setPlaybackRegion(int instanceId, int start, int end);
@@ -383,6 +408,13 @@ private:
     void processBusEqualizer(Bus& bus, float* buf, int numFrames);
     void updateBusMeters(Bus& bus, int numFrames);
     void mixBusIntoParent(Bus& child, Bus& parent, int numFrames);
+    // Ring-read mix path for streaming playbacks (clip->streaming). Shared by the
+    // headless and realtime clip loops. Outputs silence on underrun, skips ahead
+    // on overrun.
+    void mixStreamPlayback(ClipPlayback* pb, AudioClip* clip, float* targetBuf,
+                           float* clipSendBuf, float clipSendAmt,
+                           bool spatialFilterActive, const HeadParams& headParams,
+                           int numFrames, int startFrame);
 
     static void micCallback(void* userdata, SDL_AudioStream* stream,
                             int additional_amount, int total_amount);

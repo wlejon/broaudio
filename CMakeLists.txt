@@ -150,6 +150,17 @@ endif()
 
 target_link_libraries(broaudio PUBLIC bromath::bromath)
 
+# The lock-free atomic<shared_ptr> RCU types lower some operations (e.g.
+# is_lock_free) to libatomic calls. gcc links libatomic implicitly, but clang
+# on Linux does not, so the link fails with undefined __atomic_* references.
+# Find and link it explicitly where it exists (a no-op when unneeded).
+if(UNIX AND NOT APPLE)
+    find_library(BROAUDIO_LIBATOMIC atomic)
+    if(BROAUDIO_LIBATOMIC)
+        target_link_libraries(broaudio PUBLIC ${BROAUDIO_LIBATOMIC})
+    endif()
+endif()
+
 if(BROAUDIO_MIDI AND TARGET libremidi::libremidi)
     target_link_libraries(broaudio PUBLIC libremidi::libremidi)
 endif()

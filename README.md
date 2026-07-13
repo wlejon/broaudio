@@ -1,5 +1,9 @@
 # broaudio
 
+[![CI](https://github.com/wlejon/broaudio/actions/workflows/ci.yml/badge.svg)](https://github.com/wlejon/broaudio/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/wlejon/broaudio/actions/workflows/codeql.yml/badge.svg)](https://github.com/wlejon/broaudio/actions/workflows/codeql.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A real-time audio engine library written in C++20. Provides synthesis, sample playback, effects processing, spatial audio, MIDI input, audio-file decode/encode, and a flexible mixing bus architecture — all with a lock-free, audio-thread-safe design built on SDL3.
 
 ## Features

@@ -1,0 +1,153 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# broaudio requires SDL3 (find_package REQUIRED) and the header-only sibling
+# bromath (../bromath); with BROAUDIO_MIDI=ON (the default) it also builds the
+# vendored libremidi submodule. So every job provisions SDL3 via setup-sdl,
+# checks bromath out beside this repo, and checks broaudio out with submodules:
+#
+#     $GITHUB_WORKSPACE/
+#       broaudio/   <- this repo, checked out with submodules (libremidi)
+#       bromath/
+#
+# On Windows SDL is built with the static MSVC runtime to match broaudio, which
+# forces MultiThreaded when built standalone; a dynamic-CRT SDL would fail the
+# link (LNK2038). setup-sdl's install-linux-dependencies pulls the ALSA/Pulse
+# dev packages, which also satisfy libremidi's Linux MIDI backend. Tests run
+# with SDL_AUDIODRIVER=dummy so no audio device is needed on the runners.
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-gcc,    os: ubuntu-24.04, cc: gcc,   cxx: g++,     sdl_args: "" }
+          - { name: linux-clang,  os: ubuntu-24.04, cc: clang, cxx: clang++, sdl_args: "" }
+          - { name: windows-msvc, os: windows-2022, sdl_args: "-DSDL_SHARED=OFF -DSDL_STATIC=ON -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded" }
+          - { name: macos-arm64,  os: macos-14,     sdl_args: "" }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: broaudio
+          submodules: recursive
+
+      - uses: actions/checkout@v7
+        with:
+          repository: wlejon/bromath
+          path: bromath
+
+      - name: Provision SDL3
+        uses: libsdl-org/setup-sdl@v1
+        with:
+          version: 3.4.12
+          build-type: Release
+          add-to-environment: true
+          install-linux-dependencies: true
+          cmake-arguments: ${{ matrix.sdl_args }}
+
+      - name: Configure
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: cmake -S broaudio -B build -DCMAKE_BUILD_TYPE=Release
+        shell: bash
+
+      - name: Build
+        run: cmake --build build --config Release --parallel 4
+
+      - name: Test
+        env:
+          SDL_AUDIODRIVER: dummy
+        run: ctest --test-dir build -C Release --output-on-failure
+
+  # ── Coverage ──────────────────────────────────────────────────────────────
+  #
+  # Debug + --coverage on Linux. --filter scopes the numbers to broaudio's own
+  # code (include/broaudio/ + src/); SDL, the sibling bromath, and the vendored
+  # libremidi / dr_libs / nlohmann are excluded.
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: broaudio
+          submodules: recursive
+
+      - uses: actions/checkout@v7
+        with:
+          repository: wlejon/bromath
+          path: bromath
+
+      - name: Provision SDL3
+        uses: libsdl-org/setup-sdl@v1
+        with:
+          version: 3.4.12
+          build-type: Release
+          add-to-environment: true
+          install-linux-dependencies: true
+
+      - name: Install gcovr
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends gcovr
+
+      - name: Configure (instrumented)
+        run: |
+          cmake -S broaudio -B build -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="--coverage" \
+            -DCMAKE_EXE_LINKER_FLAGS="--coverage"
+
+      - name: Build
+        run: cmake --build build --parallel 4
+
+      - name: Test
+        env:
+          SDL_AUDIODRIVER: dummy
+        run: ctest --test-dir build --output-on-failure
+
+      # pipefail: piping gcovr into tee otherwise hands the step tee's exit
+      # status, so a gcovr crash produces no report and the job still goes green.
+      - name: Report
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p coverage-html
+          gcovr --root . \
+            --filter 'broaudio/include/broaudio/' --filter 'broaudio/src/' \
+            --exclude-unreachable-branches \
+            --gcov-ignore-errors=no_working_dir_found \
+            --print-summary \
+            --html-details coverage-html/index.html \
+            | tee coverage-summary.txt
+          test -s coverage-html/index.html
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo '## Coverage — `include/broaudio/` + `src/`'
+            echo
+            echo 'SDL, bromath, and the vendored third_party libraries are filtered out.'
+            echo
+            echo '```'
+            cat coverage-summary.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload HTML report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-html
+          path: coverage-html/
+          retention-days: 14

@@ -1,0 +1,85 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+# broaudio parses untrusted audio containers (WAV/FLAC/MP3/Ogg via dr_libs) and
+# does frame-count / channel / offset arithmetic across ring buffers, resamplers
+# and the mixer. Header-supplied sizes driving buffer indexing is where an
+# out-of-bounds read hides, so that is where the analysis pays off.
+jobs:
+  analyze:
+    name: Analyze C++
+    runs-on: ubuntu-24.04
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: broaudio
+          submodules: recursive
+
+      - uses: actions/checkout@v7
+        with:
+          repository: wlejon/bromath
+          path: bromath
+
+      - name: Provision SDL3
+        uses: libsdl-org/setup-sdl@v1
+        with:
+          version: 3.4.12
+          build-type: Release
+          add-to-environment: true
+          install-linux-dependencies: true
+
+      # Debug / -O0 keeps the extracted IR close to the source so dataflow paths
+      # in the results point at code a human can act on.
+      - name: Configure
+        run: cmake -S broaudio -B build -DCMAKE_BUILD_TYPE=Debug
+
+      # The vendored libremidi submodule is compiled here, ahead of `init`. For a
+      # compiled language CodeQL only extracts what it observes the compiler build
+      # while tracing, so anything already built when `init` runs is never
+      # analysed. That is the exclusion mechanism — paths-ignore does not filter
+      # compiled sources — and it keeps libremidi out of broaudio's Security tab,
+      # where it does not belong (it is upstream with its own maintainers). SDL is
+      # provisioned prebuilt above and never enters the traced build; bromath,
+      # dr_libs and nlohmann are header-only and are analysed where broaudio
+      # includes them.
+      - name: Pre-build libremidi (outside the traced build)
+        run: cmake --build build --parallel 4 --target libremidi
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: c-cpp
+          build-mode: manual
+          queries: security-extended
+          # Relative to the workspace root; this repo is checked out into
+          # broaudio/ (not the root) so the sibling bromath can sit beside it.
+          # paths-ignore is the second line of defence, catching any finding that
+          # originates in a vendored *header* pulled into a broaudio TU.
+          config-file: broaudio/.github/codeql/codeql-config.yml
+
+      # Only broaudio's own library TUs are left to compile, so only they are
+      # traced. The test binaries are not built here — CodeQL does not run them,
+      # and the library is the surface worth analysing.
+      - name: Build broaudio (traced)
+        run: cmake --build build --parallel 4 --target broaudio
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:c-cpp

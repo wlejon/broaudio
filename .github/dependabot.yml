@@ -1,0 +1,27 @@
+version: 2
+
+# Two things carry pinned versions here: the actions in .github/workflows/ and
+# the libremidi git submodule under third_party/. SDL3 is provisioned by the
+# pinned setup-sdl step in the workflows, so bumping it is a github-actions
+# concern too. dr_libs and nlohmann are vendored single headers with no manifest.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ["*"]
+    labels: [ci]
+    commit-message:
+      prefix: "ci"
+
+  - package-ecosystem: gitsubmodule
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies]
+    commit-message:
+      prefix: "deps"

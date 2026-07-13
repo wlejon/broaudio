@@ -54,6 +54,7 @@
 
 #include <libproc.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdint>

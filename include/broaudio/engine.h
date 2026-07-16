@@ -164,6 +164,17 @@ public:
     void setMasterGain(float gain);
     float masterGain() const { return masterGain_.load(std::memory_order_relaxed); }
 
+    // --- Master pause ---
+    // Suspends the engine's output clock: the realtime callback feeds silence
+    // to the device without processing the graph, and renderBlock() becomes a
+    // no-op — so voices, clip playback, scheduled events, and currentTime()
+    // all freeze in place and resume exactly where they stopped. This is a
+    // transport suspend, not a mute: nothing advances, nothing is dropped,
+    // and playback rate/pitch are untouched on resume. RT-safe (one relaxed
+    // atomic read on the audio thread).
+    void setMasterPaused(bool paused) { masterPaused_.store(paused, std::memory_order_relaxed); }
+    bool masterPaused() const { return masterPaused_.load(std::memory_order_relaxed); }
+
     // --- Master limiter ---
 
     void setLimiterEnabled(bool enabled);
@@ -514,6 +525,7 @@ private:
     std::atomic<uint64_t> micPlaybackReadPos_{0};
 
     std::atomic<float> masterGain_{0.5f};
+    std::atomic<bool> masterPaused_{false};
     Smoother smoothMasterGain_;
     Limiter masterLimiter_{44100, 2};
     std::atomic<bool> micMuted_{true};

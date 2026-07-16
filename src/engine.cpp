@@ -117,6 +117,11 @@ void Engine::renderBlock(int numFrames)
 {
     if (!initialized_ || numFrames <= 0) return;
 
+    // Master pause suspends the offline clock too — the host keeps calling
+    // renderBlock on its own cadence, but nothing renders or advances, same
+    // freeze-in-place semantics as the realtime callback.
+    if (masterPaused_.load(std::memory_order_relaxed)) return;
+
     // Reader scope for host-driven (non-SDL) rendering — covers
     // renderInternal / generateSamples / processBusEffects transitively.
     RcuDomain::ReadScope rcuScope(rcu_);
@@ -2288,6 +2293,24 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
     int totalFloats = additional_amount / static_cast<int>(sizeof(float));
     int totalFrames = totalFloats / 2;
     if (totalFrames <= 0) return;
+
+    // Master pause: feed silence without touching the graph or advancing
+    // samplesGenerated_ — voices, clips, and scheduled events freeze in
+    // place and resume exactly where they stopped. outputScratch_ is owned
+    // by this (audio) thread, so reusing it here is race-free.
+    if (engine->masterPaused_.load(std::memory_order_relaxed)) {
+        float* buffer = engine->outputScratch_.data();
+        std::memset(buffer, 0,
+                    std::min(totalFrames, MAX_SCRATCH_FRAMES) * 2 * sizeof(float));
+        int remaining = totalFrames;
+        while (remaining > 0) {
+            int chunk = std::min(remaining, MAX_SCRATCH_FRAMES);
+            SDL_PutAudioStreamData(stream, buffer,
+                                   chunk * 2 * static_cast<int>(sizeof(float)));
+            remaining -= chunk;
+        }
+        return;
+    }
 
     // Reader scope: brackets every RCU load on the audio thread so writers
     // can safely retire old snapshots without freeing them out from under us.

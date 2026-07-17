@@ -66,17 +66,30 @@ static bool waitFor(F pred, int timeoutMs = 5000)
     return true;
 }
 
-// Render `frames` of audio in 512-frame blocks, real-sleeping every ~100 ms of
-// audio so the decode worker keeps pace with virtual time.
+// Render `frames` of audio in 512-frame blocks, pacing the drain to ~4x
+// realtime so the 50 ms decode worker always refills the ring before the mixer
+// can empty it. What matters for "no underrun" is the drain RATE, not the sleep
+// granularity: consuming well under a ring's worth (the smallest here is 0.5 s)
+// between two worker wakes holds on any OS timer — a coarser timer only sleeps
+// longer, which is strictly safer. The old code slept a flat 8 ms per 4096
+// frames (~11.6x realtime), which drained the 0.5 s ring faster than the worker
+// woke and starved it wherever sleep_for was honored precisely (e.g. Linux).
+// (The engine mixer itself never sleeps — this pacing lives only in the test.)
 static void renderPaced(Engine& e, int frames)
 {
-    int rendered = 0;
+    const int sr = e.sampleRate();
+    int rendered = 0, sinceSleep = 0;
     while (rendered < frames) {
         int n = std::min(512, frames - rendered);
         e.renderBlock(n);
         rendered += n;
-        if (rendered % 4096 < 512)
-            std::this_thread::sleep_for(std::chrono::milliseconds(8));
+        sinceSleep += n;
+        if (sinceSleep >= 4096) {
+            // Sleep a quarter of the batch's real duration → ~4x realtime.
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(sinceSleep * 1000 / (sr * 4)));
+            sinceSleep = 0;
+        }
     }
 }
 
@@ -182,12 +195,12 @@ TEST(file_stream_plays_through_mixer_with_refills) {
     e.stopRecording();
     auto rec = e.getRecordBuffer();
 
-    StreamStats st = e.getStreamStats(id);
+    ASSERT_TRUE(waitFor([&] { return e.getStreamStats(id).finished; }));
+    StreamStats st = e.getStreamStats(id);  // snapshot the final, settled state
     ASSERT_TRUE(st.valid);
     // The whole file was decoded through the 0.5 s ring (>= 6 refills).
     ASSERT_TRUE(st.decodedFrames >= static_cast<uint64_t>(sr * 3 - 4096));
     ASSERT_TRUE(st.playedFrames >= static_cast<uint64_t>(sr * 3 - 4096));
-    ASSERT_TRUE(waitFor([&] { return e.getStreamStats(id).finished; }));
     ASSERT_EQ(static_cast<int>(st.underrunFrames), 0);
 
     // Audio actually flowed: strong signal early, silence after the end.

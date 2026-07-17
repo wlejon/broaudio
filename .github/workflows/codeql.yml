@@ -49,17 +49,20 @@ jobs:
       - name: Configure
         run: cmake -S broaudio -B build -DCMAKE_BUILD_TYPE=Debug
 
-      # The vendored libremidi submodule is compiled here, ahead of `init`. For a
-      # compiled language CodeQL only extracts what it observes the compiler build
-      # while tracing, so anything already built when `init` runs is never
-      # analysed. That is the exclusion mechanism — paths-ignore does not filter
-      # compiled sources — and it keeps libremidi out of broaudio's Security tab,
-      # where it does not belong (it is upstream with its own maintainers). SDL is
-      # provisioned prebuilt above and never enters the traced build; bromath,
-      # dr_libs and nlohmann are header-only and are analysed where broaudio
-      # includes them.
-      - name: Pre-build libremidi (outside the traced build)
-        run: cmake --build build --parallel 4 --target libremidi
+      # The vendored libremidi submodule and the single-header codec
+      # implementations (broaudio_codecs = dr_wav/dr_flac/dr_mp3 + stb_vorbis) are
+      # compiled here, ahead of `init`. For a compiled language CodeQL only
+      # extracts what it observes the compiler build while tracing, so anything
+      # already built when `init` runs is never analysed. That is the exclusion
+      # mechanism — paths-ignore does not filter compiled sources under
+      # build-mode: manual — and it keeps these upstream decoders out of
+      # broaudio's Security tab, where they do not belong. broaudio's own TUs
+      # include the dr_libs headers without the *_IMPLEMENTATION defines, so the
+      # traced build sees declarations only. SDL is provisioned prebuilt above and
+      # never enters the traced build; bromath and nlohmann are header-only and
+      # are analysed where broaudio includes them.
+      - name: Pre-build vendored codecs + libremidi (outside the traced build)
+        run: cmake --build build --parallel 4 --target libremidi --target broaudio_codecs
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4

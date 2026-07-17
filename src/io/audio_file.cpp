@@ -7,16 +7,13 @@
 #include <string>
 
 // ---------------------------------------------------------------------------
-// dr_libs implementations (compiled once here)
+// dr_libs decoders — declarations only. The single-header implementations are
+// compiled in their own translation unit (src/codec/dr_libs_impl.cpp, target
+// broaudio_codecs) so CodeQL's manual build can exclude them by build order.
 // ---------------------------------------------------------------------------
 
-#define DR_WAV_IMPLEMENTATION
 #include "dr_wav.h"
-
-#define DR_FLAC_IMPLEMENTATION
 #include "dr_flac.h"
-
-#define DR_MP3_IMPLEMENTATION
 #include "dr_mp3.h"
 
 // Ogg Vorbis via stb_vorbis. Declarations only — the implementation is a

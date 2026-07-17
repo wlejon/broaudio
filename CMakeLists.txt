@@ -60,6 +60,23 @@ if(BROAUDIO_MIDI)
     endif()
 endif()
 
+# Vendored single-header codec implementations (dr_wav/dr_flac/dr_mp3 and
+# stb_vorbis) live in their own static library so CodeQL's manual build can
+# pre-build this target before it starts tracing (see .github/workflows/codeql.yml).
+# That build-order step keeps the vendored implementation bodies out of the
+# broaudio Security tab; paths-ignore cannot, because it does not filter compiled
+# languages built with build-mode: manual.
+add_library(broaudio_codecs STATIC
+    src/codec/stb_vorbis_impl.c
+    src/codec/dr_libs_impl.cpp
+)
+target_include_directories(broaudio_codecs PRIVATE
+    third_party/dr_libs
+    third_party)
+if(MSVC)
+    target_compile_options(broaudio_codecs PRIVATE /MP /utf-8)
+endif()
+
 add_library(broaudio STATIC
     src/core/ring_buffer.cpp
     src/dsp/biquad.cpp
@@ -81,7 +98,6 @@ add_library(broaudio STATIC
     src/clip/file_stream.cpp
     src/sequencer/automation.cpp
     src/sequencer/sequence.cpp
-    src/codec/stb_vorbis_impl.c
     src/io/audio_file.cpp
     src/io/audio_stream.cpp
     src/io/serialization.cpp
@@ -154,6 +170,10 @@ elseif(TARGET SDL3::SDL3-static)
 endif()
 
 target_link_libraries(broaudio PUBLIC bromath::bromath)
+
+# Vendored codec implementations (see broaudio_codecs above). PUBLIC so the
+# decoder symbols reach the final link line of every consumer of broaudio.
+target_link_libraries(broaudio PUBLIC broaudio_codecs)
 
 # The lock-free atomic<shared_ptr> RCU types lower some operations (e.g.
 # is_lock_free) to libatomic calls. gcc links libatomic implicitly, but clang

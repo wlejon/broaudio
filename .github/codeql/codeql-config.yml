@@ -3,12 +3,16 @@ name: broaudio CodeQL config
 queries:
   - uses: security-extended
 
-# The vendored libremidi submodule is kept out of the analysis by build order
-# (see the pre-build step in codeql.yml) — that is what excludes its compiled
-# TUs. This paths-ignore is the complement: it drops any finding that originates
-# in a vendored *header* (dr_libs, nlohmann, libremidi) or the sibling bromath
-# pulled into a broaudio translation unit, which build order cannot catch.
-# Together they scope the Security tab to broaudio's own code.
+# All vendored code is kept out of the analysis by build order: the libremidi
+# submodule and the single-header codec implementations (broaudio_codecs =
+# dr_wav/dr_flac/dr_mp3 + stb_vorbis) are pre-built before CodeQL's init, so
+# their compiled TUs are never traced. See the pre-build step in codeql.yml.
+#
+# paths-ignore does NOT filter compiled languages built with build-mode: manual
+# (GitHub only honours it under build-mode: none), so build order — not this
+# list — is what scopes the Security tab to broaudio's own code. The entries
+# below are retained only as documentation and as a safety net should the
+# analysis ever switch to build-mode: none.
 paths-ignore:
   - broaudio/third_party
   - bromath

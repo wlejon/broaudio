@@ -3019,7 +3019,14 @@ void Engine::update()
 int Engine::createClipFromFile(const char* path)
 {
     AudioFileData data = loadAudioFile(path);
-    if (!data.valid()) return -1;
+    if (!data.valid()) {
+        // Surface a known decode error (e.g. Ogg Vorbis unsupported) — the
+        // int return can only say "failed", which reads as a bad path.
+        if (!data.error.empty())
+            log(LogLevel::Error, "createClipFromFile: %s: %s",
+                path ? path : "(null)", data.error.c_str());
+        return -1;
+    }
 
     // Reject clips that exceed the decoded size limit
     if (maxClipDecodedBytes_ > 0 &&
@@ -3050,7 +3057,12 @@ std::future<int> Engine::createClipFromFileAsync(const char* path)
 
     return std::async(std::launch::async, [this, pathStr, engineRate, maxBytes]() -> int {
         AudioFileData data = loadAudioFile(pathStr.c_str());
-        if (!data.valid()) return -1;
+        if (!data.valid()) {
+            if (!data.error.empty())
+                log(LogLevel::Error, "createClipFromFile: %s: %s",
+                    pathStr.c_str(), data.error.c_str());
+            return -1;
+        }
 
         if (maxBytes > 0 && data.samples.size() * sizeof(float) > maxBytes)
             return -1;

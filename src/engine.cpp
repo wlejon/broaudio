@@ -1,4 +1,6 @@
 #include "broaudio/engine.h"
+#include "broaudio/clip/file_stream.h"
+#include "broaudio/io/audio_stream.h"
 #include "broaudio/log.h"
 #include "broaudio/synth/oscillator.h"
 #include "broaudio/synth/wavetable.h"
@@ -116,6 +118,11 @@ bool Engine::initHeadless()
 void Engine::renderBlock(int numFrames)
 {
     if (!initialized_ || numFrames <= 0) return;
+
+    // Master pause suspends the offline clock too — the host keeps calling
+    // renderBlock on its own cadence, but nothing renders or advances, same
+    // freeze-in-place semantics as the realtime callback.
+    if (masterPaused_.load(std::memory_order_relaxed)) return;
 
     // Reader scope for host-driven (non-SDL) rendering — covers
     // renderInternal / generateSamples / processBusEffects transitively.
@@ -374,6 +381,9 @@ void Engine::renderInternal(int numFrames)
 
 void Engine::shutdown()
 {
+    // Stop disk-stream decode workers before tearing the device down —
+    // they hold clip/playback refs and an SDL_AudioStream resampler each.
+    stopAllFileStreams();
     stopMicCapture();
     if (stream_) {
         SDL_DestroyAudioStream(stream_);
@@ -1857,6 +1867,12 @@ void Engine::mixStreamPlayback(ClipPlayback* pb, AudioClip* clip, float* targetB
     if (wf > rf + static_cast<uint64_t>(cap))
         rf = wf - static_cast<uint64_t>(cap) / 2;
 
+    // Starvation accounting: silent frames emitted while the producer is
+    // still expected to deliver (i.e. the stream hasn't ended). Batched into
+    // one relaxed add after the loop — never a lock, never a syscall.
+    int underruns = 0;
+    const bool ended = clip->streamEnded.load(std::memory_order_acquire);
+
     for (int i = startFrame; i < numFrames; i++) {
         float sL = 0.0f, sR = 0.0f;
         if (rf < wf) { // else underrun → silence, hold the cursor
@@ -1864,6 +1880,8 @@ void Engine::mixStreamPlayback(ClipPlayback* pb, AudioClip* clip, float* targetB
             if (ch == 2) { sL = clip->samples[slot * 2]; sR = clip->samples[slot * 2 + 1]; }
             else { float s = clip->samples[slot]; sL = s; sR = s; }
             rf++;
+        } else if (!ended) {
+            underruns++;
         }
 
         float g = pb->smoothGain.next();
@@ -1893,6 +1911,9 @@ void Engine::mixStreamPlayback(ClipPlayback* pb, AudioClip* clip, float* targetB
         }
     }
     pb->playPos.store(rf, std::memory_order_relaxed);
+    if (underruns > 0)
+        clip->streamUnderrunFrames.fetch_add(static_cast<uint64_t>(underruns),
+                                             std::memory_order_relaxed);
 }
 
 // ---------------------------------------------------------------------------
@@ -1900,11 +1921,11 @@ void Engine::mixStreamPlayback(ClipPlayback* pb, AudioClip* clip, float* targetB
 // full ClipPlayback machinery (gain/pan/bus/sends/spatial); the mixer takes a
 // ring-read branch when clip->streaming is set.
 // ---------------------------------------------------------------------------
-int Engine::createStream(int channels, int ringFrames)
+int Engine::createStreamPlayback(int channels, int ringFrames, bool startPlaying,
+                                 float gain, bool loop,
+                                 std::shared_ptr<AudioClip>& outClip,
+                                 std::shared_ptr<ClipPlayback>& outPb)
 {
-    if (channels < 1 || channels > 2) return -1;
-    if (ringFrames <= 0) ringFrames = sampleRate_ * 2; // ~2 s default
-
     auto clip = std::make_shared<AudioClip>();
     auto pb   = std::make_shared<ClipPlayback>();
 
@@ -1919,10 +1940,15 @@ int Engine::createStream(int channels, int ringFrames)
 
     pb->id = nextPlaybackId_++;
     pb->clipId = clipId;
-    pb->playing.store(true, std::memory_order_relaxed);
+    pb->gain.store(gain, std::memory_order_relaxed);
+    pb->looping.store(loop, std::memory_order_relaxed);
+    pb->playing.store(startPlaying, std::memory_order_relaxed);
     pb->active.store(true, std::memory_order_relaxed);
     pb->playPos.store(0, std::memory_order_relaxed); // absolute read-frame cursor
     int id = pb->id;
+
+    outClip = clip;
+    outPb   = pb;
 
     auto newClips = std::make_shared<ClipList>(*clips_.load());
     newClips->push_back(std::move(clip));
@@ -1932,6 +1958,17 @@ int Engine::createStream(int channels, int ringFrames)
     newPB->push_back(std::move(pb));
     playbacks_.store(std::move(newPB));
     return id;
+}
+
+int Engine::createStream(int channels, int ringFrames)
+{
+    if (channels < 1 || channels > 2) return -1;
+    if (ringFrames <= 0) ringFrames = sampleRate_ * 2; // ~2 s default
+
+    std::shared_ptr<AudioClip> clip;
+    std::shared_ptr<ClipPlayback> pb;
+    return createStreamPlayback(channels, ringFrames, /*startPlaying=*/true,
+                                1.0f, false, clip, pb);
 }
 
 int Engine::pushStreamSamples(int instanceId, const float* samples, int numSamples)
@@ -1944,37 +1981,127 @@ int Engine::pushStreamSamples(int instanceId, const float* samples, int numSampl
     AudioClip* clip = findClip(pb->clipId);
     if (!clip || !clip->streaming || clip->ringFrames <= 0) return 0;
 
-    const int cap = clip->ringFrames;
-    const int ch = clip->channels;
-    int numFrames = numSamples / ch;
+    int numFrames = numSamples / clip->channels;
     if (numFrames <= 0) return 0;
-    // If a single push exceeds the ring, keep only the most recent capacity.
-    if (numFrames > cap) {
-        samples += static_cast<size_t>(numFrames - cap) * ch;
-        numFrames = cap;
-    }
-
-    uint64_t wf = clip->writeFrames.load(std::memory_order_relaxed);
-    int startSlot = static_cast<int>(wf % cap);
-    int first = std::min(numFrames, cap - startSlot);
-    std::copy(samples, samples + static_cast<size_t>(first) * ch,
-              clip->samples.begin() + static_cast<size_t>(startSlot) * ch);
-    if (numFrames > first) {
-        std::copy(samples + static_cast<size_t>(first) * ch,
-                  samples + static_cast<size_t>(numFrames) * ch,
-                  clip->samples.begin());
-    }
-    // Publish: the audio thread reads slots strictly below the new writeFrames.
-    clip->writeFrames.store(wf + numFrames, std::memory_order_release);
-    return numFrames;
+    return pushStreamFrames(*clip, samples, numFrames);
 }
 
 void Engine::closeStream(int instanceId)
 {
+    // Disk streams: stop + join the decode worker before dropping the ring.
+    stopFileStream(instanceId);
+
     ClipPlayback* pb = findPlayback(instanceId);
     int clipId = pb ? pb->clipId : -1;
     stopPlayback(instanceId);
     if (clipId >= 0) deleteClip(clipId);
+}
+
+// ---------------------------------------------------------------------------
+// Disk-streamed file playback — decode on a cold worker thread into the same
+// SPSC ring a live PCM stream uses; the audio thread only consumes.
+// ---------------------------------------------------------------------------
+
+int Engine::createStreamFromFile(const char* path, std::string* outError)
+{
+    return createStreamFromFile(path, FileStreamOptions{}, outError);
+}
+
+int Engine::createStreamFromFile(const char* path, const FileStreamOptions& opts,
+                                 std::string* outError)
+{
+    auto fail = [&](const std::string& msg) {
+        if (outError) *outError = msg;
+        log(LogLevel::Error, "createStreamFromFile: %s: %s",
+            path ? path : "(null)", msg.c_str());
+        return -1;
+    };
+
+    auto decoder = std::make_unique<AudioFileStream>();
+    if (!decoder->open(path)) {
+        return fail(decoder->error().empty() ? "cannot open or decode file"
+                                             : decoder->error());
+    }
+    if (decoder->channels() < 1 || decoder->channels() > 2) {
+        return fail("only mono and stereo files can be streamed (file has "
+                    + std::to_string(decoder->channels()) + " channels)");
+    }
+    if (decoder->sampleRate() <= 0) {
+        return fail("file reports an invalid sample rate");
+    }
+
+    int ringFrames = opts.ringFrames > 0 ? opts.ringFrames : sampleRate_ * 2;   // ~2 s
+    int prebuffer  = opts.prebufferFrames > 0 ? opts.prebufferFrames : sampleRate_ / 2; // ~500 ms
+    prebuffer = std::min(prebuffer, ringFrames / 2);
+
+    std::shared_ptr<AudioClip> clip;
+    std::shared_ptr<ClipPlayback> pb;
+    // startPlaying=false: the worker releases playback once the prebuffer is
+    // decoded, so the mixer never counts pre-start silence as underrun.
+    int id = createStreamPlayback(decoder->channels(), ringFrames,
+                                  /*startPlaying=*/false, opts.gain, opts.loop,
+                                  clip, pb);
+
+    auto runner = std::make_unique<FileStreamRunner>(
+        std::move(clip), std::move(pb), std::move(decoder), sampleRate_, prebuffer);
+    runner->start();
+
+    {
+        std::lock_guard<std::mutex> lock(fileStreamsMutex_);
+        fileStreams_.push_back(std::move(runner));
+    }
+    return id;
+}
+
+StreamStats Engine::getStreamStats(int instanceId) const
+{
+    StreamStats s;
+    ClipPlayback* pb = findPlayback(instanceId);
+    if (!pb) return s;
+    AudioClip* clip = findClip(pb->clipId);
+    if (!clip || !clip->streaming) return s;
+
+    s.valid = true;
+    s.decodedFrames = clip->writeFrames.load(std::memory_order_acquire);
+    s.playedFrames = pb->playPos.load(std::memory_order_relaxed);
+    s.bufferedFrames = s.decodedFrames > s.playedFrames
+                           ? s.decodedFrames - s.playedFrames : 0;
+    s.underrunFrames = clip->streamUnderrunFrames.load(std::memory_order_relaxed);
+    s.finished = clip->streamEnded.load(std::memory_order_acquire)
+                 && s.bufferedFrames == 0;
+    return s;
+}
+
+void Engine::stopFileStream(int instanceId)
+{
+    std::unique_ptr<FileStreamRunner> runner;
+    {
+        std::lock_guard<std::mutex> lock(fileStreamsMutex_);
+        for (auto it = fileStreams_.begin(); it != fileStreams_.end(); ++it) {
+            if ((*it)->playbackId() == instanceId) {
+                runner = std::move(*it);
+                fileStreams_.erase(it);
+                break;
+            }
+        }
+    }
+    // Join outside the lock — the worker never touches fileStreams_, but a
+    // slow decode step shouldn't stall unrelated stream creation.
+    if (runner) {
+        runner->requestStop();
+        runner->join();
+    }
+}
+
+void Engine::stopAllFileStreams()
+{
+    std::vector<std::unique_ptr<FileStreamRunner>> runners;
+    {
+        std::lock_guard<std::mutex> lock(fileStreamsMutex_);
+        runners.swap(fileStreams_);
+    }
+    for (auto& r : runners) r->requestStop();  // signal all first
+    for (auto& r : runners) r->join();
 }
 
 void Engine::stopPlayback(int instanceId)
@@ -2288,6 +2415,24 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
     int totalFloats = additional_amount / static_cast<int>(sizeof(float));
     int totalFrames = totalFloats / 2;
     if (totalFrames <= 0) return;
+
+    // Master pause: feed silence without touching the graph or advancing
+    // samplesGenerated_ — voices, clips, and scheduled events freeze in
+    // place and resume exactly where they stopped. outputScratch_ is owned
+    // by this (audio) thread, so reusing it here is race-free.
+    if (engine->masterPaused_.load(std::memory_order_relaxed)) {
+        float* buffer = engine->outputScratch_.data();
+        std::memset(buffer, 0,
+                    std::min(totalFrames, MAX_SCRATCH_FRAMES) * 2 * sizeof(float));
+        int remaining = totalFrames;
+        while (remaining > 0) {
+            int chunk = std::min(remaining, MAX_SCRATCH_FRAMES);
+            SDL_PutAudioStreamData(stream, buffer,
+                                   chunk * 2 * static_cast<int>(sizeof(float)));
+            remaining -= chunk;
+        }
+        return;
+    }
 
     // Reader scope: brackets every RCU load on the audio thread so writers
     // can safely retire old snapshots without freeing them out from under us.
@@ -2995,19 +3140,43 @@ void Engine::update()
 
 int Engine::createClipFromFile(const char* path)
 {
+    return createClipFromFileEx(path, nullptr);
+}
+
+int Engine::createClipFromFileEx(const char* path, std::string* outError)
+{
+    auto fail = [&](const std::string& msg) {
+        if (outError) *outError = msg;
+        log(LogLevel::Error, "createClipFromFile: %s: %s",
+            path ? path : "(null)", msg.c_str());
+        return -1;
+    };
+
     AudioFileData data = loadAudioFile(path);
-    if (!data.valid()) return -1;
+    if (!data.valid()) {
+        // Surface a known decode error (e.g. corrupt Vorbis stream) — the
+        // int return can only say "failed", which reads as a bad path.
+        return fail(!data.error.empty()
+                        ? data.error
+                        : "cannot open or decode file (supported formats: WAV, "
+                          "FLAC, MP3, Ogg Vorbis)");
+    }
 
     // Reject clips that exceed the decoded size limit
     if (maxClipDecodedBytes_ > 0 &&
-        data.samples.size() * sizeof(float) > maxClipDecodedBytes_)
-        return -1;
+        data.samples.size() * sizeof(float) > maxClipDecodedBytes_) {
+        return fail("decoded audio ("
+                    + std::to_string(data.samples.size() * sizeof(float) / (1024 * 1024))
+                    + " MB) exceeds the clip size limit ("
+                    + std::to_string(maxClipDecodedBytes_ / (1024 * 1024))
+                    + " MB); use createStreamFromFile to disk-stream large files");
+    }
 
     // Resample to engine sample rate if needed
     if (data.sampleRate != sampleRate_) {
         auto resampled = resample(data.samples.data(), data.numFrames,
                                   data.channels, data.sampleRate, sampleRate_);
-        if (resampled.empty()) return -1;
+        if (resampled.empty()) return fail("resampling failed");
         return createClip(resampled.data(),
                           static_cast<int>(resampled.size()),
                           data.channels);
@@ -3020,30 +3189,11 @@ int Engine::createClipFromFile(const char* path)
 
 std::future<int> Engine::createClipFromFileAsync(const char* path)
 {
-    // Capture what we need: a copy of the path, engine state for resampling
     std::string pathStr(path ? path : "");
-    int engineRate = sampleRate_;
-    size_t maxBytes = maxClipDecodedBytes_;
-
-    return std::async(std::launch::async, [this, pathStr, engineRate, maxBytes]() -> int {
-        AudioFileData data = loadAudioFile(pathStr.c_str());
-        if (!data.valid()) return -1;
-
-        if (maxBytes > 0 && data.samples.size() * sizeof(float) > maxBytes)
-            return -1;
-
-        if (data.sampleRate != engineRate) {
-            auto resampled = resample(data.samples.data(), data.numFrames,
-                                      data.channels, data.sampleRate, engineRate);
-            if (resampled.empty()) return -1;
-            return createClip(resampled.data(),
-                              static_cast<int>(resampled.size()),
-                              data.channels);
-        }
-
-        return createClip(data.samples.data(),
-                          static_cast<int>(data.samples.size()),
-                          data.channels);
+    return std::async(std::launch::async, [this, pathStr]() -> int {
+        // Decode + resample run on this background thread; createClip locks
+        // the control-plane media mutex, which is safe off the main thread.
+        return createClipFromFileEx(pathStr.c_str(), nullptr);
     });
 }
 

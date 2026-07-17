@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
-project(broaudio LANGUAGES CXX)
+# C is required for the vendored stb_vorbis translation unit
+# (src/codec/stb_vorbis_impl.c does not compile as C++).
+project(broaudio LANGUAGES CXX C)
 
 # When built standalone, set the MSVC runtime to static
 if(MSVC AND CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
@@ -76,9 +78,12 @@ add_library(broaudio STATIC
     src/synth/wavetable.cpp
     src/synth/voice_allocator.cpp
     src/clip/clip.cpp
+    src/clip/file_stream.cpp
     src/sequencer/automation.cpp
     src/sequencer/sequence.cpp
+    src/codec/stb_vorbis_impl.c
     src/io/audio_file.cpp
+    src/io/audio_stream.cpp
     src/io/serialization.cpp
     src/engine.cpp
     src/log.cpp
@@ -149,6 +154,16 @@ elseif(TARGET SDL3::SDL3-static)
 endif()
 
 target_link_libraries(broaudio PUBLIC bromath::bromath)
+
+# The lock-free atomic<shared_ptr> RCU types lower some operations (e.g.
+# is_lock_free) to libatomic calls. gcc links libatomic implicitly, but clang
+# on Linux does not, so the link fails with undefined __atomic_* references.
+# Link it by name so the compiler driver's -latomic resolves it from gcc's own
+# library path (find_library does not search there). PUBLIC so the test
+# executables, which reference the same intrinsics, pick it up too.
+if(UNIX AND NOT APPLE)
+    target_link_libraries(broaudio PUBLIC atomic)
+endif()
 
 if(BROAUDIO_MIDI AND TARGET libremidi::libremidi)
     target_link_libraries(broaudio PUBLIC libremidi::libremidi)

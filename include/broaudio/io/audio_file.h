@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace broaudio {
@@ -13,16 +14,25 @@ struct AudioFileData {
     int sampleRate = 0;
     int numFrames = 0;           // total frames (samples.size() / channels)
 
+    // Human-readable reason when valid() is false and the cause is known
+    // (e.g. "Ogg Vorbis is not supported..."). Empty on success and on
+    // generic decode failures.
+    std::string error;
+
     bool valid() const { return numFrames > 0 && channels > 0; }
 };
 
 // Load audio from a file path.
-// Format is detected by extension: .wav, .flac, .mp3, .ogg/.opus (Opus requires BROAUDIO_HAS_OPUS).
+// Format is detected by extension: .wav, .flac, .mp3. For .ogg/.opus the
+// codec inside the Ogg container is sniffed from the first packet: Ogg
+// Vorbis decodes via stb_vorbis (mono, stereo, and multichannel, any sample
+// rate); Opus decodes only when built with BROAUDIO_HAS_OPUS (a clear
+// `error` is set otherwise).
 // Returns an invalid AudioFileData on failure (valid() == false).
 AudioFileData loadAudioFile(const char* path);
 
 // Load audio from a memory buffer.
-// Format is detected by header magic bytes.
+// Format is detected by header magic bytes (same codec rules as above).
 AudioFileData loadAudioFileFromMemory(const uint8_t* data, size_t size);
 
 // Export interleaved float32 PCM to a WAV file (32-bit float format).

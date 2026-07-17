@@ -30,6 +30,27 @@ struct SDL_AudioStream;
 
 namespace broaudio {
 
+class FileStreamRunner;
+
+// Options for createStreamFromFile. Frame counts are at the ENGINE sample
+// rate (the ring holds resampled audio).
+struct FileStreamOptions {
+    int   ringFrames = 0;       // ring capacity; 0 = ~2 s at the engine rate
+    int   prebufferFrames = 0;  // decoded before playback starts; 0 = ~500 ms
+    bool  loop = false;         // worker rewinds the decoder at EOF (seamless)
+    float gain = 1.0f;
+};
+
+// Snapshot of a streaming playback's ring state (disk or live PCM streams).
+struct StreamStats {
+    uint64_t decodedFrames = 0;   // total frames ever pushed into the ring
+    uint64_t playedFrames = 0;    // frames consumed by the mixer
+    uint64_t bufferedFrames = 0;  // decoded - played (waiting in the ring)
+    uint64_t underrunFrames = 0;  // silent frames emitted while starved
+    bool finished = false;        // disk stream: EOF reached and ring drained
+    bool valid = false;           // false when the id is not a streaming playback
+};
+
 class Engine {
 public:
     Engine();
@@ -163,6 +184,17 @@ public:
 
     void setMasterGain(float gain);
     float masterGain() const { return masterGain_.load(std::memory_order_relaxed); }
+
+    // --- Master pause ---
+    // Suspends the engine's output clock: the realtime callback feeds silence
+    // to the device without processing the graph, and renderBlock() becomes a
+    // no-op — so voices, clip playback, scheduled events, and currentTime()
+    // all freeze in place and resume exactly where they stopped. This is a
+    // transport suspend, not a mute: nothing advances, nothing is dropped,
+    // and playback rate/pitch are untouched on resume. RT-safe (one relaxed
+    // atomic read on the audio thread).
+    void setMasterPaused(bool paused) { masterPaused_.store(paused, std::memory_order_relaxed); }
+    bool masterPaused() const { return masterPaused_.load(std::memory_order_relaxed); }
 
     // --- Master limiter ---
 
@@ -315,6 +347,29 @@ public:
     int  pushStreamSamples(int instanceId, const float* samples, int numSamples);
     void closeStream(int instanceId);
 
+    // --- Disk-streamed file playback ---
+    //
+    // Play a large audio file WITHOUT decoding it into RAM: a cold worker
+    // thread decodes the file incrementally (WAV, FLAC, MP3, Ogg Vorbis),
+    // resamples to the engine rate, and feeds the same streaming ring a live
+    // PCM stream uses. The returned playback instance id works with every
+    // setPlayback* control (gain, pan, bus, sends, rate, spatial). Playback
+    // starts automatically once the prebuffer is decoded. Looping follows
+    // setPlaybackLoop live: the worker rewinds the decoder at EOF, so loops
+    // are seamless. There is no seek (matching clip playback). On ring
+    // underrun the mixer emits silence and counts it (see getStreamStats).
+    //
+    // Returns the playback instance id, or -1 on failure with *outError set
+    // to an actionable message (unreadable file, unsupported codec, >2
+    // channels). Close with closeStream (also stops + joins the worker).
+    int createStreamFromFile(const char* path, std::string* outError = nullptr);
+    int createStreamFromFile(const char* path, const FileStreamOptions& opts,
+                             std::string* outError = nullptr);
+
+    // Ring/underrun statistics for a streaming playback (disk or live PCM).
+    // stats.valid is false when the id is not an active streaming playback.
+    StreamStats getStreamStats(int instanceId) const;
+
     void setPlaybackGain(int instanceId, float gain);
     void setPlaybackLoop(int instanceId, bool loop);
     void setPlaybackRegion(int instanceId, int start, int end);
@@ -361,9 +416,15 @@ public:
 
     // --- Audio file I/O ---
 
-    // Create a clip by loading an audio file (WAV, FLAC, MP3, OGG/Opus).
-    // Returns clip id on success, -1 on failure.
+    // Create a clip by loading an audio file (WAV, FLAC, MP3, Ogg Vorbis;
+    // Ogg Opus with BROAUDIO_OPUS). Returns clip id on success, -1 on failure.
     int createClipFromFile(const char* path);
+
+    // As createClipFromFile, but on failure *outError receives an actionable
+    // message (decode error, size cap, resample failure) instead of only a
+    // log line. Safe to call from a non-audio background thread — bindings
+    // use this to reject an async load with the real reason.
+    int createClipFromFileEx(const char* path, std::string* outError);
 
     // Async version — decodes and resamples on a background thread.
     // Returns a future that resolves to the clip id (-1 on failure).
@@ -447,6 +508,21 @@ private:
     AudioClip* findClip(int clipId) const;
     ClipPlayback* findPlayback(int instanceId) const;
 
+    // Create a streaming clip + persistent playback pair (shared by
+    // createStream and createStreamFromFile). Returns the playback id.
+    int createStreamPlayback(int channels, int ringFrames, bool startPlaying,
+                             float gain, bool loop,
+                             std::shared_ptr<AudioClip>& outClip,
+                             std::shared_ptr<ClipPlayback>& outPb);
+
+    // Disk-stream workers, keyed by playback id. Control plane only
+    // (create/close/shutdown on the main thread) — the audio thread never
+    // touches this list; it sees only the clip ring.
+    std::vector<std::unique_ptr<FileStreamRunner>> fileStreams_;
+    mutable std::mutex fileStreamsMutex_;
+    void stopFileStream(int instanceId);   // stop + join + erase, if present
+    void stopAllFileStreams();
+
     // RCU bus list — master bus is always id 0
     AtomicSharedPtr<const BusList> buses_{rcu_, std::make_shared<const BusList>()};
     std::mutex busWriteMutex_;
@@ -514,6 +590,7 @@ private:
     std::atomic<uint64_t> micPlaybackReadPos_{0};
 
     std::atomic<float> masterGain_{0.5f};
+    std::atomic<bool> masterPaused_{false};
     Smoother smoothMasterGain_;
     Limiter masterLimiter_{44100, 2};
     std::atomic<bool> micMuted_{true};

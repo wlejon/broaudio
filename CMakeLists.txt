@@ -78,10 +78,12 @@ add_library(broaudio STATIC
     src/synth/wavetable.cpp
     src/synth/voice_allocator.cpp
     src/clip/clip.cpp
+    src/clip/file_stream.cpp
     src/sequencer/automation.cpp
     src/sequencer/sequence.cpp
     src/codec/stb_vorbis_impl.c
     src/io/audio_file.cpp
+    src/io/audio_stream.cpp
     src/io/serialization.cpp
     src/engine.cpp
     src/log.cpp

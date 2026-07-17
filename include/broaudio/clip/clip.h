@@ -24,8 +24,24 @@ struct AudioClip {
     int  ringFrames = 0;
     std::atomic<uint64_t> writeFrames{0};
 
+    // Disk-streamed sources (createStreamFromFile) only:
+    // streamEnded — producer sets it (release) once the decoder hit EOF (not
+    // looping) and every decoded frame is in the ring, so post-stream silence
+    // is not miscounted as starvation. streamUnderrunFrames — audio-thread
+    // counter of silent frames emitted because the ring ran dry mid-stream;
+    // read from the control plane via Engine::getStreamStats.
+    std::atomic<bool> streamEnded{false};
+    std::atomic<uint64_t> streamUnderrunFrames{0};
+
     int numFrames() const { return channels > 0 ? static_cast<int>(samples.size()) / channels : 0; }
 };
+
+// Append interleaved frames to a streaming clip's ring and release-publish the
+// new writeFrames. Single-producer: exactly one thread may call this per clip
+// (main thread for live streams, the file-stream worker for disk streams).
+// A push larger than the ring keeps only the most recent capacity. Returns
+// frames written.
+int pushStreamFrames(AudioClip& clip, const float* samples, int numFrames);
 
 struct ClipPlayback {
     int id = 0;

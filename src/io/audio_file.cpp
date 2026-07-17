@@ -19,6 +19,13 @@
 #define DR_MP3_IMPLEMENTATION
 #include "dr_mp3.h"
 
+// Ogg Vorbis via stb_vorbis. Declarations only — the implementation is a
+// separate C translation unit (src/codec/stb_vorbis_impl.c) because
+// stb_vorbis.c does not compile as C++.
+#define STB_VORBIS_HEADER_ONLY
+#include "stb_vorbis/stb_vorbis.c"
+#undef STB_VORBIS_HEADER_ONLY
+
 // ---------------------------------------------------------------------------
 // Optional Opus/OGG support via opusfile
 // ---------------------------------------------------------------------------
@@ -146,6 +153,104 @@ static AudioFileData loadMp3Memory(const uint8_t* data, size_t size)
     result.samples.assign(pcm, pcm + totalFrames * config.channels);
     drmp3_free(pcm, nullptr);
     return result;
+}
+
+// ---------------------------------------------------------------------------
+// Ogg Vorbis (stb_vorbis)
+// ---------------------------------------------------------------------------
+
+// Actionable message for an stb_vorbis open/decode failure.
+static std::string vorbisErrorString(int code)
+{
+    switch (code) {
+        case VORBIS_outofmem:
+            return "out of memory while decoding Ogg Vorbis file";
+        case VORBIS_feature_not_supported:
+            return "Ogg Vorbis file uses floor 0 (pre-2004 encoder), which is not "
+                   "supported; re-encode the file with a modern Vorbis encoder";
+        case VORBIS_too_many_channels:
+            return "Ogg Vorbis file has too many channels (max 16)";
+        case VORBIS_unexpected_eof:
+            return "corrupt or truncated Ogg Vorbis file (unexpected end of file)";
+        case VORBIS_invalid_setup:
+        case VORBIS_invalid_stream:
+        case VORBIS_invalid_stream_structure_version:
+        case VORBIS_continued_packet_flag_invalid:
+        case VORBIS_incorrect_stream_serial_number:
+        case VORBIS_invalid_first_page:
+        case VORBIS_bad_packet_type:
+        case VORBIS_missing_capture_pattern:
+            return "corrupt Ogg Vorbis file (invalid stream data)";
+        default:
+            return "failed to decode Ogg Vorbis file (stb_vorbis error "
+                   + std::to_string(code) + ")";
+    }
+}
+
+// Decode a whole opened stb_vorbis stream to interleaved float32.
+static AudioFileData decodeVorbis(stb_vorbis* v)
+{
+    AudioFileData result;
+    stb_vorbis_info info = stb_vorbis_get_info(v);
+    if (info.channels <= 0 || info.sample_rate == 0) {
+        stb_vorbis_close(v);
+        result.error = "corrupt Ogg Vorbis file (invalid stream parameters)";
+        return result;
+    }
+
+    const int channels = info.channels;
+    const unsigned int totalFrames = stb_vorbis_stream_length_in_samples(v);
+    if (totalFrames > 0)
+        result.samples.reserve(static_cast<size_t>(totalFrames) * channels);
+
+    std::vector<float> chunk(static_cast<size_t>(4096) * channels);
+    uint64_t frames = 0;
+    for (;;) {
+        int got = stb_vorbis_get_samples_float_interleaved(
+            v, channels, chunk.data(), static_cast<int>(chunk.size()));
+        if (got <= 0) break;
+        result.samples.insert(result.samples.end(), chunk.begin(),
+                              chunk.begin() + static_cast<size_t>(got) * channels);
+        frames += static_cast<uint64_t>(got);
+    }
+    stb_vorbis_close(v);
+
+    if (frames == 0) {
+        result.samples.clear();
+        result.error = "corrupt Ogg Vorbis file (no decodable audio)";
+        return result;
+    }
+
+    result.channels = channels;
+    result.sampleRate = static_cast<int>(info.sample_rate);
+    result.numFrames = static_cast<int>(frames);
+    return result;
+}
+
+static AudioFileData loadVorbis(const char* path)
+{
+    int error = VORBIS__no_error;
+    stb_vorbis* v = stb_vorbis_open_filename(path, &error, nullptr);
+    if (!v) {
+        AudioFileData r;
+        // Unreadable file stays a silent failure, matching the other formats.
+        if (error != VORBIS_file_open_failure)
+            r.error = vorbisErrorString(error);
+        return r;
+    }
+    return decodeVorbis(v);
+}
+
+static AudioFileData loadVorbisMemory(const uint8_t* data, size_t size)
+{
+    int error = VORBIS__no_error;
+    stb_vorbis* v = stb_vorbis_open_memory(data, static_cast<int>(size), &error, nullptr);
+    if (!v) {
+        AudioFileData r;
+        r.error = vorbisErrorString(error);
+        return r;
+    }
+    return decodeVorbis(v);
 }
 
 // ---------------------------------------------------------------------------
@@ -281,19 +386,12 @@ static AudioFileData oggError(AudioFormat fmt)
 {
     AudioFileData r;
     switch (fmt) {
-        case AudioFormat::Vorbis:
-            r.error = "Ogg Vorbis is not supported (supported formats: WAV, FLAC, MP3"
-#if defined(BROAUDIO_HAS_OPUS) && BROAUDIO_HAS_OPUS
-                      ", Ogg Opus"
-#endif
-                      "); re-encode the file as WAV, FLAC, or MP3";
-            break;
         case AudioFormat::Opus:
             r.error = "Ogg Opus support is not compiled in (build with BROAUDIO_OPUS=ON), "
-                      "or re-encode the file as WAV, FLAC, or MP3";
+                      "or re-encode the file as WAV, FLAC, MP3, or Ogg Vorbis";
             break;
         default:
-            r.error = "unrecognized Ogg codec (supported formats: WAV, FLAC, MP3"
+            r.error = "unrecognized Ogg codec (supported formats: WAV, FLAC, MP3, Ogg Vorbis"
 #if defined(BROAUDIO_HAS_OPUS) && BROAUDIO_HAS_OPUS
                       ", Ogg Opus"
 #endif
@@ -320,8 +418,8 @@ AudioFileData loadAudioFile(const char* path)
     if (ext == ".mp3")
         return loadMp3(path);
     if (ext == ".ogg" || ext == ".opus") {
-        // Sniff the codec inside the container: .ogg is commonly Vorbis, which
-        // we do not decode — report that clearly instead of failing as Opus.
+        // Sniff the codec inside the container: .ogg is commonly Vorbis but the
+        // container also carries Opus (and others) — route on the first packet.
         AudioFormat fmt = AudioFormat::OggOther;
         if (FILE* f = fopen(path, "rb")) {
             uint8_t head[512];
@@ -332,6 +430,8 @@ AudioFileData loadAudioFile(const char* path)
         } else {
             return {};  // unreadable file — same silent failure as other formats
         }
+        if (fmt == AudioFormat::Vorbis)
+            return loadVorbis(path);
 #if defined(BROAUDIO_HAS_OPUS) && BROAUDIO_HAS_OPUS
         if (fmt == AudioFormat::Opus)
             return loadOpus(path);
@@ -358,6 +458,7 @@ AudioFileData loadAudioFileFromMemory(const uint8_t* data, size_t size)
             return oggError(fmt);
 #endif
         case AudioFormat::Vorbis:
+            return loadVorbisMemory(data, size);
         case AudioFormat::OggOther:
             return oggError(fmt);
         default: return {};

@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
-project(broaudio LANGUAGES CXX)
+# C is required for the vendored stb_vorbis translation unit
+# (src/codec/stb_vorbis_impl.c does not compile as C++).
+project(broaudio LANGUAGES CXX C)
 
 # When built standalone, set the MSVC runtime to static
 if(MSVC AND CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
@@ -78,6 +80,7 @@ add_library(broaudio STATIC
     src/clip/clip.cpp
     src/sequencer/automation.cpp
     src/sequencer/sequence.cpp
+    src/codec/stb_vorbis_impl.c
     src/io/audio_file.cpp
     src/io/serialization.cpp
     src/engine.cpp

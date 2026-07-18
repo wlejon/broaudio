@@ -46,6 +46,14 @@ public:
     // backend cannot seek.
     bool seekToStart();
 
+    // Seek to an absolute PCM frame (at the file's native rate). All four
+    // backends support this (MP3 seeks by decoding/skipping, so a far seek
+    // in a long MP3 can take a moment — fine on the stream worker thread,
+    // never call from the audio thread). Returns false if the backend
+    // cannot reach the frame; decoder position is then unspecified, so
+    // callers should treat failure as "keep playing from wherever we are".
+    bool seekToFrame(uint64_t frame);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

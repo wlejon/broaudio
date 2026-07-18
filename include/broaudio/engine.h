@@ -378,11 +378,50 @@ public:
     void setPlaybackPan(int instanceId, float pan);
     float getPlaybackPosition(int instanceId) const;
 
+    // Jump the playback cursor to `seconds`.
+    //  - Clip playbacks: seconds are measured from the playback region start
+    //    (the whole clip unless setPlaybackRegion narrowed it); clamped to
+    //    the region. Takes effect at the next mixed block (within a few ms).
+    //  - Disk-streamed playbacks (createStreamFromFile): seconds are file
+    //    time; the decode worker seeks the codec, already-buffered audio is
+    //    skipped via a lock-free fence, and playback resumes once the worker
+    //    has refilled from the new position (silence in between, counted as
+    //    underrun). Seeking a finished stream restarts it.
+    //  - Live PCM streams (createStream): no backing store — no-op.
+    void seekPlayback(int instanceId, double seconds);
+
+    // Playback position in seconds — the seconds-domain counterpart of the
+    // normalized getPlaybackPosition. Clip playbacks: seconds from the region
+    // start (wraps when looping). Disk streams: current file time (seek-
+    // aware). Live PCM streams: seconds of audio consumed since the stream
+    // opened. Returns 0 for unknown handles.
+    double getPlaybackPositionSeconds(int instanceId) const;
+
     // --- Spatial (listener) ---
 
     void setListenerPosition(float x, float y, float z);
     void setListenerOrientation(float fx, float fy, float fz, float ux, float uy, float uz);
+    void setListenerVelocity(float x, float y, float z);
     const Listener& listener() const { return listener_; }
+
+    // --- Doppler ---
+    //
+    // Global pitch-shift from relative listener/source motion, applied to
+    // spatialized sources on the render thread: clip playbacks compose the
+    // ratio into their resampling rate (multiplies setPlaybackRate), voices
+    // fold it into pitch (12·log2(ratio) semitones on top of pitch bend).
+    // Model + clamps: see computeDopplerRatio in spatial/listener.h — ratio
+    // is clamped to [0.5, 2.0]. factor 0 (or all-zero velocities, the
+    // default) disables; 1 is physical; >1 exaggerates. Streaming playbacks
+    // (live PCM / disk streams) are NOT Doppler-shifted — their ring mixer
+    // has no resampler (same reason setPlaybackRate is a no-op for them).
+    void setDopplerFactor(float factor);
+    float dopplerFactor() const { return dopplerFactor_.load(std::memory_order_relaxed); }
+
+    // Last Doppler ratio the mixer applied to a spatialized source (1.0
+    // until one has been mixed with doppler active). Introspection/testing.
+    float getPlaybackDopplerRatio(int instanceId) const;
+    float getVoiceDopplerRatio(int voiceId) const;
 
     // --- Head model (spatial filtering) ---
 

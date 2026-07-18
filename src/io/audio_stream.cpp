@@ -203,15 +203,28 @@ int AudioFileStream::readFrames(float* dst, int maxFrames)
 
 bool AudioFileStream::seekToStart()
 {
+    // stb_vorbis has a dedicated (cheaper) rewind; the dr_* backends just
+    // seek to frame 0.
+    if (impl_->backend == Impl::Backend::Vorbis)
+        return stb_vorbis_seek_start(impl_->vorbis) != 0;
+    return seekToFrame(0);
+}
+
+bool AudioFileStream::seekToFrame(uint64_t frame)
+{
     switch (impl_->backend) {
         case Impl::Backend::Wav:
-            return drwav_seek_to_pcm_frame(&impl_->wav, 0) == DRWAV_TRUE;
+            return drwav_seek_to_pcm_frame(&impl_->wav,
+                       static_cast<drwav_uint64>(frame)) == DRWAV_TRUE;
         case Impl::Backend::Flac:
-            return drflac_seek_to_pcm_frame(impl_->flac, 0) == DRFLAC_TRUE;
+            return drflac_seek_to_pcm_frame(impl_->flac,
+                       static_cast<drflac_uint64>(frame)) == DRFLAC_TRUE;
         case Impl::Backend::Mp3:
-            return drmp3_seek_to_pcm_frame(&impl_->mp3, 0) == DRMP3_TRUE;
+            return drmp3_seek_to_pcm_frame(&impl_->mp3,
+                       static_cast<drmp3_uint64>(frame)) == DRMP3_TRUE;
         case Impl::Backend::Vorbis:
-            return stb_vorbis_seek_start(impl_->vorbis) != 0;
+            return stb_vorbis_seek(impl_->vorbis,
+                       static_cast<unsigned int>(frame)) != 0;
         default:
             return false;
     }

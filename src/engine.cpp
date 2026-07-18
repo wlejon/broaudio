@@ -1862,6 +1862,12 @@ void Engine::mixStreamPlayback(ClipPlayback* pb, AudioClip* clip, float* targetB
 
     uint64_t wf = clip->writeFrames.load(std::memory_order_acquire);
     uint64_t rf = pb->playPos.load(std::memory_order_relaxed);
+    // Seek fence: a disk-stream seek publishes the writeFrames value at the
+    // moment of the seek; everything below it is pre-seek audio the worker
+    // could not un-push. Fast-forward past it (silence until the worker
+    // refills from the new file position).
+    uint64_t ff = clip->streamFlushFrames.load(std::memory_order_acquire);
+    if (ff > rf) rf = ff;
     // Overrun: if the reader has fallen more than a full ring behind, jump
     // forward (drop the oldest audio) so latency stays bounded.
     if (wf > rf + static_cast<uint64_t>(cap))
@@ -2166,6 +2172,76 @@ void Engine::setPlaybackRegion(int instanceId, int start, int end)
         pb->regionEnd.store(re, std::memory_order_relaxed);
         pb->playPos.store(0, std::memory_order_relaxed);
     }
+}
+
+void Engine::seekPlayback(int instanceId, double seconds)
+{
+    if (seconds < 0.0) seconds = 0.0;
+
+    // Disk streams: hand the seek to the decode worker (codec seek + ring
+    // flush fence). Control-plane mutex only — the audio thread never touches
+    // fileStreams_.
+    {
+        std::lock_guard<std::mutex> lock(fileStreamsMutex_);
+        for (auto& r : fileStreams_) {
+            if (r->playbackId() == instanceId) {
+                r->requestSeek(seconds);
+                return;
+            }
+        }
+    }
+
+    ClipPlayback* pb = findPlayback(instanceId);
+    if (!pb) return;
+    AudioClip* clip = findClip(pb->clipId);
+    if (!clip) return;
+    if (clip->streaming) return;  // live PCM stream — nothing to seek into
+
+    int rs = pb->regionStart.load(std::memory_order_relaxed);
+    int re = pb->regionEnd.load(std::memory_order_relaxed);
+    int end = re > 0 ? re : clip->numFrames();
+    int len = end - rs;
+    if (len <= 0) return;
+
+    int64_t frame = static_cast<int64_t>(seconds * sampleRate_ + 0.5);
+    if (frame >= len) frame = len - 1;
+    // playPos is a 16.16 fixed-point cursor relative to the region start.
+    // Racing the audio thread's block-end store is benign (same contract as
+    // setPlaybackPlaying / setPlaybackRegion): worst case the seek lands one
+    // mix block late.
+    pb->playPos.store(static_cast<uint64_t>(frame) << 16, std::memory_order_relaxed);
+}
+
+double Engine::getPlaybackPositionSeconds(int instanceId) const
+{
+    auto* pb = findPlayback(instanceId);
+    if (!pb) return 0.0;
+    auto* clip = findClip(pb->clipId);
+    if (!clip) return 0.0;
+
+    uint64_t pos = pb->playPos.load(std::memory_order_relaxed);
+
+    if (clip->streaming) {
+        // playPos counts consumed engine-rate frames; the seek fence + base
+        // rebase it into file time (both zero for never-seeked streams and
+        // live PCM streams).
+        uint64_t flush = clip->streamFlushFrames.load(std::memory_order_acquire);
+        int64_t base = clip->streamPosBaseFrames.load(std::memory_order_relaxed);
+        uint64_t sinceFlush = pos > flush ? pos - flush : 0;
+        double s = (static_cast<double>(base) + static_cast<double>(sinceFlush))
+                   / static_cast<double>(sampleRate_);
+        return s > 0.0 ? s : 0.0;
+    }
+
+    int rs = pb->regionStart.load(std::memory_order_relaxed);
+    int re = pb->regionEnd.load(std::memory_order_relaxed);
+    int end = re > 0 ? re : clip->numFrames();
+    int len = end - rs;
+    if (len <= 0) return 0.0;
+    int64_t intPos = static_cast<int64_t>(pos >> 16);
+    if (pb->looping.load(std::memory_order_relaxed)) intPos %= len;
+    else if (intPos > len) intPos = len;
+    return static_cast<double>(intPos) / static_cast<double>(sampleRate_);
 }
 
 float Engine::getPlaybackPosition(int instanceId) const

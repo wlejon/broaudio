@@ -296,6 +296,60 @@ TEST(get_playback_position_in_range) {
     PASS();
 }
 
+TEST(get_playback_position_seconds_tracks_render) {
+    Engine e; e.initHeadless();
+    const int sr = e.sampleRate();
+    auto sine = makeSineMono(sr * 2, 440.0f, sr);
+    int cid = e.createClip(sine.data(), (int)sine.size(), 1);
+    int pid = e.playClip(cid, 1.0f, false);
+
+    e.renderBlock(sr / 10);  // 100 ms
+    double p = e.getPlaybackPositionSeconds(pid);
+    ASSERT_NEAR(p, 0.1, 0.005);
+    PASS();
+}
+
+TEST(seek_playback_jumps_clip_cursor) {
+    Engine e; e.initHeadless();
+    const int sr = e.sampleRate();
+    auto sine = makeSineMono(sr * 2, 440.0f, sr);
+    int cid = e.createClip(sine.data(), (int)sine.size(), 1);
+    int pid = e.playClip(cid, 1.0f, false);
+
+    e.renderBlock(1024);
+    e.seekPlayback(pid, 1.0);
+    ASSERT_NEAR(e.getPlaybackPositionSeconds(pid), 1.0, 0.001);
+
+    // Rendering continues from the new cursor.
+    e.renderBlock(sr / 10);
+    ASSERT_NEAR(e.getPlaybackPositionSeconds(pid), 1.1, 0.005);
+    PASS();
+}
+
+TEST(seek_playback_clamps_to_region) {
+    Engine e; e.initHeadless();
+    const int sr = e.sampleRate();
+    auto sine = makeSineMono(sr, 440.0f, sr);
+    int cid = e.createClip(sine.data(), (int)sine.size(), 1);
+    int pid = e.playClip(cid, 1.0f, true);
+
+    e.seekPlayback(pid, 100.0);   // way past the end — clamps inside
+    double p = e.getPlaybackPositionSeconds(pid);
+    ASSERT_TRUE(p <= 1.0);
+    ASSERT_GT(p, 0.99);
+
+    e.seekPlayback(pid, -5.0);    // negative — clamps to 0
+    ASSERT_NEAR(e.getPlaybackPositionSeconds(pid), 0.0, 0.001);
+    PASS();
+}
+
+TEST(seek_playback_invalid_id_is_safe) {
+    Engine e; e.initHeadless();
+    e.seekPlayback(9999, 1.0);
+    ASSERT_NEAR(e.getPlaybackPositionSeconds(9999), 0.0, 1e-9);
+    PASS();
+}
+
 TEST(delete_clip_stops_active_playback) {
     Engine e; e.initHeadless();
     auto sine = makeSineMono(e.sampleRate(), 440.0f, e.sampleRate());

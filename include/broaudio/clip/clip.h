@@ -33,6 +33,19 @@ struct AudioClip {
     std::atomic<bool> streamEnded{false};
     std::atomic<uint64_t> streamUnderrunFrames{0};
 
+    // Seek support for disk streams (Engine::seekPlayback). The worker cannot
+    // rewrite ring history, so a seek is published as a FENCE instead:
+    // streamFlushFrames is a monotonic writeFrames value below which the audio
+    // thread must not read — on pickup it fast-forwards its cursor past all
+    // audio buffered before the seek (lock-free, one acquire load per block).
+    // streamPosBaseFrames is the file position (in engine-rate frames) the
+    // fence corresponds to, so position queries can report file time:
+    //   positionSeconds = (playPos - flushFrames + posBase) / engineRate.
+    // Producer-side write order: posBase first, then the fence (release);
+    // a torn read only skews a diagnostic position query for one block.
+    std::atomic<uint64_t> streamFlushFrames{0};
+    std::atomic<int64_t>  streamPosBaseFrames{0};
+
     int numFrames() const { return channels > 0 ? static_cast<int>(samples.size()) / channels : 0; }
 };
 

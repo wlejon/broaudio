@@ -61,6 +61,48 @@ void FileStreamRunner::join()
     if (thread_.joinable()) thread_.join();
 }
 
+void FileStreamRunner::requestSeek(double seconds)
+{
+    seekSeconds_.store(seconds < 0.0 ? 0.0 : seconds, std::memory_order_release);
+    {
+        // Same lock-then-notify as requestStop: a worker between its check
+        // and the cv wait must not miss the wake and add a full interval of
+        // seek latency.
+        std::lock_guard<std::mutex> lk(mutex_);
+    }
+    cv_.notify_all();
+}
+
+void FileStreamRunner::performSeek(double seconds)
+{
+    const int fileRate = decoder_->sampleRate();
+    if (fileRate <= 0) return;
+
+    uint64_t target = static_cast<uint64_t>(seconds * fileRate + 0.5);
+    uint64_t total = decoder_->totalFrames();
+    if (total > 0 && target >= total) target = total > 0 ? total - 1 : 0;
+
+    if (!decoder_->seekToFrame(target))
+        return;  // unseekable — keep playing from the current position
+
+    // Drop everything decoded but not yet heard: resampler tail + pending
+    // frames on this thread, then fence off what already sits in the ring.
+    if (resampler_) SDL_ClearAudioStream(resampler_);
+    pending_.clear();
+    pendingOffsetFrames_ = 0;
+    decoderEof_ = false;
+    clip_->streamEnded.store(false, std::memory_order_release);
+
+    // Publish position base BEFORE the fence (readers pair them loosely; a
+    // torn read only skews a position query for one block).
+    clip_->streamPosBaseFrames.store(
+        static_cast<int64_t>(static_cast<double>(target) * engineRate_ / fileRate + 0.5),
+        std::memory_order_relaxed);
+    clip_->streamFlushFrames.store(
+        clip_->writeFrames.load(std::memory_order_relaxed),
+        std::memory_order_release);
+}
+
 void FileStreamRunner::worker()
 {
     // Streaming resampler (SDL_AudioStream keeps filter state across chunks —
@@ -75,8 +117,15 @@ void FileStreamRunner::worker()
     }
 
     while (!stop_.load(std::memory_order_acquire)) {
-        // Top the ring up until it's full, the file is done, or we're told to stop.
-        while (!stop_.load(std::memory_order_acquire) && step()) {}
+        // Apply a pending seek before decoding (also breaks the fill loop
+        // below so a seek during a long ring top-up applies promptly).
+        double sk = seekSeconds_.exchange(-1.0, std::memory_order_acq_rel);
+        if (sk >= 0.0) performSeek(sk);
+
+        // Top the ring up until it's full, the file is done, we're told to
+        // stop, or a new seek arrives.
+        while (!stop_.load(std::memory_order_acquire) &&
+               seekSeconds_.load(std::memory_order_acquire) < 0.0 && step()) {}
 
         // Release playback once the prebuffer is decoded (or the whole file
         // is, if it's shorter than the prebuffer).
@@ -89,8 +138,10 @@ void FileStreamRunner::worker()
         }
 
         std::unique_lock<std::mutex> lk(mutex_);
-        cv_.wait_for(lk, kWakeInterval,
-                     [this] { return stop_.load(std::memory_order_acquire); });
+        cv_.wait_for(lk, kWakeInterval, [this] {
+            return stop_.load(std::memory_order_acquire) ||
+                   seekSeconds_.load(std::memory_order_acquire) >= 0.0;
+        });
     }
 }
 

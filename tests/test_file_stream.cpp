@@ -377,4 +377,78 @@ TEST(file_stream_teardown_paths) {
     PASS();
 }
 
+// ---------------------------------------------------------------------------
+// Seek (Engine::seekPlayback → decoder seek + ring flush fence)
+// ---------------------------------------------------------------------------
+
+TEST(file_stream_seek_lands_in_file_time) {
+    const int sr = 44100;
+    // First second silence, second second a loud tone: audio right after a
+    // seek to 1.5 s proves the decoder really jumped (from 0 we'd get
+    // silence for a full second).
+    std::vector<float> pcm(sr * 2, 0.0f);
+    auto tone = sineMono(sr, 440.0f, sr);
+    std::copy(tone.begin(), tone.end(), pcm.begin() + sr);
+    ASSERT_TRUE(saveWav(WAV_PATH, pcm.data(), sr * 2, 1, sr));
+
+    Engine e;
+    ASSERT_TRUE(e.initHeadless());
+    std::string err;
+    int id = e.createStreamFromFile(WAV_PATH, &err);
+    ASSERT_TRUE(id >= 0);
+    ASSERT_TRUE(waitFor([&] { return e.getStreamStats(id).valid
+                                  && e.getStreamStats(id).bufferedFrames > 0; }));
+
+    e.seekPlayback(id, 1.5);
+
+    // Render in small blocks until post-seek tone audio arrives (worker may
+    // take a few wakes to seek + refill; pre-seek buffered silence is fenced
+    // off, so the first non-silent block IS post-seek audio).
+    bool heard = waitFor([&] {
+        e.renderBlock(512);
+        return e.getBusPeakL(Engine::MASTER_BUS_ID) > 0.05f
+            || e.getBusPeakR(Engine::MASTER_BUS_ID) > 0.05f;
+    });
+    ASSERT_TRUE(heard);
+
+    // Position reports file time at/after the seek target.
+    double pos = e.getPlaybackPositionSeconds(id);
+    ASSERT_TRUE(pos >= 1.45);
+    ASSERT_TRUE(pos <= 2.1);
+
+    e.closeStream(id);
+    std::remove(WAV_PATH);
+    PASS();
+}
+
+TEST(file_stream_seek_restarts_finished_stream) {
+    const int sr = 44100;
+    auto tone = sineMono(sr / 2, 440.0f, sr);   // 0.5 s tone
+    ASSERT_TRUE(saveWav(WAV_PATH, tone.data(), sr / 2, 1, sr));
+
+    Engine e;
+    ASSERT_TRUE(e.initHeadless());
+    std::string err;
+    int id = e.createStreamFromFile(WAV_PATH, &err);
+    ASSERT_TRUE(id >= 0);
+
+    // Drain to EOF.
+    ASSERT_TRUE(waitFor([&] {
+        e.renderBlock(4096);
+        return e.getStreamStats(id).finished;
+    }));
+
+    // Seek back — the worker re-opens decode from 0.1 s and audio flows again.
+    e.seekPlayback(id, 0.1);
+    ASSERT_TRUE(waitFor([&] {
+        e.renderBlock(512);
+        return e.getBusPeakL(Engine::MASTER_BUS_ID) > 0.05f;
+    }));
+    ASSERT_FALSE(e.getStreamStats(id).finished);
+
+    e.closeStream(id);
+    std::remove(WAV_PATH);
+    PASS();
+}
+
 int main() { return runAllTests(); }

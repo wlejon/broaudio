@@ -48,6 +48,15 @@ public:
     void requestStop();  // signal the worker to exit (non-blocking)
     void join();         // wait for the worker to exit
 
+    // Ask the worker to seek the decoder to `seconds` (clamped to the file).
+    // Non-blocking; the worker performs the seek on its next wake (prompted
+    // immediately via the condvar), drops everything it had decoded, and
+    // publishes a ring flush fence so the mixer skips pre-seek audio (see
+    // AudioClip::streamFlushFrames). Seeking a finished (EOF, non-looping)
+    // stream restarts it from the target. Multiple requests coalesce to the
+    // most recent. If the backend cannot seek, playback continues unchanged.
+    void requestSeek(double seconds);
+
     int playbackId() const { return playbackId_; }
 
 private:
@@ -56,6 +65,9 @@ private:
     // Returns true while forward progress is possible without waiting.
     bool step();
     void pushPending(uint64_t space);
+    // Worker-thread half of requestSeek: decoder seek + resampler/pending
+    // reset + fence publication.
+    void performSeek(double seconds);
 
     std::shared_ptr<AudioClip> clip_;
     std::shared_ptr<ClipPlayback> playback_;
@@ -73,6 +85,10 @@ private:
 
     std::thread thread_;
     std::atomic<bool> stop_{false};
+    // Pending seek target in seconds; < 0 = none. Written by requestSeek
+    // (control plane), exchanged back to -1 by the worker. Coalesces: only
+    // the latest request before the worker wakes is honored.
+    std::atomic<double> seekSeconds_{-1.0};
     std::mutex mutex_;
     std::condition_variable cv_;
 };

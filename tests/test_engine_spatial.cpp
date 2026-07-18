@@ -256,4 +256,98 @@ TEST(voice_spatial_with_head_model_enabled_still_produces_audio) {
     PASS();
 }
 
+// ---------------------------------------------------------------------------
+// Doppler
+// ---------------------------------------------------------------------------
+
+// Spatialized looping clip playback at `pos` with velocity `vel`.
+static int makeDopplerPlayback(Engine& e, float px, float py, float pz,
+                               float vx, float vy, float vz) {
+    auto sine = sineMono(e.sampleRate(), 440.0f, e.sampleRate());
+    int cid = e.createClip(sine.data(), (int)sine.size(), 1);
+    int pid = e.playClip(cid, 1.0f, true);
+    e.setPlaybackSpatialEnabled(pid, true);
+    e.setPlaybackSpatialPosition(pid, px, py, pz);
+    e.setPlaybackSpatialVelocity(pid, vx, vy, vz);
+    return pid;
+}
+
+TEST(doppler_approaching_source_raises_ratio) {
+    Engine e; e.initHeadless();
+    // Source 10 units in front, moving straight at the listener at 10 u/s:
+    // ratio = 343 / (343 - 10).
+    int pid = makeDopplerPlayback(e, 0, 0, -10, 0, 0, 10);
+    e.renderBlock(512);
+    ASSERT_NEAR(e.getPlaybackDopplerRatio(pid), 343.0f / 333.0f, 1e-3f);
+    PASS();
+}
+
+TEST(doppler_receding_source_lowers_ratio) {
+    Engine e; e.initHeadless();
+    int pid = makeDopplerPlayback(e, 0, 0, -10, 0, 0, -10);
+    e.renderBlock(512);
+    ASSERT_NEAR(e.getPlaybackDopplerRatio(pid), 343.0f / 353.0f, 1e-3f);
+    PASS();
+}
+
+TEST(doppler_listener_velocity_contributes) {
+    Engine e; e.initHeadless();
+    // Listener moving toward a static source: ratio = (343 + 5) / 343.
+    int pid = makeDopplerPlayback(e, 0, 0, -10, 0, 0, 0);
+    e.setListenerVelocity(0, 0, -5);
+    e.renderBlock(512);
+    ASSERT_NEAR(e.getPlaybackDopplerRatio(pid), 348.0f / 343.0f, 1e-3f);
+    PASS();
+}
+
+TEST(doppler_factor_zero_disables) {
+    Engine e; e.initHeadless();
+    int pid = makeDopplerPlayback(e, 0, 0, -10, 0, 0, 10);
+    e.setDopplerFactor(0.0f);
+    e.renderBlock(512);
+    ASSERT_NEAR(e.getPlaybackDopplerRatio(pid), 1.0f, 1e-6f);
+    PASS();
+}
+
+TEST(doppler_ratio_clamps_to_octave) {
+    Engine e; e.initHeadless();
+    // Absurd speeds: projections clamp to ±0.9c first, then the ratio clamps
+    // to [0.5, 2.0]. Approach saturates the upper clamp (343/34.3 = 10 → 2);
+    // recede floors at 1/1.9 ≈ 0.5263 from the projection clamp alone.
+    int up = makeDopplerPlayback(e, 0, 0, -10, 0, 0, 1000);
+    int dn = makeDopplerPlayback(e, 0, 0, 10, 0, 0, 1000);
+    e.renderBlock(512);
+    ASSERT_NEAR(e.getPlaybackDopplerRatio(up), 2.0f, 1e-6f);
+    ASSERT_NEAR(e.getPlaybackDopplerRatio(dn), 1.0f / 1.9f, 1e-4f);
+    PASS();
+}
+
+TEST(doppler_shifts_playback_consumption_rate) {
+    Engine e; e.initHeadless();
+    const int sr = e.sampleRate();
+    // Approaching source: cursor should advance ~ratio × realtime.
+    int pid = makeDopplerPlayback(e, 0, 0, -10, 0, 0, 10);
+    e.renderBlock(512);  // let the ratio latch before the measured window
+    double before = e.getPlaybackPositionSeconds(pid);
+    e.renderBlock(sr / 2);
+    double advanced = e.getPlaybackPositionSeconds(pid) - before;
+    ASSERT_NEAR(advanced, 0.5 * (343.0 / 333.0), 0.01);
+    PASS();
+}
+
+TEST(doppler_voice_ratio_tracks_motion) {
+    Engine e; e.initHeadless();
+    int v = e.createVoice();
+    e.setWaveform(v, Waveform::Sine);
+    e.setFrequency(v, 440.0f);
+    e.setGain(v, 1.0f);
+    e.setVoiceSpatialEnabled(v, true);
+    e.setVoiceSpatialPosition(v, 0, 0, -10);
+    e.setVoiceSpatialVelocity(v, 0, 0, 10);
+    e.startVoice(v, 0.0);
+    e.renderBlock(512);
+    ASSERT_NEAR(e.getVoiceDopplerRatio(v), 343.0f / 333.0f, 1e-3f);
+    PASS();
+}
+
 int main() { return runAllTests(); }

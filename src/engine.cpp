@@ -219,6 +219,13 @@ void Engine::renderInternal(int numFrames)
                 targetPan = 0.0f; // center — head model does L/R
                 headParams = computeHeadParams(sr, headModel_, sampleRate_);
                 spatialFilterActive = true;
+                // Doppler composes into the resample rate (streaming sources
+                // ignore rate — their ring mixer has no resampler).
+                float dop = computeDopplerRatio(
+                    listener_, pb->spatial,
+                    dopplerFactor_.load(std::memory_order_relaxed));
+                pb->spatial.lastDopplerRatio.store(dop, std::memory_order_relaxed);
+                rate *= dop;
             }
 
             pb->smoothGain.set(targetGain);
@@ -1371,6 +1378,35 @@ void Engine::setListenerOrientation(float fx, float fy, float fz,
     listener_.upZ.store(uz, std::memory_order_relaxed);
 }
 
+void Engine::setListenerVelocity(float x, float y, float z)
+{
+    listener_.velX.store(x, std::memory_order_relaxed);
+    listener_.velY.store(y, std::memory_order_relaxed);
+    listener_.velZ.store(z, std::memory_order_relaxed);
+}
+
+void Engine::setDopplerFactor(float factor)
+{
+    dopplerFactor_.store(std::max(0.0f, factor), std::memory_order_relaxed);
+}
+
+float Engine::getPlaybackDopplerRatio(int instanceId) const
+{
+    if (auto* pb = findPlayback(instanceId))
+        return pb->spatial.lastDopplerRatio.load(std::memory_order_relaxed);
+    return 1.0f;
+}
+
+float Engine::getVoiceDopplerRatio(int voiceId) const
+{
+    auto currentVoices = voices_.load();
+    for (auto& v : *currentVoices) {
+        if (v->id == voiceId)
+            return v->spatial.lastDopplerRatio.load(std::memory_order_relaxed);
+    }
+    return 1.0f;
+}
+
 // --- Head model ---
 
 void Engine::setHeadModelEnabled(bool enabled) { headModel_.enabled.store(enabled, std::memory_order_relaxed); }
@@ -1398,6 +1434,11 @@ static void setSpatialPosition(SpatialSource& s, float x, float y, float z) {
     s.posY.store(y, std::memory_order_relaxed);
     s.posZ.store(z, std::memory_order_relaxed);
 }
+static void setSpatialVelocity(SpatialSource& s, float x, float y, float z) {
+    s.velX.store(x, std::memory_order_relaxed);
+    s.velY.store(y, std::memory_order_relaxed);
+    s.velZ.store(z, std::memory_order_relaxed);
+}
 static void setSpatialRefDistance(SpatialSource& s, float d) { s.refDistance.store(std::max(0.001f, d), std::memory_order_relaxed); }
 static void setSpatialMaxDistance(SpatialSource& s, float d) { s.maxDistance.store(std::max(0.001f, d), std::memory_order_relaxed); }
 static void setSpatialRolloff(SpatialSource& s, float r) { s.rolloff.store(std::max(0.0f, r), std::memory_order_relaxed); }
@@ -1405,6 +1446,7 @@ static void setSpatialDistanceModel(SpatialSource& s, DistanceModel m) { s.dista
 
 void Engine::setVoiceSpatialEnabled(int id, bool enabled) { if (auto* v = findVoice(id)) setSpatialEnabled(v->spatial, enabled); }
 void Engine::setVoiceSpatialPosition(int id, float x, float y, float z) { if (auto* v = findVoice(id)) setSpatialPosition(v->spatial, x, y, z); }
+void Engine::setVoiceSpatialVelocity(int id, float x, float y, float z) { if (auto* v = findVoice(id)) setSpatialVelocity(v->spatial, x, y, z); }
 void Engine::setVoiceSpatialRefDistance(int id, float d) { if (auto* v = findVoice(id)) setSpatialRefDistance(v->spatial, d); }
 void Engine::setVoiceSpatialMaxDistance(int id, float d) { if (auto* v = findVoice(id)) setSpatialMaxDistance(v->spatial, d); }
 void Engine::setVoiceSpatialRolloff(int id, float r) { if (auto* v = findVoice(id)) setSpatialRolloff(v->spatial, r); }
@@ -1412,6 +1454,7 @@ void Engine::setVoiceSpatialDistanceModel(int id, DistanceModel m) { if (auto* v
 
 void Engine::setPlaybackSpatialEnabled(int id, bool enabled) { if (auto* pb = findPlayback(id)) setSpatialEnabled(pb->spatial, enabled); }
 void Engine::setPlaybackSpatialPosition(int id, float x, float y, float z) { if (auto* pb = findPlayback(id)) setSpatialPosition(pb->spatial, x, y, z); }
+void Engine::setPlaybackSpatialVelocity(int id, float x, float y, float z) { if (auto* pb = findPlayback(id)) setSpatialVelocity(pb->spatial, x, y, z); }
 void Engine::setPlaybackSpatialRefDistance(int id, float d) { if (auto* pb = findPlayback(id)) setSpatialRefDistance(pb->spatial, d); }
 void Engine::setPlaybackSpatialMaxDistance(int id, float d) { if (auto* pb = findPlayback(id)) setSpatialMaxDistance(pb->spatial, d); }
 void Engine::setPlaybackSpatialRolloff(int id, float r) { if (auto* pb = findPlayback(id)) setSpatialRolloff(pb->spatial, r); }
@@ -2682,6 +2725,13 @@ void Engine::processOutputChunk(SDL_AudioStream* stream, int numFrames)
                 targetPan2 = 0.0f; // center — head model does L/R
                 headParams2 = computeHeadParams(sr, engine->headModel_, engine->sampleRate_);
                 spatialFilterActive2 = true;
+                // Doppler composes into the resample rate (streaming sources
+                // ignore rate — their ring mixer has no resampler).
+                float dop = computeDopplerRatio(
+                    engine->listener_, pb->spatial,
+                    engine->dopplerFactor_.load(std::memory_order_relaxed));
+                pb->spatial.lastDopplerRatio.store(dop, std::memory_order_relaxed);
+                rate *= dop;
             }
 
             pb->smoothGain.set(targetGain2);
@@ -3075,6 +3125,14 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
             voiceSpatialGain = sr.gain;
             voiceSpatialPan = sr.pan;
             voiceHeadParams = computeHeadParams(sr, headModel_, sampleRate_);
+            // Doppler folds into pitch: 12·log2(ratio) semitones on top of
+            // the voice's pitch bend (block-rate, like the rest of spatial).
+            float dop = computeDopplerRatio(
+                listener_, voice.spatial,
+                dopplerFactor_.load(std::memory_order_relaxed));
+            voice.spatial.lastDopplerRatio.store(dop, std::memory_order_relaxed);
+            if (dop != 1.0f)
+                pitchBendSemitones += 12.0f * std::log2(dop);
         }
 
         // Filter parameter pickup (block-rate). Coefficients are recomputed

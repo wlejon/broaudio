@@ -13,15 +13,28 @@ namespace broaudio {
 struct SpatialSource {
     std::atomic<bool> spatialEnabled{false};
     std::atomic<float> posX{0.0f}, posY{0.0f}, posZ{0.0f};
+    // World-space velocity (units/sec) — feeds the Doppler model. Zero (the
+    // default) means no source-motion Doppler.
+    std::atomic<float> velX{0.0f}, velY{0.0f}, velZ{0.0f};
     std::atomic<float> refDistance{1.0f};    // distance at which gain = 1.0
     std::atomic<float> maxDistance{100.0f};
     std::atomic<float> rolloff{1.0f};
     std::atomic<int> distanceModel{static_cast<int>(DistanceModel::Inverse)};
 
+    // Last Doppler pitch ratio the mixer applied to this source (1.0 until
+    // the source has been mixed spatialized with a non-zero doppler factor).
+    // Audio-thread writer, any-thread reader; diagnostic/introspection only.
+    std::atomic<float> lastDopplerRatio{1.0f};
+
     bromath::Vec3 position() const {
         return {posX.load(std::memory_order_relaxed),
                 posY.load(std::memory_order_relaxed),
                 posZ.load(std::memory_order_relaxed)};
+    }
+    bromath::Vec3 velocity() const {
+        return {velX.load(std::memory_order_relaxed),
+                velY.load(std::memory_order_relaxed),
+                velZ.load(std::memory_order_relaxed)};
     }
 };
 
@@ -32,6 +45,14 @@ struct Listener {
     std::atomic<float> posX{0.0f}, posY{0.0f}, posZ{0.0f};
     std::atomic<float> fwdX{0.0f}, fwdY{0.0f}, fwdZ{-1.0f};
     std::atomic<float> upX{0.0f},  upY{1.0f},  upZ{0.0f};
+    // World-space velocity (units/sec) — listener half of the Doppler model.
+    std::atomic<float> velX{0.0f}, velY{0.0f}, velZ{0.0f};
+
+    bromath::Vec3 velocity() const {
+        return {velX.load(std::memory_order_relaxed),
+                velY.load(std::memory_order_relaxed),
+                velZ.load(std::memory_order_relaxed)};
+    }
 
     bromath::Vec3 position() const {
         return {posX.load(std::memory_order_relaxed),
@@ -148,6 +169,39 @@ inline SpatialResult computeSpatial(const Listener& listener, const SpatialSourc
     }
 
     return result;
+}
+
+// Doppler pitch ratio for a spatial source relative to the listener, using
+// the standard moving-source/moving-listener model with d̂ pointing from the
+// source to the listener:
+//
+//   ratio = (c − v_l·d̂) / (c − v_s·d̂),   c = 343 units/sec
+//
+// so mutual approach raises pitch (>1) and recession lowers it (<1). `factor`
+// scales both projected velocities before the quotient (0 disables — returns
+// exactly 1; 1 is physical). Projections are clamped to ±0.9c so the quotient
+// stays finite, and the result is clamped to [0.5, 2.0] (±1 octave) — beyond
+// that real games want a whoosh, not aliasing or subsonic mush. Units are
+// whatever the app uses for positions; velocities just have to match.
+inline float computeDopplerRatio(const Listener& listener, const SpatialSource& src,
+                                 float factor)
+{
+    if (factor <= 0.0f) return 1.0f;
+    constexpr float kSpeedOfSound = 343.0f;
+
+    bromath::Vec3 d = listener.position() - src.position();
+    float dist = bromath::vlen(d);
+    if (dist < 1e-4f) return 1.0f;  // co-located — direction undefined
+    bromath::Vec3 dn{d.x / dist, d.y / dist, d.z / dist};
+
+    float vl = bromath::vdot(listener.velocity(), dn) * factor;
+    float vs = bromath::vdot(src.velocity(), dn) * factor;
+    constexpr float kMaxV = 0.9f * kSpeedOfSound;
+    vl = std::clamp(vl, -kMaxV, kMaxV);
+    vs = std::clamp(vs, -kMaxV, kMaxV);
+
+    float ratio = (kSpeedOfSound - vl) / (kSpeedOfSound - vs);
+    return std::clamp(ratio, 0.5f, 2.0f);
 }
 
 // Configurable head shadow model parameters.

@@ -460,6 +460,7 @@ public:
 
     void setVoiceSpatialEnabled(int voiceId, bool enabled);
     void setVoiceSpatialPosition(int voiceId, float x, float y, float z);
+    void setVoiceSpatialVelocity(int voiceId, float x, float y, float z);
     void setVoiceSpatialRefDistance(int voiceId, float dist);
     void setVoiceSpatialMaxDistance(int voiceId, float dist);
     void setVoiceSpatialRolloff(int voiceId, float rolloff);
@@ -469,6 +470,7 @@ public:
 
     void setPlaybackSpatialEnabled(int instanceId, bool enabled);
     void setPlaybackSpatialPosition(int instanceId, float x, float y, float z);
+    void setPlaybackSpatialVelocity(int instanceId, float x, float y, float z);
     void setPlaybackSpatialRefDistance(int instanceId, float dist);
     void setPlaybackSpatialMaxDistance(int instanceId, float dist);
     void setPlaybackSpatialRolloff(int instanceId, float rolloff);

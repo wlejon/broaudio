@@ -71,6 +71,14 @@ public:
     double currentTime() const;
     int sampleRate() const { return sampleRate_; }
 
+    // Approximate output latency in seconds: the device buffer size divided
+    // by the device sample rate, captured when the playback stream opened.
+    // This covers only the SDL device buffer — OS mixer, driver, and DAC
+    // latency are not visible from here, so treat it as a lower bound (the
+    // Web Audio outputLatency contract is the same "estimate" language).
+    // 0.0 in headless mode (no device).
+    double outputLatencySeconds() const { return outputLatencySeconds_; }
+
     // --- Voices (synthesis) ---
 
     int createVoice();
@@ -110,6 +118,19 @@ public:
     void setBusGain(int busId, float gain);
     void setBusPan(int busId, float pan);
     void setBusMuted(int busId, bool muted);
+
+    // Bus solo. While at least one bus is soloed, a bus only reaches the mix
+    // if it is soloed itself, feeds a soloed bus (descendant subtree of a
+    // soloed group bus stays audible), or carries a soloed bus's audio toward
+    // master (ancestors keep mixing — audio must still flow through parents).
+    // Everything else renders silent, including its aux sends. Sources routed
+    // DIRECTLY to an audible ancestor (e.g. straight to master) are not
+    // silenced — solo operates on bus outputs, matching Godot's semantics.
+    // Mute still wins: a muted+soloed bus is silent. RT-safe: the audio
+    // thread does an allocation-free parent-chain walk per bus per block,
+    // and only when any solo is active.
+    void setBusSolo(int busId, bool solo);
+    bool getBusSolo(int busId) const;
 
     // Per-bus filter control
     int allocateBusFilterSlot(int busId);
@@ -569,17 +590,32 @@ private:
 
     Bus* findBus(int busId) const;
 
+    // Number of currently-soloed buses. Maintained by setBusSolo/deleteBus
+    // under busWriteMutex_; read (relaxed) by the audio thread as the fast
+    // "any solo active?" gate.
+    std::atomic<int> soloCount_{0};
+
+    // True when `bus` may mix into its parent under the current solo state:
+    // no solo active, bus soloed, soloed ancestor (subtree of a soloed group
+    // stays audible), or soloed descendant (ancestors carry solo audio to
+    // master). Audio-thread safe: bounded loops over the RCU snapshot, no
+    // allocation, no locks.
+    bool busAudibleUnderSolo(const BusList& buses, const Bus& bus) const;
+
     // Modulation
     ModMatrix modMatrix_;
 
     // Spatial
     Listener listener_;
     HeadModel headModel_;
+    std::atomic<float> dopplerFactor_{1.0f};
 
     SDL_AudioStream* stream_ = nullptr;
     SDL_AudioStream* micStream_ = nullptr;
     std::atomic<uint64_t> samplesGenerated_{0};
     int sampleRate_ = 44100;
+    // Device-buffer latency estimate, set once in init() (see accessor).
+    double outputLatencySeconds_ = 0.0;
     std::atomic<bool> initialized_{false};
     std::atomic<bool> micCapturing_{false};
 

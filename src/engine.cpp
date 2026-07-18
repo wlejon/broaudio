@@ -58,6 +58,19 @@ bool Engine::init()
         return false;
     }
 
+    // Output latency estimate: device buffer frames / device rate. Only the
+    // SDL buffer is visible from here (see outputLatencySeconds() docs).
+    {
+        SDL_AudioDeviceID dev = SDL_GetAudioStreamDevice(stream_);
+        SDL_AudioSpec devSpec{};
+        int devFrames = 0;
+        if (dev != 0 && SDL_GetAudioDeviceFormat(dev, &devSpec, &devFrames)
+            && devFrames > 0 && devSpec.freq > 0) {
+            outputLatencySeconds_ =
+                static_cast<double>(devFrames) / static_cast<double>(devSpec.freq);
+        }
+    }
+
     // Create master bus (id 0)
     {
         auto master = std::make_shared<Bus>();
@@ -311,17 +324,22 @@ void Engine::renderInternal(int numFrames)
 
         processBusEffects(*bus, numFrames);
 
+        // Solo gate: a silenced bus contributes neither to its parent nor to
+        // its aux send (its effect state above still ran, so un-soloing is
+        // click-free and tails stay warm).
+        bool audible = busAudibleUnderSolo(*currentBuses, *bus);
+
         int parentId = bus->parentId.load(std::memory_order_relaxed);
         for (auto& parent : *currentBuses) {
             if (parent->id == parentId) {
-                mixBusIntoParent(*bus, *parent, numFrames);
+                if (audible) mixBusIntoParent(*bus, *parent, numFrames);
                 break;
             }
         }
 
         int busSendId = bus->sendBusId.load(std::memory_order_relaxed);
         float busSendAmt = bus->sendAmount.load(std::memory_order_relaxed);
-        if (busSendId >= 0 && busSendAmt > 0.0f) {
+        if (audible && busSendId >= 0 && busSendAmt > 0.0f) {
             for (auto& sendTarget : *currentBuses) {
                 if (sendTarget->id == busSendId) {
                     float busGain = bus->gain.load(std::memory_order_relaxed) * busSendAmt;
@@ -450,7 +468,13 @@ void Engine::deleteBus(int busId)
     auto newList = std::make_shared<BusList>();
     newList->reserve(current->size());
     for (auto& b : *current) {
-        if (b->id != busId) newList->push_back(b);
+        if (b->id != busId) {
+            newList->push_back(b);
+        } else if (b->soloed.load(std::memory_order_relaxed)) {
+            // Deleting a soloed bus releases its solo so the count can't
+            // strand the mixer in solo mode forever.
+            soloCount_.fetch_sub(1, std::memory_order_relaxed);
+        }
     }
     buses_.store(std::move(newList));
 }
@@ -592,6 +616,63 @@ void Engine::setBusPan(int busId, float pan)
 {
     if (auto* b = findBus(busId))
         b->pan.store(std::clamp(pan, -1.0f, 1.0f), std::memory_order_relaxed);
+}
+
+void Engine::setBusSolo(int busId, bool solo)
+{
+    // busWriteMutex_ serialises the flag flip with deleteBus so soloCount_
+    // can never leak a count for a bus that was concurrently removed.
+    std::lock_guard<std::mutex> lock(busWriteMutex_);
+    if (auto* b = findBus(busId)) {
+        bool prev = b->soloed.exchange(solo, std::memory_order_relaxed);
+        if (prev != solo)
+            soloCount_.fetch_add(solo ? 1 : -1, std::memory_order_relaxed);
+    }
+}
+
+bool Engine::getBusSolo(int busId) const
+{
+    if (auto* b = findBus(busId))
+        return b->soloed.load(std::memory_order_relaxed);
+    return false;
+}
+
+bool Engine::busAudibleUnderSolo(const BusList& buses, const Bus& bus) const
+{
+    if (soloCount_.load(std::memory_order_relaxed) <= 0) return true;
+    if (bus.soloed.load(std::memory_order_relaxed)) return true;
+
+    // Depth guard: the parent graph is user-assembled; a cycle would
+    // otherwise spin the audio thread.
+    constexpr int kMaxDepth = 64;
+
+    // Soloed ancestor? (bus lives inside a soloed group — keep it audible)
+    int pid = bus.parentId.load(std::memory_order_relaxed);
+    for (int guard = 0; pid >= 0 && guard < kMaxDepth; ++guard) {
+        const Bus* p = nullptr;
+        for (auto& b : buses) {
+            if (b->id == pid) { p = b.get(); break; }
+        }
+        if (!p) break;
+        if (p->soloed.load(std::memory_order_relaxed)) return true;
+        pid = p->parentId.load(std::memory_order_relaxed);
+    }
+
+    // Soloed descendant? (this bus carries a soloed bus's audio to master)
+    for (auto& s : buses) {
+        if (!s->soloed.load(std::memory_order_relaxed)) continue;
+        int q = s->parentId.load(std::memory_order_relaxed);
+        for (int guard = 0; q >= 0 && guard < kMaxDepth; ++guard) {
+            if (q == bus.id) return true;
+            const Bus* p = nullptr;
+            for (auto& b : buses) {
+                if (b->id == q) { p = b.get(); break; }
+            }
+            if (!p) break;
+            q = p->parentId.load(std::memory_order_relaxed);
+        }
+    }
+    return false;
 }
 
 void Engine::setBusMuted(int busId, bool muted)
@@ -2752,11 +2833,15 @@ void Engine::processOutputChunk(SDL_AudioStream* stream, int numFrames)
 
         engine->processBusEffects(*bus, numFrames);
 
+        // Solo gate (see renderInternal): silenced buses skip the parent mix
+        // and aux send but keep their effect tails running.
+        bool audible = engine->busAudibleUnderSolo(*currentBuses, *bus);
+
         // Find parent and mix into it
         int parentId = bus->parentId.load(std::memory_order_relaxed);
         for (auto& parent : *currentBuses) {
             if (parent->id == parentId) {
-                engine->mixBusIntoParent(*bus, *parent, numFrames);
+                if (audible) engine->mixBusIntoParent(*bus, *parent, numFrames);
                 break;
             }
         }
@@ -2764,7 +2849,7 @@ void Engine::processOutputChunk(SDL_AudioStream* stream, int numFrames)
         // Bus-to-bus aux send (post-effects, post-fader)
         int busSendId = bus->sendBusId.load(std::memory_order_relaxed);
         float busSendAmt = bus->sendAmount.load(std::memory_order_relaxed);
-        if (busSendId >= 0 && busSendAmt > 0.0f) {
+        if (audible && busSendId >= 0 && busSendAmt > 0.0f) {
             for (auto& sendTarget : *currentBuses) {
                 if (sendTarget->id == busSendId) {
                     float busGain = bus->gain.load(std::memory_order_relaxed) * busSendAmt;

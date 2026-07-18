@@ -64,6 +64,114 @@ TEST(set_bus_muted_silences_output) {
 }
 
 // ---------------------------------------------------------------------------
+// Bus solo
+// ---------------------------------------------------------------------------
+
+// Helper: loud sine voice routed to `bus`.
+static int makeVoiceOnBus(broaudio::Engine& e, int bus) {
+    int v = e.createVoice();
+    e.setWaveform(v, Waveform::Sine);
+    e.setFrequency(v, 440.0f);
+    e.setGain(v, 1.0f);
+    e.setVoiceBus(v, bus);
+    e.startVoice(v, 0.0);
+    return v;
+}
+
+TEST(solo_silences_non_soloed_buses) {
+    Engine e; e.initHeadless();
+    int a = e.createBus();
+    int b = e.createBus();
+    makeVoiceOnBus(e, a);           // only bus A carries signal
+
+    e.renderBlock(4096);
+    ASSERT_GT(e.getBusPeakL(Engine::MASTER_BUS_ID), 0.01f);
+
+    // Solo the SILENT bus B: A must stop reaching master.
+    e.setBusSolo(b, true);
+    ASSERT_TRUE(e.getBusSolo(b));
+    e.renderBlock(4096);
+    e.renderBlock(2048);
+    ASSERT_LT(e.getBusPeakL(Engine::MASTER_BUS_ID), 0.05f);
+
+    // Releasing solo restores A.
+    e.setBusSolo(b, false);
+    ASSERT_FALSE(e.getBusSolo(b));
+    e.renderBlock(4096);
+    ASSERT_GT(e.getBusPeakL(Engine::MASTER_BUS_ID), 0.01f);
+    PASS();
+}
+
+TEST(soloed_bus_stays_audible) {
+    Engine e; e.initHeadless();
+    int a = e.createBus();
+    makeVoiceOnBus(e, a);
+
+    e.setBusSolo(a, true);
+    e.renderBlock(4096);
+    ASSERT_GT(e.getBusPeakL(Engine::MASTER_BUS_ID), 0.01f);
+    PASS();
+}
+
+TEST(mute_wins_over_solo) {
+    Engine e; e.initHeadless();
+    int a = e.createBus();
+    makeVoiceOnBus(e, a);
+
+    e.setBusSolo(a, true);
+    e.setBusMuted(a, true);
+    e.renderBlock(4096);
+    e.renderBlock(2048);
+    ASSERT_LT(e.getBusPeakL(Engine::MASTER_BUS_ID), 0.05f);
+    PASS();
+}
+
+TEST(delete_soloed_bus_releases_solo) {
+    Engine e; e.initHeadless();
+    int a = e.createBus();
+    int b = e.createBus();
+    makeVoiceOnBus(e, a);
+
+    e.setBusSolo(b, true);          // silences A
+    e.renderBlock(4096);
+    e.renderBlock(2048);
+    ASSERT_LT(e.getBusPeakL(Engine::MASTER_BUS_ID), 0.05f);
+
+    e.deleteBus(b);                 // deleting the soloed bus lifts solo mode
+    e.renderBlock(4096);
+    ASSERT_GT(e.getBusPeakL(Engine::MASTER_BUS_ID), 0.01f);
+    PASS();
+}
+
+TEST(solo_gates_aux_sends) {
+    Engine e; e.initHeadless();
+    int a = e.createBus();          // signal bus, sends into fx
+    int fx = e.createBus();
+    int other = e.createBus();
+    makeVoiceOnBus(e, a);
+    e.setBusSend(a, fx, 1.0f);
+
+    e.setBusSolo(other, true);      // solo an unrelated silent bus
+    e.renderBlock(4096);
+    e.renderBlock(2048);
+    // Neither A's direct path nor its send may reach master.
+    ASSERT_LT(e.getBusPeakL(Engine::MASTER_BUS_ID), 0.05f);
+    PASS();
+}
+
+TEST(set_bus_solo_invalid_id_is_safe) {
+    Engine e; e.initHeadless();
+    e.setBusSolo(4242, true);
+    ASSERT_FALSE(e.getBusSolo(4242));
+    int a = e.createBus();
+    makeVoiceOnBus(e, a);
+    e.renderBlock(4096);
+    // No stray solo count was accumulated — audio still flows.
+    ASSERT_GT(e.getBusPeakL(Engine::MASTER_BUS_ID), 0.01f);
+    PASS();
+}
+
+// ---------------------------------------------------------------------------
 // Voice removal
 // ---------------------------------------------------------------------------
 

@@ -4,7 +4,7 @@
 [![CodeQL](https://github.com/wlejon/broaudio/actions/workflows/codeql.yml/badge.svg)](https://github.com/wlejon/broaudio/actions/workflows/codeql.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A real-time audio engine library written in C++20. Provides synthesis, sample playback, effects processing, spatial audio, MIDI input, audio-file decode/encode, and a flexible mixing bus architecture — all with a lock-free, audio-thread-safe design built on SDL3.
+A real-time audio engine library written in C++20. Provides synthesis, sample playback, streaming sources, effects processing, spatial audio, MIDI input, audio-file decode/encode, system-audio capture, and a flexible mixing bus architecture — all with a lock-free, audio-thread-safe design built on SDL3.
 
 ## Features
 
@@ -42,6 +42,7 @@ A real-time audio engine library written in C++20. Provides synthesis, sample pl
 ### Mixing
 - **Bus hierarchy** — Master bus + dynamically created child buses
 - **Per-bus controls** — Gain, pan, mute
+- **Solo** — `setBusSolo` silences non-soloed bus outputs; soloed subtrees and the ancestors carrying their audio stay audible, mute wins over solo, and sources routed directly to an audible ancestor are untouched (Godot semantics)
 - **Aux sends** — From voices, clips, or buses to any other bus
 - **Bus routing** — Voices and clips can target any bus
 - **Bus metering** — Per-bus peak and RMS (L/R) for level visualization
@@ -50,8 +51,16 @@ A real-time audio engine library written in C++20. Provides synthesis, sample pl
 - **Sample playback** — Load from raw float buffers (mono or stereo), play with gain/pan/rate control
 - **Looping and regions** — Loop points and sub-region playback
 - **Variable-rate playback** — Time-stretching via playback rate
+- **Scheduled start** — `playClipAt` begins a clip when the audio clock reaches a given engine time, with no main-thread timer jitter
+- **Seek and position** — `seekPlayback` jumps the cursor; `getPlaybackPosition` (normalized) and `getPlaybackPositionSeconds` report it
 - **Waveform extraction** — Min/max binning for display
-- **Decode from file** — `createClipFromFile` loads WAV/FLAC/MP3/OGG straight into a clip
+- **Decode from file** — `createClipFromFile` loads WAV/FLAC/MP3/OGG straight into a clip; `createClipFromFileEx` reports an actionable error, `createClipFromFileAsync` decodes on a background thread, and `setMaxClipDecodedBytes` caps decoded size (default ~200 MB)
+
+### Streaming Sources
+- **Live PCM streams** — `createStream` returns a persistent playback fed frame-by-frame via `pushStreamSamples`; the audio thread reads a ring the producer appends to, so network or voice audio plays click-free without per-chunk clip churn
+- **Disk-streamed files** — `createStreamFromFile` plays large files without decoding them into RAM: a worker thread decodes and resamples incrementally into the same ring, with configurable ring size, prebuffer, and seamless looping
+- **Full playback control** — Streaming instances accept every `setPlayback*` / `setPlaybackSpatial*` call (gain, pan, bus, sends, 3D position); disk streams also support `seekPlayback`
+- **Ring statistics** — `getStreamStats` reports decoded/played/buffered frames, underruns, and EOF
 
 ### Audio File I/O
 - **Decode** — `loadAudioFile` / `loadAudioFileFromMemory` decode WAV, FLAC, MP3, and OGG (Opus requires `BROAUDIO_OPUS`) to interleaved float32 PCM (via dr_libs)
@@ -64,6 +73,7 @@ A real-time audio engine library written in C++20. Provides synthesis, sample pl
 - **Distance models** — Linear, inverse, exponential with configurable ref/max distance and rolloff
 - **Angle-based stereo panning** — Projects source direction onto listener's right vector
 - **Head-shadow model** — Optional HRTF-style ILD (interaural level difference) plus per-ear one-pole lowpass for front/back and elevation cues, all caller-tunable
+- **Doppler** — Per-source and listener velocities with a global `setDopplerFactor`; clips compose the ratio into their resampling rate, voices fold it into pitch. Ratio is clamped to [0.5, 2.0]; streaming playbacks are not shifted (their ring mixer has no resampler)
 
 ### MIDI
 - **Hardware/virtual port input** via libremidi
@@ -90,8 +100,22 @@ A real-time audio engine library written in C++20. Provides synthesis, sample pl
 - **Output and mic analysis buffers** — Ring buffers for visualization
 - **FFT spectrum** — Cooley-Tukey, up to 8192 bins
 - **Microphone capture** — With monitor gain, mute, and bus routing
-- **Mic taps** — Multi-consumer audio-thread mic dispatch; each tap requests its own target rate (polyphase resampled), fixed chunk size, and optional AGC, with per-tap stats. Single hook for wake-word detectors, live ASR, custom analyzers
+- **Mic taps** — Multi-consumer audio-thread mic dispatch; each tap requests its own target rate (polyphase resampled), fixed chunk size, and optional AGC, with per-tap stats. Single hook for wake-word detectors, live ASR, custom analyzers. `injectMicSamples` drives the same tap chain from synthetic audio for headless and test use
 - **Output recording** — Capture up to 60 seconds of engine output
+
+### System-Audio Capture
+`LoopbackCapture` captures what the machine is *playing* (the render side), independent of the engine's mic path. Frames arrive as FP32 on the capture thread, optionally downmixed to mono and resampled to a target rate.
+
+- **Modes** — `SystemOutput` (the whole render endpoint), `ProcessInclude` / `ProcessExclude` (one application's process tree, or everything but it)
+- **Backends** — Windows WASAPI loopback; macOS CoreAudio process taps (14.2+, needs `NSAudioCaptureUsageDescription`); Linux PulseAudio monitor source via libpulse (also covers pipewire-pulse); a stub elsewhere
+- **Graceful degradation** — `isSupported()` is false where unavailable, and the process modes report unsupported on PulseAudio (no public per-app capture API); `enumerateProcesses()` still lists apps holding a render session, for a picker
+
+### Engine Control and Offline Rendering
+- **Headless mode** — `initHeadless()` opens no device; `renderBlock(numFrames)` drives the full pipeline (voices, clips, bus FX, mix, limiter, metering, recording) on the calling thread
+- **Master pause** — `setMasterPaused` suspends the output clock: the graph stops advancing and resumes exactly where it left off, rather than muting
+- **Output latency** — `outputLatencySeconds()` estimates device-buffer latency (a lower bound; OS mixer and DAC latency are not visible)
+- **Sample-accurate events** — `scheduleNoteOn` / `scheduleNoteOff` dispatch inside the audio callback at a given engine time
+- **Offline effects** — `processEffectsOffline` runs mono samples through a clone of a bus's effect chain without touching live audio
 
 ## Architecture
 
@@ -102,17 +126,18 @@ The engine uses a **lock-free, RCU-based design** for thread safety between the 
 - **Pre-allocated scratch buffers** prevent heap allocations on the audio thread.
 
 ```
-Voices ──┐
-          ├──▶ Bus (child) ──▶ Bus (master) ──▶ Limiter ──▶ Output
-Clips  ──┘         │                │
-                   FX chain        FX chain
-              (filter/delay/      (filter/delay/
-               comp/chorus/        comp/chorus/
-               distortion/         distortion/
-               reverb/EQ)          reverb/EQ)
+Voices  ──┐
+Clips   ──┤
+Streams ──┼──▶ Bus (child) ──▶ Bus (master) ──▶ Limiter ──▶ Output
+Mic     ──┘         │                │
+                   FX chain         FX chain
+              (filter/delay/    (filter/delay/
+               comp/chorus/      comp/chorus/
+               distortion/       distortion/
+               reverb/EQ)        reverb/EQ)
 ```
 
-The per-bus FX chain order is configurable via `setBusEffectOrder`.
+The per-bus FX chain order is configurable via `setBusEffectOrder`. Streaming sources (live PCM and disk-streamed files) are fed by producer threads through a ring the audio thread drains; file decoding and resampling happen on a dedicated worker, never in the callback.
 
 ## Building
 
@@ -148,12 +173,25 @@ The consumer must provide an SDL3 target (`SDL3::SDL3` or `SDL3::SDL3-static`) b
 If MIDI or Opus dependencies are not found, the respective option is auto-disabled with a status message rather than failing the configure.
 
 ### Running tests
-Each test is a standalone executable registered with CTest (no aggregate target).
+Each test is a standalone executable registered with CTest (no aggregate target), built on the header-only harness in `tests/test_harness.h`.
 
 ```bash
 cmake --build build
 ctest --test-dir build
 ```
+
+Set `SDL_AUDIODRIVER=dummy` to run without an audio device (this is what CI does).
+
+Coverage: CI runs a Debug `--coverage` build through gcovr on Linux and uploads an HTML report. On Windows, `pwsh scripts/coverage.ps1` produces the equivalent via OpenCppCoverage from a Debug build.
+
+### Repository layout
+| Path | Contents |
+|---|---|
+| `include/broaudio/` | Public headers — `engine.h` is the primary entry point |
+| `src/` | Implementation, mirroring the header layout |
+| `tests/` | One executable per test, registered with CTest |
+| `third_party/` | Vendored dr_libs, stb_vorbis, nlohmann; libremidi as a submodule |
+| `scripts/` | `coverage.ps1` (Windows coverage report) |
 
 ## Quick Start
 
@@ -179,7 +217,14 @@ int reverbBus = engine.createBus();
 engine.setBusReverbEnabled(reverbBus, true);
 engine.setBusReverbMix(reverbBus, 0.4f);
 engine.setVoiceSend(voice, reverbBus, 0.5f);
+
+// Stream a large file from disk instead of decoding it into RAM
+std::string err;
+int music = engine.createStreamFromFile("song.flac", &err);
+if (music >= 0) engine.setPlaybackGain(music, 0.6f);
 ```
+
+Call `engine.update()` from your frame loop to run non-realtime maintenance (reaping finished voices, servicing async work).
 
 ## License
 

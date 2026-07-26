@@ -251,6 +251,42 @@ TEST(file_stream_underrun_counts_and_recovers) {
     PASS();
 }
 
+// A ring shorter than the worker's decode chunk must still be topped up after
+// a *partial* drain. The worker used to require a whole chunk of free space
+// before decoding, so a ring smaller than two chunks wedged at whatever level
+// the last drain left it — the mixer only consumes while the host renders, so
+// nothing ever freed the space the worker was waiting for.
+TEST(file_stream_small_ring_tops_up_after_partial_drain) {
+    Engine e;
+    ASSERT_TRUE(e.initHeadless());
+    const int sr = e.sampleRate();
+
+    auto sine = sineMono(sr * 4, 330.0f, sr);
+    ASSERT_TRUE(saveWav(WAV_PATH, sine.data(), sr * 4, 1, sr));
+
+    FileStreamOptions opts;
+    opts.ringFrames = sr / 10;  // ~100 ms — well under one 4096-frame chunk
+    std::string err;
+    int id = e.createStreamFromFile(WAV_PATH, opts, &err);
+    ASSERT_TRUE(id >= 0);
+    ASSERT_TRUE(waitFor([&] { return e.getStreamStats(id).bufferedFrames > 0; }));
+
+    // Drain by assorted partial amounts, from both sides of the old dead zone.
+    // Whatever the level lands on, the worker must keep the ring at least half
+    // full rather than parking below it.
+    for (int drain : {2048, 1000, 500, 2200, 4000}) {
+        e.renderBlock(drain);
+        ASSERT_TRUE(waitFor([&] {
+            return e.getStreamStats(id).bufferedFrames
+                   >= static_cast<uint64_t>(opts.ringFrames / 2);
+        }));
+    }
+
+    e.closeStream(id);
+    std::remove(WAV_PATH);
+    PASS();
+}
+
 TEST(file_stream_loops_seamlessly) {
     Engine e;
     ASSERT_TRUE(e.initHeadless());

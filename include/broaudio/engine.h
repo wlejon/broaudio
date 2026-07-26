@@ -35,7 +35,11 @@ class FileStreamRunner;
 // Options for createStreamFromFile. Frame counts are at the ENGINE sample
 // rate (the ring holds resampled audio).
 struct FileStreamOptions {
-    int   ringFrames = 0;       // ring capacity; 0 = ~2 s at the engine rate
+    // Ring capacity; 0 = ~2 s at the engine rate. Small rings are honored —
+    // the decode worker tops the ring up at least whenever it falls below
+    // half full — but they leave less slack for a slow disk, so underruns
+    // get likelier the smaller this is.
+    int   ringFrames = 0;
     int   prebufferFrames = 0;  // decoded before playback starts; 0 = ~500 ms
     bool  loop = false;         // worker rewinds the decoder at EOF (seamless)
     float gain = 1.0f;

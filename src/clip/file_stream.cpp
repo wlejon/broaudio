@@ -195,15 +195,27 @@ bool FileStreamRunner::step()
         return false;  // parked until stop (or a late loop enable)
     }
 
-    // Make sure a full chunk of output fits before decoding, so decoded audio
-    // never sits split across ring pushes longer than necessary.
-    uint64_t maxOut = kChunkFrames;
+    // Prefer to decode a whole chunk at a time, so decoded audio never sits
+    // split across ring pushes longer than necessary — but never demand more
+    // free space than the ring itself can offer. A ring shorter than two
+    // chunks would otherwise wedge: once it holds a partial chunk there is no
+    // room for another, so it parks at whatever level the last drain left and
+    // stays there for as long as the mixer isn't consuming (which, off the
+    // audio thread, can be indefinitely). Demand at most half the ring, and
+    // scale the read down to what actually fits.
+    uint64_t outPerChunk = kChunkFrames;
     if (resampler_)
-        maxOut = static_cast<uint64_t>(kChunkFrames) * engineRate_ /
-                     std::max(decoder_->sampleRate(), 1) + 64;
-    if (space < maxOut) return false;
+        outPerChunk = static_cast<uint64_t>(kChunkFrames) * engineRate_ /
+                          std::max(decoder_->sampleRate(), 1) + 64;
+    if (space < std::min<uint64_t>(outPerChunk, cap - cap / 2)) return false;
 
-    int got = decoder_->readFrames(decodeBuf_.data(), kChunkFrames);
+    int toRead = kChunkFrames;
+    if (space < outPerChunk) {
+        toRead = static_cast<int>(static_cast<uint64_t>(kChunkFrames) * space / outPerChunk);
+        if (toRead < 1) toRead = 1;
+    }
+
+    int got = decoder_->readFrames(decodeBuf_.data(), toRead);
     if (got > 0) {
         if (resampler_) {
             SDL_PutAudioStreamData(resampler_, decodeBuf_.data(),

@@ -433,9 +433,8 @@ public:
     // fold it into pitch (12·log2(ratio) semitones on top of pitch bend).
     // Model + clamps: see computeDopplerRatio in spatial/listener.h — ratio
     // is clamped to [0.5, 2.0]. factor 0 (or all-zero velocities, the
-    // default) disables; 1 is physical; >1 exaggerates. Streaming playbacks
-    // (live PCM / disk streams) are NOT Doppler-shifted — their ring mixer
-    // has no resampler (same reason setPlaybackRate is a no-op for them).
+    // default) disables; 1 is physical; >1 exaggerates. Applies to streaming
+    // playbacks too — their ring mixer interpolates, same as clip playback.
     void setDopplerFactor(float factor);
     float dopplerFactor() const { return dopplerFactor_.load(std::memory_order_relaxed); }
 
@@ -537,7 +536,7 @@ private:
     void mixStreamPlayback(ClipPlayback* pb, AudioClip* clip, float* targetBuf,
                            float* clipSendBuf, float clipSendAmt,
                            bool spatialFilterActive, const HeadParams& headParams,
-                           int numFrames, int startFrame);
+                           float rate, int numFrames, int startFrame);
 
     static void micCallback(void* userdata, SDL_AudioStream* stream,
                             int additional_amount, int total_amount);

@@ -81,6 +81,12 @@ struct ClipPlayback {
     Smoother smoothGain;
     Smoother smoothPan;
 
+    // Sub-sample read phase for streaming playbacks at rate != 1. The ring
+    // cursor (playPos) stays a whole-frame count so the producer's
+    // decoded/played bookkeeping is exact; this carries the fraction between
+    // output frames. Audio thread only.
+    float streamFrac = 0.0f;
+
     // Spatial source and directional filter (audio-thread only)
     SpatialSource spatial;
     SpatialFilter spatialFilter;

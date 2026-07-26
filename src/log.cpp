@@ -8,11 +8,17 @@ namespace broaudio {
 
 namespace {
 LogCallback g_callback;
+LogLevel g_defaultLevel = LogLevel::Warn;
 }
 
 void setLogCallback(LogCallback cb)
 {
     g_callback = std::move(cb);
+}
+
+void setDefaultLogLevel(LogLevel minLevel)
+{
+    g_defaultLevel = minLevel;
 }
 
 void log(LogLevel level, const char* fmt, ...)
@@ -27,6 +33,11 @@ void log(LogLevel level, const char* fmt, ...)
         g_callback(level, buf);
         return;
     }
+
+    // No host sink: fall back to SDL_Log, but only for what the embedder is
+    // likely to want on their console. Routine Info lines stay quiet by
+    // default — see setDefaultLogLevel().
+    if (level < g_defaultLevel) return;
 
     switch (level) {
         case LogLevel::Info:  SDL_Log("%s", buf); break;

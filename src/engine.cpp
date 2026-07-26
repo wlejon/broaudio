@@ -219,8 +219,7 @@ void Engine::renderInternal(int numFrames)
                 targetPan = 0.0f; // center — head model does L/R
                 headParams = computeHeadParams(sr, headModel_, sampleRate_);
                 spatialFilterActive = true;
-                // Doppler composes into the resample rate (streaming sources
-                // ignore rate — their ring mixer has no resampler).
+                // Doppler composes into the resample rate.
                 float dop = computeDopplerRatio(
                     listener_, pb->spatial,
                     dopplerFactor_.load(std::memory_order_relaxed));
@@ -243,7 +242,7 @@ void Engine::renderInternal(int numFrames)
             // Streaming sources read from a ring instead of a fixed clip.
             if (clip->streaming) {
                 mixStreamPlayback(pb.get(), clip, targetBuf, clipSendBuf, clipSendAmt,
-                                  spatialFilterActive, headParams, numFrames, 0);
+                                  spatialFilterActive, headParams, rate, numFrames, 0);
                 continue;
             }
 
@@ -1978,7 +1977,7 @@ int Engine::playClipAt(int clipId, double when, float gain, bool loop)
 void Engine::mixStreamPlayback(ClipPlayback* pb, AudioClip* clip, float* targetBuf,
                                float* clipSendBuf, float clipSendAmt,
                                bool spatialFilterActive, const HeadParams& headParams,
-                               int numFrames, int startFrame)
+                               float rate, int numFrames, int startFrame)
 {
     const int cap = clip->ringFrames;
     const int ch = clip->channels;
@@ -1991,7 +1990,7 @@ void Engine::mixStreamPlayback(ClipPlayback* pb, AudioClip* clip, float* targetB
     // could not un-push. Fast-forward past it (silence until the worker
     // refills from the new file position).
     uint64_t ff = clip->streamFlushFrames.load(std::memory_order_acquire);
-    if (ff > rf) rf = ff;
+    if (ff > rf) { rf = ff; pb->streamFrac = 0.0f; }
     // Overrun: if the reader has fallen more than a full ring behind, jump
     // forward (drop the oldest audio) so latency stays bounded.
     if (wf > rf + static_cast<uint64_t>(cap))
@@ -2003,13 +2002,44 @@ void Engine::mixStreamPlayback(ClipPlayback* pb, AudioClip* clip, float* targetB
     int underruns = 0;
     const bool ended = clip->streamEnded.load(std::memory_order_acquire);
 
+    // Playback rate. A live PCM stream used to ignore this outright, which is
+    // how a video player ended up with slow-motion picture over full-speed
+    // sound. The ring is read with a fractional cursor and linear
+    // interpolation instead — tape-style, so pitch follows speed, matching
+    // what clip playback already does.
+    if (!(rate > 0.0f)) rate = 1.0f;
+    const bool resampling = (rate < 0.999f || rate > 1.001f);
+
     for (int i = startFrame; i < numFrames; i++) {
         float sL = 0.0f, sR = 0.0f;
-        if (rf < wf) { // else underrun → silence, hold the cursor
-            int slot = static_cast<int>(rf % cap);
-            if (ch == 2) { sL = clip->samples[slot * 2]; sR = clip->samples[slot * 2 + 1]; }
-            else { float s = clip->samples[slot]; sL = s; sR = s; }
-            rf++;
+        if (!resampling) {
+            if (rf < wf) { // else underrun → silence, hold the cursor
+                int slot = static_cast<int>(rf % cap);
+                if (ch == 2) { sL = clip->samples[slot * 2]; sR = clip->samples[slot * 2 + 1]; }
+                else { float s = clip->samples[slot]; sL = s; sR = s; }
+                rf++;
+            } else if (!ended) {
+                underruns++;
+            }
+        } else if (rf + 1 < wf) {
+            // Two neighbours are needed to interpolate, so this runs one frame
+            // shallower into the ring than the rate-1 path.
+            const int s0 = static_cast<int>(rf % cap);
+            const int s1 = static_cast<int>((rf + 1) % cap);
+            const float t = pb->streamFrac;
+            if (ch == 2) {
+                sL = clip->samples[s0 * 2]     + (clip->samples[s1 * 2]     - clip->samples[s0 * 2])     * t;
+                sR = clip->samples[s0 * 2 + 1] + (clip->samples[s1 * 2 + 1] - clip->samples[s0 * 2 + 1]) * t;
+            } else {
+                const float s = clip->samples[s0] + (clip->samples[s1] - clip->samples[s0]) * t;
+                sL = s; sR = s;
+            }
+            float frac = t + rate;
+            // rate > 1 consumes more than one input frame per output frame.
+            const int whole = static_cast<int>(frac);
+            frac -= static_cast<float>(whole);
+            rf += static_cast<uint64_t>(whole);
+            pb->streamFrac = frac;
         } else if (!ended) {
             underruns++;
         }
@@ -2725,8 +2755,7 @@ void Engine::processOutputChunk(SDL_AudioStream* stream, int numFrames)
                 targetPan2 = 0.0f; // center — head model does L/R
                 headParams2 = computeHeadParams(sr, engine->headModel_, engine->sampleRate_);
                 spatialFilterActive2 = true;
-                // Doppler composes into the resample rate (streaming sources
-                // ignore rate — their ring mixer has no resampler).
+                // Doppler composes into the resample rate.
                 float dop = computeDopplerRatio(
                     engine->listener_, pb->spatial,
                     engine->dopplerFactor_.load(std::memory_order_relaxed));
@@ -2750,7 +2779,7 @@ void Engine::processOutputChunk(SDL_AudioStream* stream, int numFrames)
             // Streaming sources read from a ring instead of a fixed clip.
             if (clip->streaming) {
                 engine->mixStreamPlayback(pb.get(), clip, targetBuf, clipSendBuf, clipSendAmt,
-                                          spatialFilterActive2, headParams2, numFrames, 0);
+                                          spatialFilterActive2, headParams2, rate, numFrames, 0);
                 continue;
             }
 

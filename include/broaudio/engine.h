@@ -117,11 +117,17 @@ public:
 
     static constexpr int MASTER_BUS_ID = 0;
 
+    /// Master bus mapping table helper: bus 0 is master
+    Bus* masterBus() const { return findBus(MASTER_BUS_ID); }
+
     int createBus();                               // returns bus id, feeds into master
     void deleteBus(int busId);                     // cannot delete master
     void setBusGain(int busId, float gain);
+    float getBusGain(int busId) const;
     void setBusPan(int busId, float pan);
+    float getBusPan(int busId) const;
     void setBusMuted(int busId, bool muted);
+    bool getBusMuted(int busId) const;
 
     // Bus solo. While at least one bus is soloed, a bus only reaches the mix
     // if it is soloed itself, feeds a soloed bus (descendant subtree of a
@@ -140,55 +146,90 @@ public:
     int allocateBusFilterSlot(int busId);
     void releaseBusFilterSlot(int busId, int slot);
     void setBusFilterEnabled(int busId, int slot, bool enabled);
+    bool getBusFilterEnabled(int busId, int slot) const;
     void setBusFilterType(int busId, int slot, BiquadFilter::Type type);
+    BiquadFilter::Type getBusFilterType(int busId, int slot) const;
     void setBusFilterFrequency(int busId, int slot, float freq);
+    float getBusFilterFrequency(int busId, int slot) const;
     void setBusFilterQ(int busId, int slot, float q);
+    float getBusFilterQ(int busId, int slot) const;
     void setBusFilterGain(int busId, int slot, float gainDB);
+    float getBusFilterGain(int busId, int slot) const;
 
     // Per-bus delay control
     void setBusDelayEnabled(int busId, bool enabled);
+    bool getBusDelayEnabled(int busId) const;
     void setBusDelayTime(int busId, float seconds);
+    float getBusDelayTime(int busId) const;
     void setBusDelayFeedback(int busId, float fb);
+    float getBusDelayFeedback(int busId) const;
     void setBusDelayMix(int busId, float mix);
+    float getBusDelayMix(int busId) const;
 
     // Per-bus compressor control
     void setBusCompressorEnabled(int busId, bool enabled);
+    bool getBusCompressorEnabled(int busId) const;
     void setBusCompressorThreshold(int busId, float threshold);
+    float getBusCompressorThreshold(int busId) const;
     void setBusCompressorRatio(int busId, float ratio);
+    float getBusCompressorRatio(int busId) const;
     void setBusCompressorAttack(int busId, float ms);
+    float getBusCompressorAttack(int busId) const;
     void setBusCompressorRelease(int busId, float ms);
+    float getBusCompressorRelease(int busId) const;
     void setBusCompressorSidechain(int busId, int sidechainBusId);
+    int getBusCompressorSidechain(int busId) const;
 
     // Per-bus reverb control
     void setBusReverbEnabled(int busId, bool enabled);
+    bool getBusReverbEnabled(int busId) const;
     void setBusReverbRoomSize(int busId, float size);
+    float getBusReverbRoomSize(int busId) const;
     void setBusReverbDamping(int busId, float damping);
+    float getBusReverbDamping(int busId) const;
     void setBusReverbMix(int busId, float mix);
+    float getBusReverbMix(int busId) const;
 
     // Per-bus equalizer control
     void setBusEqEnabled(int busId, bool enabled);
+    bool getBusEqEnabled(int busId) const;
     void setBusEqBandGain(int busId, int band, float gainDB);
+    float getBusEqBandGain(int busId, int band) const;
     void setBusEqMasterGain(int busId, float gainDB);
+    float getBusEqMasterGain(int busId) const;
 
     // Per-bus effect chain order
     void setBusEffectOrder(int busId, const EffectSlot* order, int count);
 
     // Per-bus distortion/waveshaper control
     void setBusDistortionEnabled(int busId, bool enabled);
+    bool getBusDistortionEnabled(int busId) const;
     void setBusDistortionMode(int busId, DistortionMode mode);
+    DistortionMode getBusDistortionMode(int busId) const;
     void setBusDistortionDrive(int busId, float drive);
+    float getBusDistortionDrive(int busId) const;
     void setBusDistortionMix(int busId, float mix);
+    float getBusDistortionMix(int busId) const;
     void setBusDistortionOutputGain(int busId, float gain);
+    float getBusDistortionOutputGain(int busId) const;
     void setBusDistortionCrushBits(int busId, float bits);
+    float getBusDistortionCrushBits(int busId) const;
     void setBusDistortionCrushRate(int busId, float rate);
+    float getBusDistortionCrushRate(int busId) const;
 
     // Per-bus chorus/flanger control
     void setBusChorusEnabled(int busId, bool enabled);
+    bool getBusChorusEnabled(int busId) const;
     void setBusChorusRate(int busId, float hz);
+    float getBusChorusRate(int busId) const;
     void setBusChorusDepth(int busId, float seconds);
+    float getBusChorusDepth(int busId) const;
     void setBusChorusMix(int busId, float mix);
+    float getBusChorusMix(int busId) const;
     void setBusChorusFeedback(int busId, float fb);
+    float getBusChorusFeedback(int busId) const;
     void setBusChorusBaseDelay(int busId, float seconds);
+    float getBusChorusBaseDelay(int busId) const;
 
     // Per-bus metering (read from main thread, written by audio thread)
     float getBusPeakL(int busId) const;

@@ -681,10 +681,31 @@ bool Engine::busAudibleUnderSolo(const BusList& buses, const Bus& bus) const
     return false;
 }
 
+float Engine::getBusGain(int busId) const
+{
+    if (auto* b = findBus(busId))
+        return b->gain.load(std::memory_order_relaxed);
+    return 1.0f;
+}
+
+float Engine::getBusPan(int busId) const
+{
+    if (auto* b = findBus(busId))
+        return b->pan.load(std::memory_order_relaxed);
+    return 0.0f;
+}
+
 void Engine::setBusMuted(int busId, bool muted)
 {
     if (auto* b = findBus(busId))
         b->muted.store(muted, std::memory_order_relaxed);
+}
+
+bool Engine::getBusMuted(int busId) const
+{
+    if (auto* b = findBus(busId))
+        return b->muted.load(std::memory_order_relaxed);
+    return false;
 }
 
 // --- Per-bus filter control ---
@@ -752,6 +773,36 @@ void Engine::setBusFilterGain(int busId, int slot, float gainDB)
     bus->filterParams[slot].version.fetch_add(1, std::memory_order_release);
 }
 
+bool Engine::getBusFilterEnabled(int busId, int slot) const {
+    auto* bus = findBus(busId);
+    if (!bus || slot < 0 || slot >= Bus::MAX_FILTERS) return false;
+    return bus->filterParams[slot].enabled.load(std::memory_order_relaxed);
+}
+
+BiquadFilter::Type Engine::getBusFilterType(int busId, int slot) const {
+    auto* bus = findBus(busId);
+    if (!bus || slot < 0 || slot >= Bus::MAX_FILTERS) return BiquadFilter::Type::Lowpass;
+    return static_cast<BiquadFilter::Type>(bus->filterParams[slot].type.load(std::memory_order_relaxed));
+}
+
+float Engine::getBusFilterFrequency(int busId, int slot) const {
+    auto* bus = findBus(busId);
+    if (!bus || slot < 0 || slot >= Bus::MAX_FILTERS) return 1000.0f;
+    return bus->filterParams[slot].frequency.load(std::memory_order_relaxed);
+}
+
+float Engine::getBusFilterQ(int busId, int slot) const {
+    auto* bus = findBus(busId);
+    if (!bus || slot < 0 || slot >= Bus::MAX_FILTERS) return 1.0f;
+    return bus->filterParams[slot].Q.load(std::memory_order_relaxed);
+}
+
+float Engine::getBusFilterGain(int busId, int slot) const {
+    auto* bus = findBus(busId);
+    if (!bus || slot < 0 || slot >= Bus::MAX_FILTERS) return 0.0f;
+    return bus->filterParams[slot].gainDB.load(std::memory_order_relaxed);
+}
+
 // --- Per-bus delay control ---
 
 void Engine::setBusDelayEnabled(int busId, bool enabled)
@@ -784,6 +835,26 @@ void Engine::setBusDelayMix(int busId, float mix)
     if (!bus) return;
     bus->delayParams.mix.store(std::clamp(mix, 0.0f, 1.0f), std::memory_order_relaxed);
     bus->delayParams.version.fetch_add(1, std::memory_order_release);
+}
+
+bool Engine::getBusDelayEnabled(int busId) const {
+    if (auto* bus = findBus(busId)) return bus->delayParams.enabled.load(std::memory_order_relaxed);
+    return false;
+}
+
+float Engine::getBusDelayTime(int busId) const {
+    if (auto* bus = findBus(busId)) return bus->delayParams.time.load(std::memory_order_relaxed);
+    return 0.3f;
+}
+
+float Engine::getBusDelayFeedback(int busId) const {
+    if (auto* bus = findBus(busId)) return bus->delayParams.feedback.load(std::memory_order_relaxed);
+    return 0.3f;
+}
+
+float Engine::getBusDelayMix(int busId) const {
+    if (auto* bus = findBus(busId)) return bus->delayParams.mix.load(std::memory_order_relaxed);
+    return 0.5f;
 }
 
 // --- Per-bus compressor control ---
@@ -826,6 +897,36 @@ void Engine::setBusCompressorRelease(int busId, float ms)
     if (!bus) return;
     bus->compressorParams.releaseMs.store(std::clamp(ms, 1.0f, 1000.0f), std::memory_order_relaxed);
     bus->compressorParams.version.fetch_add(1, std::memory_order_release);
+}
+
+bool Engine::getBusCompressorEnabled(int busId) const {
+    if (auto* bus = findBus(busId)) return bus->compressorParams.enabled.load(std::memory_order_relaxed);
+    return false;
+}
+
+float Engine::getBusCompressorThreshold(int busId) const {
+    if (auto* bus = findBus(busId)) return bus->compressorParams.threshold.load(std::memory_order_relaxed);
+    return 0.7f;
+}
+
+float Engine::getBusCompressorRatio(int busId) const {
+    if (auto* bus = findBus(busId)) return bus->compressorParams.ratio.load(std::memory_order_relaxed);
+    return 4.0f;
+}
+
+float Engine::getBusCompressorAttack(int busId) const {
+    if (auto* bus = findBus(busId)) return bus->compressorParams.attackMs.load(std::memory_order_relaxed);
+    return 1.0f;
+}
+
+float Engine::getBusCompressorRelease(int busId) const {
+    if (auto* bus = findBus(busId)) return bus->compressorParams.releaseMs.load(std::memory_order_relaxed);
+    return 100.0f;
+}
+
+int Engine::getBusCompressorSidechain(int busId) const {
+    if (auto* bus = findBus(busId)) return bus->compressorParams.sidechainBusId.load(std::memory_order_relaxed);
+    return -1;
 }
 
 // --- Per-bus reverb control ---
@@ -994,6 +1095,108 @@ void Engine::setBusEqMasterGain(int busId, float gainDB)
     if (!bus) return;
     bus->eqParams.masterGain.store(std::clamp(gainDB, 0.0f, 11.0f), std::memory_order_relaxed);
     bus->eqParams.version.fetch_add(1, std::memory_order_release);
+}
+
+bool Engine::getBusReverbEnabled(int busId) const {
+    if (auto* bus = findBus(busId)) return bus->reverbParams.enabled.load(std::memory_order_relaxed);
+    return false;
+}
+
+float Engine::getBusReverbRoomSize(int busId) const {
+    if (auto* bus = findBus(busId)) return bus->reverbParams.roomSize.load(std::memory_order_relaxed);
+    return 0.85f;
+}
+
+float Engine::getBusReverbDamping(int busId) const {
+    if (auto* bus = findBus(busId)) return bus->reverbParams.damping.load(std::memory_order_relaxed);
+    return 0.5f;
+}
+
+float Engine::getBusReverbMix(int busId) const {
+    if (auto* bus = findBus(busId)) return bus->reverbParams.mix.load(std::memory_order_relaxed);
+    return 0.3f;
+}
+
+bool Engine::getBusChorusEnabled(int busId) const {
+    if (auto* bus = findBus(busId)) return bus->chorusParams.enabled.load(std::memory_order_relaxed);
+    return false;
+}
+
+float Engine::getBusChorusRate(int busId) const {
+    if (auto* bus = findBus(busId)) return bus->chorusParams.rate.load(std::memory_order_relaxed);
+    return 0.5f;
+}
+
+float Engine::getBusChorusDepth(int busId) const {
+    if (auto* bus = findBus(busId)) return bus->chorusParams.depth.load(std::memory_order_relaxed);
+    return 0.005f;
+}
+
+float Engine::getBusChorusMix(int busId) const {
+    if (auto* bus = findBus(busId)) return bus->chorusParams.mix.load(std::memory_order_relaxed);
+    return 0.5f;
+}
+
+float Engine::getBusChorusFeedback(int busId) const {
+    if (auto* bus = findBus(busId)) return bus->chorusParams.feedback.load(std::memory_order_relaxed);
+    return 0.0f;
+}
+
+float Engine::getBusChorusBaseDelay(int busId) const {
+    if (auto* bus = findBus(busId)) return bus->chorusParams.baseDelay.load(std::memory_order_relaxed);
+    return 0.01f;
+}
+
+bool Engine::getBusDistortionEnabled(int busId) const {
+    if (auto* bus = findBus(busId)) return bus->distortionParams.enabled.load(std::memory_order_relaxed);
+    return false;
+}
+
+DistortionMode Engine::getBusDistortionMode(int busId) const {
+    if (auto* bus = findBus(busId)) return static_cast<DistortionMode>(bus->distortionParams.mode.load(std::memory_order_relaxed));
+    return DistortionMode::SoftClip;
+}
+
+float Engine::getBusDistortionDrive(int busId) const {
+    if (auto* bus = findBus(busId)) return bus->distortionParams.drive.load(std::memory_order_relaxed);
+    return 1.0f;
+}
+
+float Engine::getBusDistortionMix(int busId) const {
+    if (auto* bus = findBus(busId)) return bus->distortionParams.mix.load(std::memory_order_relaxed);
+    return 1.0f;
+}
+
+float Engine::getBusDistortionOutputGain(int busId) const {
+    if (auto* bus = findBus(busId)) return bus->distortionParams.outputGain.load(std::memory_order_relaxed);
+    return 1.0f;
+}
+
+float Engine::getBusDistortionCrushBits(int busId) const {
+    if (auto* bus = findBus(busId)) return bus->distortionParams.crushBits.load(std::memory_order_relaxed);
+    return 16.0f;
+}
+
+float Engine::getBusDistortionCrushRate(int busId) const {
+    if (auto* bus = findBus(busId)) return bus->distortionParams.crushRate.load(std::memory_order_relaxed);
+    return 1.0f;
+}
+
+bool Engine::getBusEqEnabled(int busId) const {
+    if (auto* bus = findBus(busId)) return bus->eqParams.enabled.load(std::memory_order_relaxed);
+    return false;
+}
+
+float Engine::getBusEqBandGain(int busId, int band) const {
+    if (auto* bus = findBus(busId)) {
+        if (band >= 0 && band < Equalizer::NUM_BANDS) return bus->eqParams.bandGains[band].load(std::memory_order_relaxed);
+    }
+    return 0.0f;
+}
+
+float Engine::getBusEqMasterGain(int busId) const {
+    if (auto* bus = findBus(busId)) return bus->eqParams.masterGain.load(std::memory_order_relaxed);
+    return 0.0f;
 }
 
 // --- Per-bus compressor sidechain ---

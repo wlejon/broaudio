@@ -2,6 +2,7 @@
 #include "broaudio/synth/voice_allocator.h"
 
 #include <algorithm>
+#include <stdexcept>
 
 namespace broaudio {
 
@@ -113,21 +114,50 @@ int Sequence::addAutomationLane(AutomationLane::ApplyFn applyFn)
     return static_cast<int>(automationLanes_.size()) - 1;
 }
 
-void Sequence::removeAutomationLane(int index)
+void Sequence::removeAutomationLane(size_t index)
 {
-    if (index >= 0 && index < static_cast<int>(automationLanes_.size())) {
+    if (index < automationLanes_.size()) {
         automationLanes_.erase(automationLanes_.begin() + index);
     }
 }
 
+void Sequence::removeAutomationLane(int index)
+{
+    if (index >= 0) {
+        removeAutomationLane(static_cast<size_t>(index));
+    }
+}
+
+AutomationLane& Sequence::automationLane(size_t index)
+{
+    if (index >= automationLanes_.size()) {
+        throw std::out_of_range("Sequence::automationLane: index out of range");
+    }
+    return automationLanes_[index];
+}
+
 AutomationLane& Sequence::automationLane(int index)
 {
+    if (index < 0) {
+        throw std::out_of_range("Sequence::automationLane: negative index");
+    }
+    return automationLane(static_cast<size_t>(index));
+}
+
+const AutomationLane& Sequence::automationLane(size_t index) const
+{
+    if (index >= automationLanes_.size()) {
+        throw std::out_of_range("Sequence::automationLane: index out of range");
+    }
     return automationLanes_[index];
 }
 
 const AutomationLane& Sequence::automationLane(int index) const
 {
-    return automationLanes_[index];
+    if (index < 0) {
+        throw std::out_of_range("Sequence::automationLane: negative index");
+    }
+    return automationLane(static_cast<size_t>(index));
 }
 
 void Sequence::clearAutomationLanes()

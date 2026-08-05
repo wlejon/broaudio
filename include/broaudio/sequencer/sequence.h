@@ -54,8 +54,11 @@ public:
 
     // Automation lanes
     int addAutomationLane(AutomationLane::ApplyFn applyFn);
+    void removeAutomationLane(size_t index);
     void removeAutomationLane(int index);
+    AutomationLane& automationLane(size_t index);
     AutomationLane& automationLane(int index);
+    const AutomationLane& automationLane(size_t index) const;
     const AutomationLane& automationLane(int index) const;
     int automationLaneCount() const { return static_cast<int>(automationLanes_.size()); }
     void clearAutomationLanes();

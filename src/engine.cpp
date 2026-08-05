@@ -1766,9 +1766,9 @@ void Engine::stopRecording()
 // Spectrum analysis
 // ---------------------------------------------------------------------------
 
-int Engine::getSpectrum(float* outMagnitudes, int numBins) const
+std::vector<float> Engine::getSpectrum(int numBins) const
 {
-    if (numBins <= 0 || numBins > 8192) return 0;
+    if (numBins <= 0 || numBins > 8192) return {};
 
     // numBins is the count of magnitude bins to fill, all spanning
     // [0, Nyquist] — i.e. the Web Audio convention where bin k represents
@@ -1794,14 +1794,15 @@ int Engine::getSpectrum(float* outMagnitudes, int numBins) const
 
     int outBins = n / 2;
     if (outBins > numBins) outBins = numBins;
+    std::vector<float> result(numBins, 0.0f);
     float invN = 1.0f / static_cast<float>(n);
     for (int i = 0; i < outBins; i++) {
         float re = real[i] * invN;
         float im = imag[i] * invN;
-        outMagnitudes[i] = std::sqrt(re * re + im * im) * 2.0f;
+        result[i] = std::sqrt(re * re + im * im) * 2.0f;
     }
 
-    return outBins;
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -1881,12 +1882,12 @@ int Engine::getClipChannels(int clipId) const
     return 0;
 }
 
-void Engine::getClipWaveform(int clipId, float* outMinMax, int numBins) const
+std::vector<float> Engine::getClipWaveform(int clipId, int numBins) const
 {
+    std::vector<float> outMinMax(numBins * 2, 0.0f);
     auto* clip = findClip(clipId);
-    if (!clip || clip->samples.empty()) {
-        for (int i = 0; i < numBins * 2; i++) outMinMax[i] = 0.0f;
-        return;
+    if (!clip || clip->samples.empty() || numBins <= 0) {
+        return outMinMax;
     }
 
     int totalFrames = clip->numFrames();
@@ -1912,6 +1913,7 @@ void Engine::getClipWaveform(int clipId, float* outMinMax, int numBins) const
         outMinMax[b * 2] = minVal;
         outMinMax[b * 2 + 1] = maxVal;
     }
+    return outMinMax;
 }
 
 // ---------------------------------------------------------------------------

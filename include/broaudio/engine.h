@@ -254,9 +254,9 @@ public:
     const AnalysisBuffer& micBuffer() const { return micBuffer_; }
 
     // Get spectrum magnitudes from the output analysis buffer.
-    // Writes `numBins` magnitude values (linear scale) into `outMagnitudes`.
-    // numBins should be a power of 2 (max 8192). Returns actual bins written.
-    int getSpectrum(float* outMagnitudes, int numBins) const;
+    // Returns `numBins` magnitude values (linear scale).
+    // numBins should be a power of 2 (max 8192).
+    std::vector<float> getSpectrum(int numBins) const;
 
     // --- Microphone ---
 
@@ -336,7 +336,7 @@ public:
     void deleteClip(int clipId);
     int getClipSampleCount(int clipId) const;   // returns frame count
     int getClipChannels(int clipId) const;
-    void getClipWaveform(int clipId, float* outMinMax, int numBins) const;
+    std::vector<float> getClipWaveform(int clipId, int numBins) const;
 
     // --- Clip Playback ---
 

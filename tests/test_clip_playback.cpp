@@ -87,14 +87,14 @@ TEST(get_clip_waveform_min_max_bounds) {
     int id = e.createClip(sine.data(), (int)sine.size(), 1);
 
     constexpr int BINS = 32;
-    float minmax[BINS * 2];
-    e.getClipWaveform(id, minmax, BINS);
+    auto wf = e.getClipWaveform(id, BINS);
+    ASSERT_EQ(wf.size(), static_cast<size_t>(BINS * 2));
 
     // min should be <= 0 and max should be >= 0 for a full sine
     bool anyNonzero = false;
     for (int i = 0; i < BINS; i++) {
-        float lo = minmax[i * 2];
-        float hi = minmax[i * 2 + 1];
+        float lo = wf[i * 2];
+        float hi = wf[i * 2 + 1];
         ASSERT_TRUE(lo <= hi);
         ASSERT_TRUE(lo >= -1.01f);
         ASSERT_TRUE(hi <= 1.01f);
@@ -110,13 +110,13 @@ TEST(get_clip_waveform_stereo_averages_channels) {
     int id = e.createClip(sine.data(), (int)sine.size(), 2);
 
     constexpr int BINS = 16;
-    float minmax[BINS * 2];
-    e.getClipWaveform(id, minmax, BINS);
+    auto wf = e.getClipWaveform(id, BINS);
+    ASSERT_EQ(wf.size(), static_cast<size_t>(BINS * 2));
 
     // Stereo channels are inverted, so the average should be near zero
     for (int i = 0; i < BINS; i++) {
-        ASSERT_NEAR(minmax[i * 2], 0.0f, 0.1f);
-        ASSERT_NEAR(minmax[i * 2 + 1], 0.0f, 0.1f);
+        ASSERT_NEAR(wf[i * 2], 0.0f, 0.1f);
+        ASSERT_NEAR(wf[i * 2 + 1], 0.0f, 0.1f);
     }
     PASS();
 }
@@ -124,11 +124,10 @@ TEST(get_clip_waveform_stereo_averages_channels) {
 TEST(get_clip_waveform_invalid_id_zeros_buffer) {
     Engine e; e.initHeadless();
     constexpr int BINS = 8;
-    float minmax[BINS * 2];
-    for (int i = 0; i < BINS * 2; i++) minmax[i] = 99.0f;
-    e.getClipWaveform(9999, minmax, BINS);
+    auto wf = e.getClipWaveform(9999, BINS);
+    ASSERT_EQ(wf.size(), static_cast<size_t>(BINS * 2));
     for (int i = 0; i < BINS * 2; i++)
-        ASSERT_NEAR(minmax[i], 0.0f, 1e-6f);
+        ASSERT_NEAR(wf[i], 0.0f, 1e-6f);
     PASS();
 }
 

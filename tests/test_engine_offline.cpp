@@ -183,8 +183,8 @@ TEST(get_spectrum_returns_bins) {
     e.renderBlock(8192);
 
     constexpr int BINS = 256;
-    float mags[BINS] = {};
-    int n = e.getSpectrum(mags, BINS);
+    std::vector<float> mags = e.getSpectrum(BINS);
+    int n = static_cast<int>(mags.size());
     ASSERT_TRUE(n > 0);
     ASSERT_TRUE(n <= BINS);
 
@@ -206,10 +206,10 @@ TEST(get_spectrum_returns_bins) {
 
 TEST(get_spectrum_rejects_bad_bin_counts) {
     Engine e; e.initHeadless();
-    float mags[16] = {};
-    ASSERT_EQ(e.getSpectrum(mags, 0), 0);
-    ASSERT_EQ(e.getSpectrum(mags, -1), 0);
-    ASSERT_EQ(e.getSpectrum(mags, 100000), 0);
+    // Out-of-range bin counts yield no bins at all (empty vector).
+    ASSERT_TRUE(e.getSpectrum(0).empty());
+    ASSERT_TRUE(e.getSpectrum(-1).empty());
+    ASSERT_TRUE(e.getSpectrum(100000).empty());
     PASS();
 }
 

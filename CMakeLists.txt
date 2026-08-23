@@ -82,6 +82,7 @@ add_library(broaudio STATIC
     src/dsp/biquad.cpp
     src/dsp/chorus.cpp
     src/dsp/compressor.cpp
+    src/dsp/convolution_reverb.cpp
     src/dsp/delay.cpp
     src/dsp/distortion.cpp
     src/dsp/equalizer.cpp

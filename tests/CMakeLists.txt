@@ -14,6 +14,7 @@ set(BROAUDIO_TESTS
     test_limiter
     test_delay
     test_reverb
+    test_convolution_reverb
     test_chorus
     test_distortion
     test_ring_buffer

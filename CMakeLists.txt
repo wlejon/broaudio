@@ -144,8 +144,8 @@ else()
     endif()
 endif()
 
+target_sources(broaudio PRIVATE src/midi/midi_input.cpp)
 if(BROAUDIO_MIDI)
-    target_sources(broaudio PRIVATE src/midi/midi_input.cpp)
     target_compile_definitions(broaudio PUBLIC BROAUDIO_HAS_MIDI=1)
 endif()
 

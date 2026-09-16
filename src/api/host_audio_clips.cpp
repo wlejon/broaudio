@@ -114,6 +114,30 @@ void registerAudioContextClips(ObjectBuilder& b) {
         return ev::undefined();
     });
 
+    b.def("stopPlayback", 1, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && !a.empty()) e->stopPlayback(i32At(a, 0));
+        return ev::undefined();
+    });
+
+    b.def("setPlaybackGain", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 2) e->setPlaybackGain(i32At(a, 0), static_cast<float>(numAt(a, 1)));
+        return ev::undefined();
+    });
+
+    b.def("setPlaybackPan", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 2) e->setPlaybackPan(i32At(a, 0), static_cast<float>(numAt(a, 1)));
+        return ev::undefined();
+    });
+
+    b.def("setPlaybackLoop", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 2) e->setPlaybackLoop(i32At(a, 0), boolAt(a, 1));
+        return ev::undefined();
+    });
+
     b.def("createClipFromFile", 1, [](Value, std::span<const Value> a) -> Value {
         auto* e = getAudioEngine();
         if (!e || a.empty()) return ev::fromDouble(-1);

@@ -727,6 +727,8 @@ static void decorateSequenceProto(ObjectBuilder& b) {
         });
         return ev::fromDouble(laneIdx);
     });
+
+    decorateSequenceAutomation(b);
 }
 
 Value makeSequenceValue(HostVoiceAllocator* va) {

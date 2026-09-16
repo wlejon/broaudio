@@ -153,11 +153,15 @@ void registerAudioContextClips(ObjectBuilder& b) {
             return p.get();
         }
         std::string path = ev::toUtf8(a[0]);
-        int clipId = e->createClipFromFile(path.c_str());
+        // The Ex form hands back the decoder's own message (which codec,
+        // what went wrong); the rejection carries it so the caller can act.
+        std::string err;
+        int clipId = e->createClipFromFileEx(path.c_str(), &err);
         if (clipId >= 0) {
             ev::resolvePromise(p.get(), ev::fromDouble(clipId));
         } else {
-            ev::rejectPromise(p.get(), hostMakeDomError("Error", "createClipFromFileAsync: failed to load file"));
+            std::string msg = err.empty() ? "createClipFromFileAsync: failed to load file" : err;
+            ev::rejectPromise(p.get(), hostMakeDomError("Error", msg));
         }
         return p.get();
     });

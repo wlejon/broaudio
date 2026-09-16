@@ -553,6 +553,20 @@ Value makeMediaStreamValue();
 Value makeMediaStreamAudioSourceNodeValue();
 void registerAudioContextVoice(ObjectBuilder& b);
 void registerAudioContextClips(ObjectBuilder& b);
+// The rest of the AudioContext surface, one file each: short ADSR names,
+// unison, per-voice spatial, bus routing, note scheduling
+// (host_audio_voice_ext.cpp); clip introspection, playback transport,
+// per-instance spatial, streams (host_audio_playback.cpp); chorus feedback,
+// EQ, distortion, effect order, offline processing (host_audio_bus_fx.cpp).
+void registerAudioContextVoiceExt(ObjectBuilder& b);
+void registerAudioContextPlayback(ObjectBuilder& b);
+void registerAudioContextBusFx(ObjectBuilder& b);
+// getModMatrix, wavetables, getSpectrum, renderBlock, presets
+// (host_audio_synth_ext.cpp).
+void registerAudioContextSynthExt(ObjectBuilder& b);
+// Sequence automation lanes/points beyond addAutomationLane
+// (host_audio_sequence_ext.cpp); called from decorateSequenceProto.
+void decorateSequenceAutomation(ObjectBuilder& b);
 
 // Wavetable bank registry helpers
 std::shared_ptr<broaudio::WavetableBank> findWavetable(int id);

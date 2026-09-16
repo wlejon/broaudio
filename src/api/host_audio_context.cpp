@@ -552,8 +552,12 @@ void decorateAudioContextProto(ObjectBuilder& b) {
 
     // 8. Modular AudioContext methods
     registerAudioContextClips(b);
+    registerAudioContextPlayback(b);
     registerAudioContextVoice(b);
+    registerAudioContextVoiceExt(b);
     registerAudioContextBuses(b);
+    registerAudioContextBusFx(b);
+    registerAudioContextSynthExt(b);
 }
 
 void installAudioGlobals() {

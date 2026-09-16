@@ -10,7 +10,27 @@ endif()
 
 # SDL3 — use consumer-provided target if available, otherwise find it
 if(NOT TARGET SDL3::SDL3 AND NOT TARGET SDL3::SDL3-static)
-    find_package(SDL3 REQUIRED)
+    if(NOT DEFINED SDL3_DIR AND NOT DEFINED ENV{SDL3_DIR})
+        foreach(_candidate
+                "${CMAKE_CURRENT_SOURCE_DIR}/../bro/build/third_party/SDL"
+                "${CMAKE_CURRENT_SOURCE_DIR}/third_party/SDL"
+                "${CMAKE_CURRENT_SOURCE_DIR}/../bro/third_party/SDL"
+                "${CMAKE_CURRENT_SOURCE_DIR}/../SDL")
+            if(EXISTS "${_candidate}/SDL3Config.cmake")
+                set(SDL3_DIR "${_candidate}" CACHE PATH "SDL3 directory")
+                break()
+            elseif(EXISTS "${_candidate}/CMakeLists.txt")
+                set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+                set(SDL_STATIC ON CACHE BOOL "" FORCE)
+                set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+                add_subdirectory("${_candidate}" "${CMAKE_BINARY_DIR}/SDL" EXCLUDE_FROM_ALL)
+                break()
+            endif()
+        endforeach()
+    endif()
+    if(NOT TARGET SDL3::SDL3 AND NOT TARGET SDL3::SDL3-static)
+        find_package(SDL3 REQUIRED)
+    endif()
 endif()
 
 # bromath — header-only math library (sibling repo)
@@ -21,6 +41,27 @@ if(NOT TARGET bromath::bromath)
     else()
         message(FATAL_ERROR "bromath not found at ${BROMATH_DIR}")
     endif()
+endif()
+
+# bronze AOT JavaScript compiler & runtime (standalone ../bronze or third_party/bronze submodule)
+if(NOT TARGET bronze_runtime_shared)
+    set(BRONZE_BUILD_SHARED_RUNTIME ON CACHE BOOL "" FORCE)
+    set(BRONZE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(BRONZE_WITH_LLVM ON CACHE BOOL "Build bronze's LLVM codegen backend")
+    if(DEFINED BRONZE_DIR AND EXISTS "${BRONZE_DIR}/CMakeLists.txt")
+        # Explicit BRONZE_DIR supplied
+    elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../bronze/CMakeLists.txt")
+        set(BRONZE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../bronze" CACHE PATH "bronze AOT compiler source tree")
+    elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/bronze/CMakeLists.txt")
+        set(BRONZE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/bronze" CACHE PATH "bronze AOT compiler source tree")
+    endif()
+
+    if(NOT BRONZE_DIR OR NOT EXISTS "${BRONZE_DIR}/CMakeLists.txt")
+        message(FATAL_ERROR
+            "bronze not found. Either provide ../bronze, third_party/bronze, or pass -DBRONZE_DIR=<path>.")
+    endif()
+
+    add_subdirectory("${BRONZE_DIR}" "${CMAKE_BINARY_DIR}/bronze-build" EXCLUDE_FROM_ALL)
 endif()
 
 # opusfile — optional OGG Opus support
@@ -205,3 +246,7 @@ if(BROAUDIO_TESTS AND CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     enable_testing()
     add_subdirectory(tests)
 endif()
+
+add_subdirectory(src/api)
+
+

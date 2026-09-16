@@ -1,0 +1,256 @@
+#include "host_audio_internal.h"
+
+namespace broaudio::api {
+
+HostClass g_pannerNodeClass;
+HostClass g_stereoPannerNodeClass;
+
+void hostPannerDtor(void* p) {
+    delete static_cast<HostPannerNode*>(p);
+}
+
+void hostStereoPannerDtor(void* p) {
+    delete static_cast<HostStereoPannerNode*>(p);
+}
+
+void decoratePannerNodeProto(ObjectBuilder& b) {
+    b.accessor("panningModel",
+               [](Value self_, std::span<const Value>) {
+                   HostPannerNode* p = pannerOf(self_);
+                   if (!p) return ev::undefined();
+                   return ev::fromUtf8(p->panningModel);
+               },
+               [](Value self_, std::span<const Value> a) {
+                   HostPannerNode* p = pannerOf(self_);
+                   if (!p || a.empty() || ev::isObject(a[0]) || ev::isUndefined(a[0])) return ev::undefined();
+                   std::string m = ev::toUtf8(a[0]);
+                   if (m == "equalpower" || m == "HRTF") {
+                       p->panningModel = m;
+                   }
+                   return ev::undefined();
+               });
+
+    b.accessor("distanceModel",
+               [](Value self_, std::span<const Value>) {
+                   HostPannerNode* p = pannerOf(self_);
+                   if (!p) return ev::undefined();
+                   return ev::fromUtf8(p->distanceModel);
+               },
+               [](Value self_, std::span<const Value> a) {
+                   HostPannerNode* p = pannerOf(self_);
+                   if (!p || a.empty() || ev::isObject(a[0]) || ev::isUndefined(a[0])) return ev::undefined();
+                   std::string m = ev::toUtf8(a[0]);
+                   if (m == "inverse" || m == "linear" || m == "exponential") {
+                       p->distanceModel = m;
+                   }
+                   return ev::undefined();
+               });
+
+    b.accessor("refDistance",
+               [](Value self_, std::span<const Value>) {
+                   HostPannerNode* p = pannerOf(self_);
+                   if (!p) return ev::undefined();
+                   return ev::fromDouble(p->refDistance);
+               },
+               [](Value self_, std::span<const Value> a) {
+                   HostPannerNode* p = pannerOf(self_);
+                   if (!p) return ev::undefined();
+                   p->refDistance = static_cast<float>(numAt(a, 0));
+                   return ev::undefined();
+               });
+
+    b.accessor("maxDistance",
+               [](Value self_, std::span<const Value>) {
+                   HostPannerNode* p = pannerOf(self_);
+                   if (!p) return ev::undefined();
+                   return ev::fromDouble(p->maxDistance);
+               },
+               [](Value self_, std::span<const Value> a) {
+                   HostPannerNode* p = pannerOf(self_);
+                   if (!p) return ev::undefined();
+                   p->maxDistance = static_cast<float>(numAt(a, 0));
+                   return ev::undefined();
+               });
+
+    b.accessor("rolloffFactor",
+               [](Value self_, std::span<const Value>) {
+                   HostPannerNode* p = pannerOf(self_);
+                   if (!p) return ev::undefined();
+                   return ev::fromDouble(p->rolloffFactor);
+               },
+               [](Value self_, std::span<const Value> a) {
+                   HostPannerNode* p = pannerOf(self_);
+                   if (!p) return ev::undefined();
+                   p->rolloffFactor = static_cast<float>(numAt(a, 0));
+                   return ev::undefined();
+               });
+
+    b.accessor("coneInnerAngle",
+               [](Value self_, std::span<const Value>) {
+                   HostPannerNode* p = pannerOf(self_);
+                   if (!p) return ev::undefined();
+                   return ev::fromDouble(p->coneInnerAngle);
+               },
+               [](Value self_, std::span<const Value> a) {
+                   HostPannerNode* p = pannerOf(self_);
+                   if (!p) return ev::undefined();
+                   p->coneInnerAngle = static_cast<float>(numAt(a, 0));
+                   return ev::undefined();
+               });
+
+    b.accessor("coneOuterAngle",
+               [](Value self_, std::span<const Value>) {
+                   HostPannerNode* p = pannerOf(self_);
+                   if (!p) return ev::undefined();
+                   return ev::fromDouble(p->coneOuterAngle);
+               },
+               [](Value self_, std::span<const Value> a) {
+                   HostPannerNode* p = pannerOf(self_);
+                   if (!p) return ev::undefined();
+                   p->coneOuterAngle = static_cast<float>(numAt(a, 0));
+                   return ev::undefined();
+               });
+
+    b.accessor("coneOuterGain",
+               [](Value self_, std::span<const Value>) {
+                   HostPannerNode* p = pannerOf(self_);
+                   if (!p) return ev::undefined();
+                   return ev::fromDouble(p->coneOuterGain);
+               },
+               [](Value self_, std::span<const Value> a) {
+                   HostPannerNode* p = pannerOf(self_);
+                   if (!p) return ev::undefined();
+                   p->coneOuterGain = static_cast<float>(numAt(a, 0));
+                   return ev::undefined();
+               });
+
+    b.def("setPosition", 3, [](Value self_, std::span<const Value> a) -> Value {
+        HostPannerNode* p = pannerOf(self_);
+        if (p && a.size() >= 3) {
+            p->posX = static_cast<float>(numAt(a, 0));
+            p->posY = static_cast<float>(numAt(a, 1));
+            p->posZ = static_cast<float>(numAt(a, 2));
+        }
+        return ev::undefined();
+    });
+
+    b.def("setOrientation", 3, [](Value self_, std::span<const Value> a) -> Value {
+        HostPannerNode* p = pannerOf(self_);
+        if (p && a.size() >= 3) {
+            p->orientX = static_cast<float>(numAt(a, 0));
+            p->orientY = static_cast<float>(numAt(a, 1));
+            p->orientZ = static_cast<float>(numAt(a, 2));
+        }
+        return ev::undefined();
+    });
+}
+
+Value makePannerNodeValue() {
+    auto* panner = new HostPannerNode();
+    panner->base.nodeType = AudioNodeType::Panner;
+
+    ObjectBuilder b(g_pannerNodeClass.make(panner, hostPannerDtor));
+    b.set("positionX", makeAudioParamValue(AudioParamTarget::PannerPositionX, -1, 0.0f, -3.4e38f, 3.4e38f, 0.0f));
+    b.set("positionY", makeAudioParamValue(AudioParamTarget::PannerPositionY, -1, 0.0f, -3.4e38f, 3.4e38f, 0.0f));
+    b.set("positionZ", makeAudioParamValue(AudioParamTarget::PannerPositionZ, -1, 0.0f, -3.4e38f, 3.4e38f, 0.0f));
+    b.set("orientationX", makeAudioParamValue(AudioParamTarget::PannerOrientationX, -1, 1.0f, -3.4e38f, 3.4e38f, 1.0f));
+    b.set("orientationY", makeAudioParamValue(AudioParamTarget::PannerOrientationY, -1, 0.0f, -3.4e38f, 3.4e38f, 0.0f));
+    b.set("orientationZ", makeAudioParamValue(AudioParamTarget::PannerOrientationZ, -1, 0.0f, -3.4e38f, 3.4e38f, 0.0f));
+    return b.get();
+}
+
+void decorateStereoPannerNodeProto(ObjectBuilder&) {}
+
+Value makeStereoPannerNodeValue() {
+    auto* panner = new HostStereoPannerNode();
+    panner->base.nodeType = AudioNodeType::StereoPanner;
+
+    ObjectBuilder b(g_stereoPannerNodeClass.make(panner, hostStereoPannerDtor));
+    b.set("pan", makeAudioParamValue(AudioParamTarget::Pan, -1, 0.0f, -1.0f, 1.0f, 0.0f));
+    return b.get();
+}
+
+Value makeDestinationNodeValue() {
+    auto* dest = new HostAudioNode();
+    dest->nodeType = AudioNodeType::Destination;
+
+    ObjectBuilder b(g_audioNodeClass.make(dest, hostAudioNodeDtor));
+    b.accessor("maxChannelCount", [](Value, std::span<const Value>) {
+        return ev::fromDouble(2.0);
+    }, nullptr);
+    return b.get();
+}
+
+Value makeListenerValue() {
+    ObjectBuilder b;
+
+    b.def("setPosition", 3, [](Value, std::span<const Value> a) -> Value {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 3) {
+            e->setListenerPosition(static_cast<float>(numAt(a, 0)),
+                                   static_cast<float>(numAt(a, 1)),
+                                   static_cast<float>(numAt(a, 2)));
+        }
+        return ev::undefined();
+    });
+
+    b.def("setOrientation", 6, [](Value, std::span<const Value> a) -> Value {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 6) {
+            e->setListenerOrientation(static_cast<float>(numAt(a, 0)),
+                                      static_cast<float>(numAt(a, 1)),
+                                      static_cast<float>(numAt(a, 2)),
+                                      static_cast<float>(numAt(a, 3)),
+                                      static_cast<float>(numAt(a, 4)),
+                                      static_cast<float>(numAt(a, 5)));
+        }
+        return ev::undefined();
+    });
+
+    b.def("setVelocity", 3, [](Value, std::span<const Value> a) -> Value {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 3) {
+            e->setListenerVelocity(static_cast<float>(numAt(a, 0)),
+                                   static_cast<float>(numAt(a, 1)),
+                                   static_cast<float>(numAt(a, 2)));
+        }
+        return ev::undefined();
+    });
+
+    b.def("setListenerPosition", 3, [](Value, std::span<const Value> a) -> Value {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 3) {
+            e->setListenerPosition(static_cast<float>(numAt(a, 0)),
+                                   static_cast<float>(numAt(a, 1)),
+                                   static_cast<float>(numAt(a, 2)));
+        }
+        return ev::undefined();
+    });
+
+    b.def("setListenerOrientation", 6, [](Value, std::span<const Value> a) -> Value {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 6) {
+            e->setListenerOrientation(static_cast<float>(numAt(a, 0)),
+                                      static_cast<float>(numAt(a, 1)),
+                                      static_cast<float>(numAt(a, 2)),
+                                      static_cast<float>(numAt(a, 3)),
+                                      static_cast<float>(numAt(a, 4)),
+                                      static_cast<float>(numAt(a, 5)));
+        }
+        return ev::undefined();
+    });
+
+    b.set("positionX", makeAudioParamValue(AudioParamTarget::Generic, -1, 0.0f, -3.4e38f, 3.4e38f, 0.0f));
+    b.set("positionY", makeAudioParamValue(AudioParamTarget::Generic, -1, 0.0f, -3.4e38f, 3.4e38f, 0.0f));
+    b.set("positionZ", makeAudioParamValue(AudioParamTarget::Generic, -1, 0.0f, -3.4e38f, 3.4e38f, 0.0f));
+    b.set("forwardX", makeAudioParamValue(AudioParamTarget::Generic, -1, 0.0f, -1.0f, 1.0f, 0.0f));
+    b.set("forwardY", makeAudioParamValue(AudioParamTarget::Generic, -1, 0.0f, -1.0f, 1.0f, 0.0f));
+    b.set("forwardZ", makeAudioParamValue(AudioParamTarget::Generic, -1, -1.0f, -1.0f, 1.0f, -1.0f));
+    b.set("upX", makeAudioParamValue(AudioParamTarget::Generic, -1, 0.0f, -1.0f, 1.0f, 0.0f));
+    b.set("upY", makeAudioParamValue(AudioParamTarget::Generic, -1, 1.0f, -1.0f, 1.0f, 1.0f));
+    b.set("upZ", makeAudioParamValue(AudioParamTarget::Generic, -1, 0.0f, -1.0f, 1.0f, 0.0f));
+
+    return b.get();
+}
+
+} // namespace broaudio::api

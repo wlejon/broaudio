@@ -240,13 +240,14 @@ if(BROAUDIO_OPUS)
     endif()
 endif()
 
+# Bronze JavaScript API (before tests, which add a test against it)
+add_subdirectory(src/api)
+
 # Tests
 option(BROAUDIO_TESTS "Build broaudio tests" ON)
 if(BROAUDIO_TESTS AND CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     enable_testing()
     add_subdirectory(tests)
 endif()
-
-add_subdirectory(src/api)
 
 

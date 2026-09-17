@@ -10,6 +10,8 @@
 #include "broaudio/dsp/equalizer.h"
 #include "broaudio/dsp/reverb.h"
 #include "broaudio/dsp/smoother.h"
+#include "broaudio/atomic_shared_ptr.h"
+#include "broaudio/dsp/jit/jit_bus_pipeline.h"
 
 #include <atomic>
 #include <cstring>
@@ -25,6 +27,8 @@ struct Bus {
     static constexpr int MAX_FILTERS = 4;
     static constexpr int NUM_EFFECT_SLOTS = static_cast<int>(EffectSlot::Count);
 
+    Bus() = default;
+
     int id = 0;
 
     // Parameters (main thread → audio thread)
@@ -38,6 +42,13 @@ struct Bus {
     std::atomic<int> parentId{-1};   // -1 = master (no parent), 0+ = parent bus id
     std::atomic<int> sendBusId{-1};  // aux send target (-1 = none)
     std::atomic<float> sendAmount{0.0f}; // aux send level (0-1, post-fader)
+
+    // JIT compilation pipeline (lock-free RCU)
+    AtomicSharedPtr<JitBusPipeline> jitPipeline;
+    std::atomic<bool> jitEnabled{true};
+    std::atomic<bool> jitActive{false};
+    JitTopology currentTopology;
+    std::mutex jitMutex;
 
     // Per-bus effect parameters
     FilterParams filterParams[MAX_FILTERS];

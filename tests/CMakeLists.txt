@@ -42,6 +42,7 @@ set(BROAUDIO_TESTS
     test_engine_offline
     test_mic_tap
     test_loopback_capture
+    test_jit_pipeline
 )
 
 foreach(test ${BROAUDIO_TESTS})

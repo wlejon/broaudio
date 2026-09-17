@@ -22,6 +22,14 @@ void setAudioEngine(broaudio::Engine* engine) {
     s_customEngine = engine;
 }
 
+void shutdownAudio() {
+    if (s_defaultEngine) {
+        s_defaultEngine->shutdown();
+        s_defaultEngine.reset();
+    }
+    s_customEngine = nullptr;
+}
+
 void installAudio() {
     installAudioGlobals();
 }

@@ -173,6 +173,14 @@ static void test_graph_script() {
 
             const bus = ctx.createBus();
             if (typeof bus !== "number") throw new Error("createBus returned " + typeof bus);
+            if (typeof ctx.isBusJitEnabled !== "function") throw new Error("missing isBusJitEnabled");
+            if (typeof ctx.setBusJitEnabled !== "function") throw new Error("missing setBusJitEnabled");
+            if (typeof ctx.isBusJitActive !== "function") throw new Error("missing isBusJitActive");
+            if (!ctx.isBusJitEnabled(bus)) throw new Error("bus JIT should be enabled by default");
+            ctx.setBusJitEnabled(bus, false);
+            if (ctx.isBusJitEnabled(bus)) throw new Error("bus JIT should be disabled after setBusJitEnabled(false)");
+            ctx.setBusJitEnabled(bus, true);
+            if (!ctx.isBusJitEnabled(bus)) throw new Error("bus JIT should be enabled after setBusJitEnabled(true)");
             ctx.setBusGain(bus, 0.5);
             ctx.deleteBus(bus);
 
@@ -213,6 +221,7 @@ int main() {
         test_graph_script();
     }
     ev::destroyRealm(realm);
+    broaudio::api::shutdownAudio();
 
     std::cout << "All broaudio API tests passed!" << std::endl;
     return 0;

@@ -24,8 +24,12 @@ broaudio::Engine* getAudioEngine();
 /// Explicitly provide an external broaudio::Engine to back the Web Audio and Mic APIs.
 void setAudioEngine(broaudio::Engine* engine);
 
+/// Shut down and reset the default engine instance if created.
+void shutdownAudio();
+
 } // namespace broaudio::api
 
 // Global namespace aliases for compatibility
 using broaudio::api::installAudio;
 using broaudio::api::installMic;
+using broaudio::api::shutdownAudio;

@@ -169,6 +169,33 @@ void registerAudioContextBusFx(ObjectBuilder& b) {
         std::vector<float> res = e->processEffectsOffline(busId, reinterpret_cast<const float*>(rawData), count);
         return makeFloat32Array(res);
     });
+
+    // ---- JIT compilation ---------------------------------------------------
+    b.def("setBusJitEnabled", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 2) e->setBusJitEnabled(i32At(a, 0), boolAt(a, 1));
+        return ev::undefined();
+    });
+
+    b.def("getBusJitEnabled", 1, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        return ev::fromBool(e && !a.empty() ? e->isBusJitEnabled(i32At(a, 0)) : false);
+    });
+
+    b.def("isBusJitEnabled", 1, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        return ev::fromBool(e && !a.empty() ? e->isBusJitEnabled(i32At(a, 0)) : false);
+    });
+
+    b.def("getBusJitActive", 1, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        return ev::fromBool(e && !a.empty() ? e->isBusJitActive(i32At(a, 0)) : false);
+    });
+
+    b.def("isBusJitActive", 1, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        return ev::fromBool(e && !a.empty() ? e->isBusJitActive(i32At(a, 0)) : false);
+    });
 }
 
 } // namespace broaudio::api

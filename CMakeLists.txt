@@ -151,6 +151,9 @@ add_library(broaudio STATIC
     src/log.cpp
     src/mic_tap.cpp
     src/rcu.cpp
+    src/dsp/jit/jit_bus_builder.cpp
+    src/dsp/jit/jit_bus_pipeline.cpp
+    src/dsp/jit/jit_compiler.cpp
 )
 
 # Loopback / process-audio capture: Windows uses WASAPI, macOS uses CoreAudio
@@ -216,6 +219,21 @@ elseif(TARGET SDL3::SDL3-static)
 endif()
 
 target_link_libraries(broaudio PUBLIC bromath::bromath)
+
+# Brass JIT compiler
+if(NOT DEFINED BRASS_ROOT OR BRASS_ROOT STREQUAL "")
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../brass/include/brass/brass.hpp")
+        set(BRASS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../brass" CACHE PATH "Path to Brass root directory" FORCE)
+    endif()
+endif()
+
+if(TARGET brass)
+    target_link_libraries(broaudio PUBLIC brass)
+    target_compile_definitions(broaudio PUBLIC BROAUDIO_HAS_JIT=1)
+    if(DEFINED BRASS_ROOT AND EXISTS "${BRASS_ROOT}/include")
+        target_include_directories(broaudio PUBLIC "${BRASS_ROOT}/include")
+    endif()
+endif()
 
 # Vendored codec implementations (see broaudio_codecs above). PUBLIC so the
 # decoder symbols reach the final link line of every consumer of broaudio.

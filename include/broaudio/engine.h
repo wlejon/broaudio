@@ -18,6 +18,7 @@
 #include "broaudio/spatial/listener.h"
 #include "broaudio/io/audio_file.h"
 #include "broaudio/io/serialization.h"
+#include "broaudio/dsp/jit/jit_compiler.h"
 
 #include <atomic>
 #include <functional>
@@ -200,6 +201,12 @@ public:
 
     // Per-bus effect chain order
     void setBusEffectOrder(int busId, const EffectSlot* order, int count);
+
+    // Per-bus JIT pipeline control
+    void setBusJitEnabled(int busId, bool enabled);
+    bool isBusJitEnabled(int busId) const;
+    bool isBusJitActive(int busId) const;
+    JitCompiler& jitCompiler() noexcept { return jitCompiler_; }
 
     // Per-bus distortion/waveshaper control
     void setBusDistortionEnabled(int busId, bool enabled);
@@ -635,6 +642,10 @@ private:
     int nextBusId_ = 1;   // 0 is reserved for master
 
     Bus* findBus(int busId) const;
+
+    // JIT compilation service and topology sync
+    JitCompiler jitCompiler_;
+    void syncBusJitTopology(Bus& bus);
 
     // Number of currently-soloed buses. Maintained by setBusSolo/deleteBus
     // under busWriteMutex_; read (relaxed) by the audio thread as the fast

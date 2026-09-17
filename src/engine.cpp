@@ -77,6 +77,8 @@ bool Engine::init()
         master->id = MASTER_BUS_ID;
         master->parentId.store(-1, std::memory_order_relaxed);  // no parent
         master->initAudioState(sampleRate_, MAX_SCRATCH_FRAMES);
+        master->jitPipeline.setDomain(rcu_);
+        syncBusJitTopology(*master);
 
         auto list = std::make_shared<BusList>();
         list->push_back(std::move(master));
@@ -409,6 +411,7 @@ void Engine::shutdown()
     // they hold clip/playback refs and an SDL_AudioStream resampler each.
     stopAllFileStreams();
     stopMicCapture();
+    jitCompiler_.shutdown();
     if (stream_) {
         SDL_DestroyAudioStream(stream_);
         stream_ = nullptr;
@@ -444,6 +447,8 @@ int Engine::createBus()
     bus->id = id;
     bus->parentId.store(MASTER_BUS_ID, std::memory_order_relaxed);
     bus->initAudioState(sampleRate_, MAX_SCRATCH_FRAMES);
+    bus->jitPipeline.setDomain(rcu_);
+    syncBusJitTopology(*bus);
 
     auto newList = std::make_shared<BusList>(*buses_.load());
     newList->push_back(std::move(bus));
@@ -731,6 +736,7 @@ void Engine::releaseBusFilterSlot(int busId, int slot)
     bus->filterParams[slot].enabled.store(false, std::memory_order_relaxed);
     bus->filterParams[slot].version.fetch_add(1, std::memory_order_release);
     bus->filterParams[slot].allocated.store(false, std::memory_order_release);
+    syncBusJitTopology(*bus);
 }
 
 void Engine::setBusFilterEnabled(int busId, int slot, bool enabled)
@@ -739,6 +745,7 @@ void Engine::setBusFilterEnabled(int busId, int slot, bool enabled)
     if (!bus || slot < 0 || slot >= Bus::MAX_FILTERS) return;
     bus->filterParams[slot].enabled.store(enabled, std::memory_order_relaxed);
     bus->filterParams[slot].version.fetch_add(1, std::memory_order_release);
+    syncBusJitTopology(*bus);
 }
 
 void Engine::setBusFilterType(int busId, int slot, BiquadFilter::Type type)
@@ -1021,6 +1028,7 @@ void Engine::setBusDistortionEnabled(int busId, bool enabled)
     if (!bus) return;
     bus->distortionParams.enabled.store(enabled, std::memory_order_relaxed);
     bus->distortionParams.version.fetch_add(1, std::memory_order_release);
+    syncBusJitTopology(*bus);
 }
 
 void Engine::setBusDistortionMode(int busId, DistortionMode mode)
@@ -1029,6 +1037,7 @@ void Engine::setBusDistortionMode(int busId, DistortionMode mode)
     if (!bus) return;
     bus->distortionParams.mode.store(static_cast<int>(mode), std::memory_order_relaxed);
     bus->distortionParams.version.fetch_add(1, std::memory_order_release);
+    syncBusJitTopology(*bus);
 }
 
 void Engine::setBusDistortionDrive(int busId, float drive)
@@ -1069,6 +1078,64 @@ void Engine::setBusDistortionCrushRate(int busId, float rate)
     if (!bus) return;
     bus->distortionParams.crushRate.store(std::clamp(rate, 0.01f, 1.0f), std::memory_order_relaxed);
     bus->distortionParams.version.fetch_add(1, std::memory_order_release);
+}
+
+// --- Per-bus JIT pipeline control ---
+
+void Engine::setBusJitEnabled(int busId, bool enabled)
+{
+    auto* bus = findBus(busId);
+    if (!bus) return;
+    bus->jitEnabled.store(enabled, std::memory_order_relaxed);
+    if (enabled) {
+        syncBusJitTopology(*bus);
+    }
+}
+
+bool Engine::isBusJitEnabled(int busId) const
+{
+    auto* bus = findBus(busId);
+    return bus ? bus->jitEnabled.load(std::memory_order_relaxed) : false;
+}
+
+bool Engine::isBusJitActive(int busId) const
+{
+    auto* bus = findBus(busId);
+    return bus ? bus->jitActive.load(std::memory_order_relaxed) : false;
+}
+
+void Engine::syncBusJitTopology(Bus& bus)
+{
+    if (!bus.jitEnabled.load(std::memory_order_relaxed)) return;
+
+    JitTopology topo;
+    int count = 0;
+    for (int f = 0; f < Bus::MAX_FILTERS; f++) {
+        if (bus.filterParams[f].enabled.load(std::memory_order_relaxed)) {
+            count++;
+        }
+    }
+    topo.filterCount = count;
+    topo.hasDistortion = bus.distortionParams.enabled.load(std::memory_order_relaxed);
+    topo.distortionMode = static_cast<DistortionMode>(bus.distortionParams.mode.load(std::memory_order_relaxed));
+
+    if (topo == bus.currentTopology && bus.jitPipeline.load(std::memory_order_relaxed) != nullptr) {
+        return;
+    }
+
+    bus.currentTopology = topo;
+    int busId = bus.id;
+
+    jitCompiler_.compileAsync(topo, [this, busId](std::shared_ptr<JitBusPipeline> pipeline) {
+        auto currentBuses = buses_.load();
+        for (auto& b : *currentBuses) {
+            if (b->id == busId) {
+                std::lock_guard<std::mutex> lock(b->jitMutex);
+                b->jitPipeline.store(pipeline);
+                break;
+            }
+        }
+    });
 }
 
 // --- Per-bus equalizer control ---
@@ -2791,6 +2858,20 @@ void Engine::updateBusMeters(Bus& bus, int numFrames)
 void Engine::processBusEffects(Bus& bus, int numFrames)
 {
     float* buf = bus.buffer.data();
+
+    // Fast JIT path: if JIT is enabled and pipeline matches the bus topology,
+    // execute the single fused AVX2/FMA kernel across the stereo buffer.
+    if (bus.jitEnabled.load(std::memory_order_relaxed)) {
+        auto pipeline = bus.jitPipeline.load(std::memory_order_acquire);
+        if (pipeline && pipeline->matches(bus)) {
+            pipeline->updateParams(bus, numFrames, sampleRate_);
+            pipeline->process(buf, numFrames);
+            bus.jitActive.store(true, std::memory_order_relaxed);
+            updateBusMeters(bus, numFrames);
+            return;
+        }
+    }
+    bus.jitActive.store(false, std::memory_order_relaxed);
 
     uint32_t ver = bus.effectOrderVersion.load(std::memory_order_acquire);
     if (ver != bus.effectOrderVersionSeen) {

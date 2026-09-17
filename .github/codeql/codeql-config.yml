@@ -16,3 +16,5 @@ queries:
 paths-ignore:
   - broaudio/third_party
   - bromath
+  - bronze
+  - brass

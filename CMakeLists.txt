@@ -220,19 +220,37 @@ endif()
 
 target_link_libraries(broaudio PUBLIC bromath::bromath)
 
-# Brass JIT compiler
-if(NOT DEFINED BRASS_ROOT OR BRASS_ROOT STREQUAL "")
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../brass/include/brass/brass.hpp")
-        set(BRASS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../brass" CACHE PATH "Path to Brass root directory" FORCE)
+# --- Brass JIT acceleration (optional, enabled if Brass is found) ---
+if(NOT TARGET brass)
+    if(NOT BRASS_ROOT)
+        if(DEFINED ENV{BRASS_ROOT} AND NOT "$ENV{BRASS_ROOT}" STREQUAL "")
+            set(BRASS_ROOT "$ENV{BRASS_ROOT}")
+        elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../brass/include/brass/codegen/kernel_jit.hpp")
+            get_filename_component(BRASS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../brass" ABSOLUTE)
+        endif()
+    endif()
+
+    if(BRASS_ROOT)
+        file(TO_CMAKE_PATH "${BRASS_ROOT}" BRASS_ROOT)
+    endif()
+
+    if(BRASS_ROOT AND EXISTS "${BRASS_ROOT}/CMakeLists.txt")
+        add_subdirectory("${BRASS_ROOT}" "${CMAKE_BINARY_DIR}/brass-build" EXCLUDE_FROM_ALL)
     endif()
 endif()
 
-if(TARGET brass)
+if(TARGET brass AND NOT BRASS_HOST_BACKEND)
+    message(STATUS "broaudio: brass has no code generator for this target; JIT off")
+elseif(TARGET brass)
+    message(STATUS "broaudio: found Brass target")
     target_link_libraries(broaudio PUBLIC brass)
     target_compile_definitions(broaudio PUBLIC BROAUDIO_HAS_JIT=1)
+    set(BROAUDIO_HAS_JIT 1)
     if(DEFINED BRASS_ROOT AND EXISTS "${BRASS_ROOT}/include")
         target_include_directories(broaudio PUBLIC "${BRASS_ROOT}/include")
     endif()
+else()
+    message(STATUS "broaudio: Brass not found; JIT disabled")
 endif()
 
 # Vendored codec implementations (see broaudio_codecs above). PUBLIC so the

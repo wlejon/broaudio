@@ -42,7 +42,6 @@ set(BROAUDIO_TESTS
     test_engine_offline
     test_mic_tap
     test_loopback_capture
-    test_jit_pipeline
 )
 
 foreach(test ${BROAUDIO_TESTS})
@@ -51,6 +50,14 @@ foreach(test ${BROAUDIO_TESTS})
     target_include_directories(${test} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     add_test(NAME ${test} COMMAND ${test})
 endforeach()
+
+# JIT audio bus pipeline test (requires Brass JIT backend)
+if(BROAUDIO_HAS_JIT)
+    add_executable(test_jit_pipeline test_jit_pipeline.cpp)
+    target_link_libraries(test_jit_pipeline PRIVATE broaudio)
+    target_include_directories(test_jit_pipeline PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME test_jit_pipeline COMMAND test_jit_pipeline)
+endif()
 
 # Bronze JavaScript binding (broaudio_api): Web Audio mount points, an
 # AudioContext node graph, createBus, TypeErrors on bad arguments. Never

@@ -219,7 +219,8 @@ void Engine::renderInternal(int numFrames)
                 auto sr = computeSpatial(listener_, pb->spatial);
                 targetGain *= sr.gain;
                 targetPan = 0.0f; // center — head model does L/R
-                headParams = computeHeadParams(sr, headModel_, sampleRate_);
+                headParams = computeHeadParams(sr, headModel_, sampleRate_,
+                                               pb->spatial.occlusion.load(std::memory_order_relaxed));
                 spatialFilterActive = true;
                 // Doppler composes into the resample rate.
                 float dop = computeDopplerRatio(
@@ -1712,6 +1713,7 @@ static void setSpatialRefDistance(SpatialSource& s, float d) { s.refDistance.sto
 static void setSpatialMaxDistance(SpatialSource& s, float d) { s.maxDistance.store(std::max(0.001f, d), std::memory_order_relaxed); }
 static void setSpatialRolloff(SpatialSource& s, float r) { s.rolloff.store(std::max(0.0f, r), std::memory_order_relaxed); }
 static void setSpatialDistanceModel(SpatialSource& s, DistanceModel m) { s.distanceModel.store(static_cast<int>(m), std::memory_order_relaxed); }
+static void setSpatialOcclusion(SpatialSource& s, float occ) { s.occlusion.store(std::clamp(occ, 0.0f, 1.0f), std::memory_order_relaxed); }
 
 void Engine::setVoiceSpatialEnabled(int id, bool enabled) { if (auto* v = findVoice(id)) setSpatialEnabled(v->spatial, enabled); }
 void Engine::setVoiceSpatialPosition(int id, float x, float y, float z) { if (auto* v = findVoice(id)) setSpatialPosition(v->spatial, x, y, z); }
@@ -1720,6 +1722,7 @@ void Engine::setVoiceSpatialRefDistance(int id, float d) { if (auto* v = findVoi
 void Engine::setVoiceSpatialMaxDistance(int id, float d) { if (auto* v = findVoice(id)) setSpatialMaxDistance(v->spatial, d); }
 void Engine::setVoiceSpatialRolloff(int id, float r) { if (auto* v = findVoice(id)) setSpatialRolloff(v->spatial, r); }
 void Engine::setVoiceSpatialDistanceModel(int id, DistanceModel m) { if (auto* v = findVoice(id)) setSpatialDistanceModel(v->spatial, m); }
+void Engine::setVoiceSpatialOcclusion(int id, float occ) { if (auto* v = findVoice(id)) setSpatialOcclusion(v->spatial, occ); }
 
 void Engine::setPlaybackSpatialEnabled(int id, bool enabled) { if (auto* pb = findPlayback(id)) setSpatialEnabled(pb->spatial, enabled); }
 void Engine::setPlaybackSpatialPosition(int id, float x, float y, float z) { if (auto* pb = findPlayback(id)) setSpatialPosition(pb->spatial, x, y, z); }
@@ -1728,6 +1731,7 @@ void Engine::setPlaybackSpatialRefDistance(int id, float d) { if (auto* pb = fin
 void Engine::setPlaybackSpatialMaxDistance(int id, float d) { if (auto* pb = findPlayback(id)) setSpatialMaxDistance(pb->spatial, d); }
 void Engine::setPlaybackSpatialRolloff(int id, float r) { if (auto* pb = findPlayback(id)) setSpatialRolloff(pb->spatial, r); }
 void Engine::setPlaybackSpatialDistanceModel(int id, DistanceModel m) { if (auto* pb = findPlayback(id)) setSpatialDistanceModel(pb->spatial, m); }
+void Engine::setPlaybackSpatialOcclusion(int id, float occ) { if (auto* pb = findPlayback(id)) setSpatialOcclusion(pb->spatial, occ); }
 
 // ---------------------------------------------------------------------------
 // Microphone capture
@@ -3039,7 +3043,8 @@ void Engine::processOutputChunk(SDL_AudioStream* stream, int numFrames)
                 auto sr = computeSpatial(engine->listener_, pb->spatial);
                 targetGain2 *= sr.gain;
                 targetPan2 = 0.0f; // center — head model does L/R
-                headParams2 = computeHeadParams(sr, engine->headModel_, engine->sampleRate_);
+                headParams2 = computeHeadParams(sr, engine->headModel_, engine->sampleRate_,
+                                                pb->spatial.occlusion.load(std::memory_order_relaxed));
                 spatialFilterActive2 = true;
                 // Doppler composes into the resample rate.
                 float dop = computeDopplerRatio(
@@ -3439,7 +3444,8 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
             auto sr = computeSpatial(listener_, voice.spatial);
             voiceSpatialGain = sr.gain;
             voiceSpatialPan = sr.pan;
-            voiceHeadParams = computeHeadParams(sr, headModel_, sampleRate_);
+            voiceHeadParams = computeHeadParams(sr, headModel_, sampleRate_,
+                                                voice.spatial.occlusion.load(std::memory_order_relaxed));
             // Doppler folds into pitch: 12·log2(ratio) semitones on top of
             // the voice's pitch bend (block-rate, like the rest of spatial).
             float dop = computeDopplerRatio(

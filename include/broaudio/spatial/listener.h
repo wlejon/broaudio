@@ -20,6 +20,7 @@ struct SpatialSource {
     std::atomic<float> maxDistance{100.0f};
     std::atomic<float> rolloff{1.0f};
     std::atomic<int> distanceModel{static_cast<int>(DistanceModel::Inverse)};
+    std::atomic<float> occlusion{0.0f};
 
     // Last Doppler pitch ratio the mixer applied to this source (1.0 until
     // the source has been mixed spatialized with a non-zero doppler factor).
@@ -240,60 +241,73 @@ inline float onePoleCoeff(float cutoffHz, int sampleRate) {
 }
 
 // Compute per-ear head shadow parameters from a spatial result and head model config.
-inline HeadParams computeHeadParams(const SpatialResult& sr, const HeadModel& hm, int sampleRate) {
+inline HeadParams computeHeadParams(const SpatialResult& sr, const HeadModel& hm, int sampleRate, float occlusion = 0.0f) {
     HeadParams hp;
 
-    if (!hm.enabled.load(std::memory_order_relaxed)) return hp;
+    if (hm.enabled.load(std::memory_order_relaxed)) {
+        float absPan = std::abs(sr.pan);
+        float ildStr = hm.ildStrength.load(std::memory_order_relaxed);
+        float behindAtt = hm.behindAttenuation.load(std::memory_order_relaxed);
+        float nearFront = hm.nearCutoffFront.load(std::memory_order_relaxed);
+        float nearBehind = hm.nearCutoffBehind.load(std::memory_order_relaxed);
+        float farRatio = hm.farCutoffRatio.load(std::memory_order_relaxed);
+        float elevNear = hm.elevationNear.load(std::memory_order_relaxed);
+        float elevFar = hm.elevationFar.load(std::memory_order_relaxed);
+        float minCut = hm.minCutoff.load(std::memory_order_relaxed);
+        float maxCut = hm.maxCutoff.load(std::memory_order_relaxed);
 
-    float absPan = std::abs(sr.pan);
-    float ildStr = hm.ildStrength.load(std::memory_order_relaxed);
-    float behindAtt = hm.behindAttenuation.load(std::memory_order_relaxed);
-    float nearFront = hm.nearCutoffFront.load(std::memory_order_relaxed);
-    float nearBehind = hm.nearCutoffBehind.load(std::memory_order_relaxed);
-    float farRatio = hm.farCutoffRatio.load(std::memory_order_relaxed);
-    float elevNear = hm.elevationNear.load(std::memory_order_relaxed);
-    float elevFar = hm.elevationFar.load(std::memory_order_relaxed);
-    float minCut = hm.minCutoff.load(std::memory_order_relaxed);
-    float maxCut = hm.maxCutoff.load(std::memory_order_relaxed);
+        // ── ILD: interaural level difference ──
+        float shadow = 1.0f - absPan * ildStr;
+        if (sr.pan > 0.0f) {
+            hp.gainL = shadow;
+            hp.gainR = 1.0f;
+        } else {
+            hp.gainL = 1.0f;
+            hp.gainR = shadow;
+        }
 
-    // ── ILD: interaural level difference ──
-    float shadow = 1.0f - absPan * ildStr;
-    if (sr.pan > 0.0f) {
-        hp.gainL = shadow;
-        hp.gainR = 1.0f;
-    } else {
-        hp.gainL = 1.0f;
-        hp.gainR = shadow;
+        // Behind penalty
+        if (sr.frontBack < 0.0f) {
+            float behindGain = 1.0f + sr.frontBack * behindAtt;
+            hp.gainL *= behindGain;
+            hp.gainR *= behindGain;
+        }
+
+        // ── ITF: head shadow lowpass ──
+        float nearRange = (nearFront - nearBehind) * 0.5f;
+        float nearMid = (nearFront + nearBehind) * 0.5f;
+        float nearCutoff = nearMid + sr.frontBack * nearRange;
+        float farCutoff = nearCutoff * (1.0f - absPan * farRatio);
+
+        nearCutoff += sr.elevation * elevNear;
+        farCutoff  += sr.elevation * elevFar;
+
+        nearCutoff = std::max(minCut, std::min(maxCut, nearCutoff));
+        farCutoff  = std::max(minCut, std::min(maxCut, farCutoff));
+
+        float nearCoeff = onePoleCoeff(nearCutoff, sampleRate);
+        float farCoeff  = onePoleCoeff(farCutoff, sampleRate);
+
+        if (sr.pan > 0.0f) {
+            hp.coeffL = farCoeff;
+            hp.coeffR = nearCoeff;
+        } else {
+            hp.coeffL = nearCoeff;
+            hp.coeffR = farCoeff;
+        }
     }
 
-    // Behind penalty
-    if (sr.frontBack < 0.0f) {
-        float behindGain = 1.0f + sr.frontBack * behindAtt;
-        hp.gainL *= behindGain;
-        hp.gainR *= behindGain;
-    }
-
-    // ── ITF: head shadow lowpass ──
-    float nearRange = (nearFront - nearBehind) * 0.5f;
-    float nearMid = (nearFront + nearBehind) * 0.5f;
-    float nearCutoff = nearMid + sr.frontBack * nearRange;
-    float farCutoff = nearCutoff * (1.0f - absPan * farRatio);
-
-    nearCutoff += sr.elevation * elevNear;
-    farCutoff  += sr.elevation * elevFar;
-
-    nearCutoff = std::max(minCut, std::min(maxCut, nearCutoff));
-    farCutoff  = std::max(minCut, std::min(maxCut, farCutoff));
-
-    float nearCoeff = onePoleCoeff(nearCutoff, sampleRate);
-    float farCoeff  = onePoleCoeff(farCutoff, sampleRate);
-
-    if (sr.pan > 0.0f) {
-        hp.coeffL = farCoeff;
-        hp.coeffR = nearCoeff;
-    } else {
-        hp.coeffL = nearCoeff;
-        hp.coeffR = farCoeff;
+    if (occlusion > 0.0f) {
+        float occ = std::clamp(occlusion, 0.0f, 1.0f);
+        // Low-pass filter muffling: cutoff sweeps down to 400 Hz at full occlusion
+        float occCutoff = 20000.0f * (1.0f - occ) + 400.0f * occ;
+        float occCoeff = onePoleCoeff(occCutoff, sampleRate);
+        hp.coeffL = std::max(hp.coeffL, occCoeff);
+        hp.coeffR = std::max(hp.coeffR, occCoeff);
+        // Transmission loss attenuation (up to ~9 dB drop)
+        float occGain = 1.0f - occ * 0.65f;
+        hp.gainL *= occGain;
+        hp.gainR *= occGain;
     }
 
     return hp;

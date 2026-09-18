@@ -102,6 +102,12 @@ void registerAudioContextVoiceExt(ObjectBuilder& b) {
         return ev::undefined();
     });
 
+    b.def("setVoiceSpatialOcclusion", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 2) e->setVoiceSpatialOcclusion(i32At(a, 0), static_cast<float>(numAt(a, 1)));
+        return ev::undefined();
+    });
+
     b.def("getVoiceDopplerRatio", 1, [](Value, std::span<const Value> a) {
         auto* e = getAudioEngine();
         return ev::fromDouble(e && !a.empty() ? e->getVoiceDopplerRatio(i32At(a, 0)) : 1.0);

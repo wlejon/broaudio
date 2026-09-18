@@ -165,4 +165,19 @@ TEST(vec3_length) {
     PASS();
 }
 
+TEST(occlusion_attenuates_gain_and_lowpasses) {
+    Listener l; initDefaultListener(l);
+    SpatialSource s; initSource(s, 0.0f, 0.0f, -5.0f);
+    auto sr = computeSpatial(l, s);
+    HeadModel hm;
+    int srHz = 48000;
+    auto hpClean = computeHeadParams(sr, hm, srHz, 0.0f);
+    auto hpOccluded = computeHeadParams(sr, hm, srHz, 1.0f);
+    ASSERT_LT(hpOccluded.gainL, hpClean.gainL);
+    ASSERT_LT(hpOccluded.gainR, hpClean.gainR);
+    ASSERT_GT(hpOccluded.coeffL, hpClean.coeffL); // higher coeff = lower cutoff frequency
+    ASSERT_GT(hpOccluded.coeffR, hpClean.coeffR);
+    PASS();
+}
+
 int main() { return runAllTests(); }

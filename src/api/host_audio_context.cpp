@@ -464,6 +464,24 @@ void decorateAudioContextProto(ObjectBuilder& b) {
         return ev::undefined();
     });
 
+    b.def("setReverbRoomSize", 1, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && !a.empty()) e->setBusReverbRoomSize(0, static_cast<float>(numAt(a, 0)));
+        return ev::undefined();
+    });
+
+    b.def("setReverbDamping", 1, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && !a.empty()) e->setBusReverbDamping(0, static_cast<float>(numAt(a, 0)));
+        return ev::undefined();
+    });
+
+    b.def("setReverbMix", 1, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && !a.empty()) e->setBusReverbMix(0, static_cast<float>(numAt(a, 0)));
+        return ev::undefined();
+    });
+
     b.def("setLimiterEnabled", 1, [](Value, std::span<const Value> a) {
         auto* e = getAudioEngine();
         if (e && !a.empty()) e->setLimiterEnabled(boolAt(a, 0));

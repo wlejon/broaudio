@@ -87,6 +87,36 @@ void registerAudioContextPlayback(ObjectBuilder& b) {
         return ev::undefined();
     });
 
+    b.def("setPlaybackSpatialRefDistance", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 2) e->setPlaybackSpatialRefDistance(i32At(a, 0), static_cast<float>(numAt(a, 1)));
+        return ev::undefined();
+    });
+
+    b.def("setPlaybackSpatialMaxDistance", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 2) e->setPlaybackSpatialMaxDistance(i32At(a, 0), static_cast<float>(numAt(a, 1)));
+        return ev::undefined();
+    });
+
+    b.def("setPlaybackSpatialRolloff", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 2) e->setPlaybackSpatialRolloff(i32At(a, 0), static_cast<float>(numAt(a, 1)));
+        return ev::undefined();
+    });
+
+    b.def("setPlaybackSpatialDistanceModel", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 2) e->setPlaybackSpatialDistanceModel(i32At(a, 0), parseDistanceModel(ev::toUtf8(a[1])));
+        return ev::undefined();
+    });
+
+    b.def("setPlaybackSpatialOcclusion", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 2) e->setPlaybackSpatialOcclusion(i32At(a, 0), static_cast<float>(numAt(a, 1)));
+        return ev::undefined();
+    });
+
     b.def("getPlaybackDopplerRatio", 1, [](Value, std::span<const Value> a) {
         auto* e = getAudioEngine();
         return ev::fromDouble(e && !a.empty() ? e->getPlaybackDopplerRatio(i32At(a, 0)) : 1.0);

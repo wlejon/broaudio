@@ -516,6 +516,7 @@ public:
     void setVoiceSpatialMaxDistance(int voiceId, float dist);
     void setVoiceSpatialRolloff(int voiceId, float rolloff);
     void setVoiceSpatialDistanceModel(int voiceId, DistanceModel model);
+    void setVoiceSpatialOcclusion(int voiceId, float occlusion);
 
     // --- Spatial sources (clip playback) ---
 
@@ -526,6 +527,7 @@ public:
     void setPlaybackSpatialMaxDistance(int instanceId, float dist);
     void setPlaybackSpatialRolloff(int instanceId, float rolloff);
     void setPlaybackSpatialDistanceModel(int instanceId, DistanceModel model);
+    void setPlaybackSpatialOcclusion(int instanceId, float occlusion);
 
     // --- Audio file I/O ---
 

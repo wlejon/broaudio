@@ -3,6 +3,7 @@
 namespace broaudio::api {
 
 HostClass g_audioNodeClass;
+HostClass g_audioDestinationNodeClass;
 HostClass g_audioParamClass;
 HostClass g_gainNodeClass;
 HostClass g_oscillatorNodeClass;

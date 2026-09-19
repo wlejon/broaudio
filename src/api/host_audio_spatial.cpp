@@ -170,15 +170,20 @@ Value makeStereoPannerNodeValue() {
     return b.get();
 }
 
-Value makeDestinationNodeValue() {
-    auto* dest = new HostAudioNode();
-    dest->nodeType = AudioNodeType::Destination;
-
-    ObjectBuilder b(g_audioNodeClass.make(dest, hostAudioNodeDtor));
+// AudioDestinationNode.prototype: maxChannelCount lives here, not on the
+// instance, so `ctx.destination` is an ordinary AudioDestinationNode whose
+// chain is AudioDestinationNode.prototype -> AudioNode.prototype (connect and
+// disconnect stay the single base methods the class check pins).
+void decorateAudioDestinationNodeProto(ObjectBuilder& b) {
     b.accessor("maxChannelCount", [](Value, std::span<const Value>) {
         return ev::fromDouble(2.0);
     }, nullptr);
-    return b.get();
+}
+
+Value makeDestinationNodeValue() {
+    auto* dest = new HostAudioNode();
+    dest->nodeType = AudioNodeType::Destination;
+    return g_audioDestinationNodeClass.make(dest, hostAudioNodeDtor);
 }
 
 Value makeListenerValue() {

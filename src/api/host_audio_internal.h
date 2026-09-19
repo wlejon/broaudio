@@ -270,6 +270,7 @@ struct HostMediaStreamAudioSourceNode {
 // ---------------------------------------------------------------------------
 
 extern HostClass g_audioNodeClass;
+extern HostClass g_audioDestinationNodeClass;
 extern HostClass g_audioParamClass;
 extern HostClass g_audioContextClass;
 extern HostClass g_audioBufferClass;
@@ -533,6 +534,7 @@ Value makeAudioContextValue();
 // Spatial creators & decorators (host_audio_spatial.cpp)
 void decoratePannerNodeProto(ObjectBuilder& b);
 void decorateStereoPannerNodeProto(ObjectBuilder& b);
+void decorateAudioDestinationNodeProto(ObjectBuilder& b);
 Value makeDestinationNodeValue();
 Value makeListenerValue();
 Value makePannerNodeValue();

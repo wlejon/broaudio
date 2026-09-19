@@ -116,4 +116,25 @@ if(TARGET broaudio_api)
                 ENVIRONMENT "PATH=$<TARGET_FILE_DIR:bronze_runtime_shared>;$<TARGET_FILE_DIR:broaudio_test_api_drift>;$ENV{PATH}")
         endif()
     endif()
+
+    # ctx.destination is a real AudioDestinationNode over AudioNode.prototype.
+    add_executable(broaudio_test_destination test_audio_destination.cpp)
+    target_link_libraries(broaudio_test_destination PRIVATE broaudio_api bronze_runtime_shared)
+    if(WIN32)
+        add_custom_command(TARGET broaudio_test_destination POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:bronze_runtime_shared>
+                $<TARGET_FILE_DIR:broaudio_test_destination>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_LINKER_FILE:bronze_runtime_shared>
+                $<TARGET_FILE_DIR:broaudio_test_destination>
+        )
+    endif()
+    if(BRASS_HOST_BACKEND)
+        add_test(NAME broaudio_test_destination COMMAND broaudio_test_destination)
+        if(WIN32)
+            set_tests_properties(broaudio_test_destination PROPERTIES
+                ENVIRONMENT "PATH=$<TARGET_FILE_DIR:bronze_runtime_shared>;$<TARGET_FILE_DIR:broaudio_test_destination>;$ENV{PATH}")
+        endif()
+    endif()
 endif()

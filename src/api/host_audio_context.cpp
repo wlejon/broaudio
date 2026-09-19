@@ -665,6 +665,11 @@ void installAudioGlobals() {
     g_audioNodeClass.install("AudioNode", 0, nullptr, decorateAudioNodeProto);
     g_audioParamClass.install("AudioParam", 0, nullptr, decorateAudioParamProto);
 
+    // 2b. AudioDestinationNode (`ctx.destination`; not constructible from JS)
+    g_audioDestinationNodeClass.install("AudioDestinationNode", 0, nullptr,
+                                        decorateAudioDestinationNodeProto);
+    g_audioDestinationNodeClass.inherit(g_audioNodeClass);
+
     // 3. GainNode
     g_gainNodeClass.install("GainNode", 0,
         [](Value, std::span<const Value>) { return makeGainNodeValue(); },

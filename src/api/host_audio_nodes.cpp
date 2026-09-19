@@ -281,13 +281,51 @@ Value makeAudioParamValue(AudioParamTarget target, int targetId,
     return g_audioParamClass.make(param, hostAudioParamDtor);
 }
 
+// connect/disconnect live once on AudioNode.prototype (the class check pins
+// that); broaudio has no node graph, so the base method dispatches on the
+// node kind for the few connections that mean something to the engine:
+// oscillator -> gain remembers the GainNode so start() reads gain.value,
+// biquad connect/disconnect enables/disables its filter slot, and the mic
+// source connecting to an analyser points the analyser at the mic ring.
 void decorateAudioNodeProto(ObjectBuilder& b) {
-    b.def("connect", 3, [](Value, std::span<const Value> a) -> Value {
+    b.def("connect", 3, [](Value self_, std::span<const Value> a) -> Value {
         if (a.empty()) return ev::throwTypeError("AudioNode.connect: destination argument required");
+        HostAudioNode* node = hostAudioNodeOf(self_);
+        if (node) {
+            switch (node->nodeType) {
+            case AudioNodeType::Oscillator:
+                if (HostOscillatorNode* osc = oscOf(self_)) {
+                    if (nodeOfKind<HostGainNode>(a[0], AudioNodeType::Gain)) osc->connectedGain = ev::Persistent(a[0]);
+                }
+                break;
+            case AudioNodeType::BiquadFilter:
+                if (HostBiquadFilterNode* filter = filterOf(self_)) {
+                    auto* eng = getAudioEngine();
+                    if (eng && filter->slot >= 0) eng->setFilterEnabled(filter->slot, true);
+                }
+                break;
+            case AudioNodeType::MediaStreamSource:
+                if (HostAnalyserNode* analyser = analyserOf(a[0])) analyser->source = 1;
+                break;
+            default:
+                break;
+            }
+        }
         return a[0];
     });
 
-    b.def("disconnect", 1, [](Value, std::span<const Value>) -> Value {
+    b.def("disconnect", 1, [](Value self_, std::span<const Value>) -> Value {
+        HostAudioNode* node = hostAudioNodeOf(self_);
+        if (node) {
+            if (node->nodeType == AudioNodeType::Oscillator) {
+                if (HostOscillatorNode* osc = oscOf(self_)) osc->connectedGain.set(ev::undefined());
+            } else if (node->nodeType == AudioNodeType::BiquadFilter) {
+                if (HostBiquadFilterNode* filter = filterOf(self_)) {
+                    auto* eng = getAudioEngine();
+                    if (eng && filter->slot >= 0) eng->setFilterEnabled(filter->slot, false);
+                }
+            }
+        }
         return ev::undefined();
     });
 
@@ -377,24 +415,8 @@ Value makePeriodicWaveValue(const float* real, const float* imag, int count, boo
 }
 
 void decorateOscillatorNodeProto(ObjectBuilder& b) {
-    // connect(dest) remembers a GainNode destination so start() can read its
-    // gain.value into the voice (broaudio has no node graph). Any other
-    // destination is a pass-through, as on AudioNode.
-    b.def("connect", 3, [](Value self_, std::span<const Value> a) -> Value {
-        if (a.empty()) return ev::throwTypeError("AudioNode.connect: destination argument required");
-        HostOscillatorNode* osc = oscOf(self_);
-        if (osc && nodeOfKind<HostGainNode>(a[0], AudioNodeType::Gain)) {
-            osc->connectedGain = ev::Persistent(a[0]);
-        }
-        return a[0];
-    });
-
-    b.def("disconnect", 1, [](Value self_, std::span<const Value>) -> Value {
-        HostOscillatorNode* osc = oscOf(self_);
-        if (osc) osc->connectedGain.set(ev::undefined());
-        return ev::undefined();
-    });
-
+    // connect(gain) is handled by the shared AudioNode.connect (see
+    // decorateAudioNodeProto); start() reads the remembered gain.value.
     b.accessor("type",
                [](Value self_, std::span<const Value>) {
                    HostOscillatorNode* osc = oscOf(self_);
@@ -498,23 +520,8 @@ Value makeOscillatorNodeValue() {
 }
 
 void decorateBiquadFilterNodeProto(ObjectBuilder& b) {
-    // The filter slot runs while the node is connected: connect enables it,
-    // disconnect takes it out of the master chain again.
-    b.def("connect", 3, [](Value self_, std::span<const Value> a) -> Value {
-        if (a.empty()) return ev::throwTypeError("AudioNode.connect: destination argument required");
-        HostBiquadFilterNode* filter = filterOf(self_);
-        auto* eng = getAudioEngine();
-        if (filter && eng && filter->slot >= 0) eng->setFilterEnabled(filter->slot, true);
-        return a[0];
-    });
-
-    b.def("disconnect", 1, [](Value self_, std::span<const Value>) -> Value {
-        HostBiquadFilterNode* filter = filterOf(self_);
-        auto* eng = getAudioEngine();
-        if (filter && eng && filter->slot >= 0) eng->setFilterEnabled(filter->slot, false);
-        return ev::undefined();
-    });
-
+    // The filter slot runs while the node is connected; the shared
+    // AudioNode.connect/disconnect toggle it (see decorateAudioNodeProto).
     b.accessor("type",
                [](Value self_, std::span<const Value>) {
                    HostBiquadFilterNode* filter = filterOf(self_);
@@ -710,14 +717,9 @@ static void readAnalyserSource(const HostAnalyserNode* analyser, float* dst, int
     buf.readLatest(dst, n);
 }
 
-void decorateMediaStreamSourceNodeProto(ObjectBuilder& b) {
-    // Connecting the mic source to an analyser points the analyser at the
-    // microphone ring; any other destination is a pass-through.
-    b.def("connect", 3, [](Value, std::span<const Value> a) -> Value {
-        if (a.empty()) return ev::throwTypeError("AudioNode.connect: destination argument required");
-        if (HostAnalyserNode* analyser = analyserOf(a[0])) analyser->source = 1;
-        return a[0];
-    });
+void decorateMediaStreamSourceNodeProto(ObjectBuilder&) {
+    // connect(analyser) -> analyser.source = 1 is handled by the shared
+    // AudioNode.connect (see decorateAudioNodeProto).
 }
 
 void decorateAnalyserNodeProto(ObjectBuilder& b) {

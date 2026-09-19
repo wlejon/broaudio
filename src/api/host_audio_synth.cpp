@@ -752,7 +752,7 @@ Value makeMediaStreamValue() {
 
 Value makeMediaStreamAudioSourceNodeValue() {
     auto* s = new HostMediaStreamAudioSourceNode();
-    s->base.nodeType = AudioNodeType::Generic;
+    s->base.nodeType = AudioNodeType::MediaStreamSource;
     return g_mediaStreamAudioSourceNodeClass.make(s, hostMediaStreamAudioSourceNodeDtor);
 }
 

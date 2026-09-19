@@ -67,6 +67,7 @@ enum class AudioNodeType : uint8_t {
     Convolver,
     ChannelSplitter,
     ChannelMerger,
+    MediaStreamSource,
     Generic,
 };
 

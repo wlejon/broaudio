@@ -471,6 +471,17 @@ void registerAudioContextBuses(ObjectBuilder& b) {
         return ev::fromDouble(e && !a.empty() ? e->getBusChorusMix(i32At(a, 0)) : 0.0);
     });
 
+    b.def("setBusChorusBaseDelay", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 2) e->setBusChorusBaseDelay(i32At(a, 0), static_cast<float>(numAt(a, 1)));
+        return ev::undefined();
+    });
+
+    b.def("getBusChorusBaseDelay", 1, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        return ev::fromDouble(e && !a.empty() ? e->getBusChorusBaseDelay(i32At(a, 0)) : 0.0);
+    });
+
     // Compressor
     b.def("setBusCompressorEnabled", 2, [](Value, std::span<const Value> a) {
         auto* e = getAudioEngine();

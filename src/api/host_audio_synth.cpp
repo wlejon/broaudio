@@ -630,6 +630,7 @@ static void decorateSequenceProto(ObjectBuilder& b) {
         if (idx < 0 || idx >= h->seq->noteCount()) return ev::null();
         const auto& ev = h->seq->note(idx);
         ObjectBuilder obj;
+        obj.set("beat", ev::fromDouble(ev.beatPosition));
         obj.set("beatPosition", ev::fromDouble(ev.beatPosition));
         obj.set("note", ev::fromDouble(ev.note));
         obj.set("velocity", ev::fromDouble(ev.velocity));
@@ -910,7 +911,7 @@ void installAudioSynthGlobals() {
 
     g_mediaStreamAudioSourceNodeClass.install("MediaStreamAudioSourceNode", 0,
         [](Value, std::span<const Value>) { return makeMediaStreamAudioSourceNodeValue(); },
-        nullptr);
+        decorateMediaStreamSourceNodeProto);
     g_mediaStreamAudioSourceNodeClass.inherit(g_audioNodeClass);
 }
 

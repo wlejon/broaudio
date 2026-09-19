@@ -93,4 +93,27 @@ if(TARGET broaudio_api)
                 ENVIRONMENT "PATH=$<TARGET_FILE_DIR:bronze_runtime_shared>;$<TARGET_FILE_DIR:broaudio_test_api>;$ENV{PATH}")
         endif()
     endif()
+
+    # Pre-bronze binding semantics (drift rows B1-B17 of bro's
+    # docs/transition-drift.md plus the node-level shape diff): its own
+    # headless engine, renderBlock-driven, files through a scratch resolver.
+    add_executable(broaudio_test_api_drift test_audio_api_drift.cpp)
+    target_link_libraries(broaudio_test_api_drift PRIVATE broaudio_api bronze_runtime_shared)
+    if(WIN32)
+        add_custom_command(TARGET broaudio_test_api_drift POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:bronze_runtime_shared>
+                $<TARGET_FILE_DIR:broaudio_test_api_drift>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_LINKER_FILE:bronze_runtime_shared>
+                $<TARGET_FILE_DIR:broaudio_test_api_drift>
+        )
+    endif()
+    if(BRASS_HOST_BACKEND)
+        add_test(NAME broaudio_test_api_drift COMMAND broaudio_test_api_drift)
+        if(WIN32)
+            set_tests_properties(broaudio_test_api_drift PROPERTIES
+                ENVIRONMENT "PATH=$<TARGET_FILE_DIR:bronze_runtime_shared>;$<TARGET_FILE_DIR:broaudio_test_api_drift>;$ENV{PATH}")
+        endif()
+    endif()
 endif()

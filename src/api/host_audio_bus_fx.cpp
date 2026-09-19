@@ -135,24 +135,30 @@ void registerAudioContextBusFx(ObjectBuilder& b) {
     });
 
     // ---- Effect order ------------------------------------------------------
+    // setBusEffectOrder(busId, names[]): 1..7 slot names ("filter", "delay",
+    // "compressor", "chorus", "reverb", "equalizer", "distortion"). A longer
+    // or empty list is ignored; a name that is not a slot keeps that
+    // position's default slot (position i = slot i), so a typo never
+    // collapses the chain onto one effect.
     b.def("setBusEffectOrder", 2, [](Value, std::span<const Value> a) {
         auto* e = getAudioEngine();
-        if (e && a.size() >= 2 && ev::isObject(a[1])) {
-            int busId = i32At(a, 0);
-            Value arr = a[1];
-            Value lenV = ev::getProperty(arr, "length");
-            if (ev::isNumber(lenV)) {
-                int len = static_cast<int>(ev::toDouble(lenV));
-                std::vector<broaudio::EffectSlot> slots;
-                for (int i = 0; i < len; ++i) {
-                    Value item = ev::getProperty(arr, std::to_string(i));
-                    if (ev::isString(item)) {
-                        slots.push_back(parseEffectSlot(ev::toUtf8(item), broaudio::EffectSlot::Filter));
-                    }
-                }
-                if (!slots.empty()) e->setBusEffectOrder(busId, slots.data(), static_cast<int>(slots.size()));
-            }
+        if (!e || a.size() < 2 || !ev::isObject(a[1])) return ev::undefined();
+        int busId = i32At(a, 0);
+        ev::Persistent arr(a[1]);
+        Value lenV = ev::getProperty(arr.get(), "length");
+        if (ev::isUndefined(lenV) || ev::isObject(lenV)) return ev::undefined();
+        double lenD = ev::toDouble(lenV);
+        int len = std::isnan(lenD) ? 0 : static_cast<int>(lenD);
+        constexpr int kSlots = static_cast<int>(broaudio::EffectSlot::Count);
+        if (len <= 0 || len > kSlots) return ev::undefined();
+
+        broaudio::EffectSlot order[kSlots];
+        for (int i = 0; i < len; ++i) {
+            Value item = ev::getElement(arr.get(), static_cast<uint32_t>(i));
+            std::string name = (ev::isUndefined(item) || ev::isObject(item)) ? "" : ev::toUtf8(item);
+            order[i] = parseEffectSlot(name, static_cast<broaudio::EffectSlot>(i));
         }
+        e->setBusEffectOrder(busId, order, len);
         return ev::undefined();
     });
 

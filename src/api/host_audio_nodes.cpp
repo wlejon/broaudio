@@ -377,6 +377,24 @@ Value makePeriodicWaveValue(const float* real, const float* imag, int count, boo
 }
 
 void decorateOscillatorNodeProto(ObjectBuilder& b) {
+    // connect(dest) remembers a GainNode destination so start() can read its
+    // gain.value into the voice (broaudio has no node graph). Any other
+    // destination is a pass-through, as on AudioNode.
+    b.def("connect", 3, [](Value self_, std::span<const Value> a) -> Value {
+        if (a.empty()) return ev::throwTypeError("AudioNode.connect: destination argument required");
+        HostOscillatorNode* osc = oscOf(self_);
+        if (osc && nodeOfKind<HostGainNode>(a[0], AudioNodeType::Gain)) {
+            osc->connectedGain = ev::Persistent(a[0]);
+        }
+        return a[0];
+    });
+
+    b.def("disconnect", 1, [](Value self_, std::span<const Value>) -> Value {
+        HostOscillatorNode* osc = oscOf(self_);
+        if (osc) osc->connectedGain.set(ev::undefined());
+        return ev::undefined();
+    });
+
     b.accessor("type",
                [](Value self_, std::span<const Value>) {
                    HostOscillatorNode* osc = oscOf(self_);
@@ -395,15 +413,28 @@ void decorateOscillatorNodeProto(ObjectBuilder& b) {
                    return ev::undefined();
                });
 
+    // start(when = now): applies the connected GainNode's gain.value to the
+    // voice first, so `osc.connect(gain); gain.gain.value = 0.3; osc.start()`
+    // plays at 0.3 the way the graph says.
     b.def("start", 1, [](Value self_, std::span<const Value> a) -> Value {
         HostOscillatorNode* osc = oscOf(self_);
         if (!osc) return ev::undefined();
         if (osc->started) return ev::throwError("OscillatorNode cannot be started more than once");
         osc->started = true;
         auto* eng = getAudioEngine();
-        if (eng && osc->voiceId >= 0) {
-            eng->startVoice(osc->voiceId, numAt(a, 0));
+        if (!eng || osc->voiceId < 0) return ev::undefined();
+        double when = hasArg(a, 0) ? numAt(a, 0) : eng->currentTime();
+        if (ev::isObject(osc->connectedGain.get())) {
+            ev::Persistent gainParam(ev::getProperty(osc->connectedGain.get(), "gain"));
+            if (ev::isObject(gainParam.get())) {
+                Value v = ev::getProperty(gainParam.get(), "value");
+                if (ev::isNumber(v)) eng->setGain(osc->voiceId, static_cast<float>(ev::toDouble(v)));
+            }
+            // The reads above may have moved the heap; re-derive the node.
+            osc = oscOf(self_);
+            if (!osc) return ev::undefined();
         }
+        eng->startVoice(osc->voiceId, when);
         return ev::undefined();
     });
 
@@ -413,7 +444,8 @@ void decorateOscillatorNodeProto(ObjectBuilder& b) {
         osc->stopped = true;
         auto* eng = getAudioEngine();
         if (eng && osc->voiceId >= 0) {
-            eng->stopVoice(osc->voiceId, numAt(a, 0));
+            double when = hasArg(a, 0) ? numAt(a, 0) : eng->currentTime();
+            eng->stopVoice(osc->voiceId, when);
         }
         return ev::undefined();
     });
@@ -466,6 +498,23 @@ Value makeOscillatorNodeValue() {
 }
 
 void decorateBiquadFilterNodeProto(ObjectBuilder& b) {
+    // The filter slot runs while the node is connected: connect enables it,
+    // disconnect takes it out of the master chain again.
+    b.def("connect", 3, [](Value self_, std::span<const Value> a) -> Value {
+        if (a.empty()) return ev::throwTypeError("AudioNode.connect: destination argument required");
+        HostBiquadFilterNode* filter = filterOf(self_);
+        auto* eng = getAudioEngine();
+        if (filter && eng && filter->slot >= 0) eng->setFilterEnabled(filter->slot, true);
+        return a[0];
+    });
+
+    b.def("disconnect", 1, [](Value self_, std::span<const Value>) -> Value {
+        HostBiquadFilterNode* filter = filterOf(self_);
+        auto* eng = getAudioEngine();
+        if (filter && eng && filter->slot >= 0) eng->setFilterEnabled(filter->slot, false);
+        return ev::undefined();
+    });
+
     b.accessor("type",
                [](Value self_, std::span<const Value>) {
                    HostBiquadFilterNode* filter = filterOf(self_);
@@ -624,13 +673,15 @@ Value makeBiquadFilterNodeValue() {
     auto* eng = getAudioEngine();
     if (eng) {
         filter->slot = eng->allocateFilterSlot();
-        if (filter->slot >= 0) {
-            eng->setFilterEnabled(filter->slot, true);
-            eng->setFilterType(filter->slot, broaudio::BiquadFilter::Type::Lowpass);
-            eng->setFilterFrequency(filter->slot, 350.0f);
-            eng->setFilterQ(filter->slot, 1.0f);
-            eng->setFilterGain(filter->slot, 0.0f);
+        if (filter->slot < 0) {
+            delete filter;
+            return ev::throwError("No filter slots available");
         }
+        eng->setFilterEnabled(filter->slot, true);
+        eng->setFilterType(filter->slot, broaudio::BiquadFilter::Type::Lowpass);
+        eng->setFilterFrequency(filter->slot, 350.0f);
+        eng->setFilterQ(filter->slot, 1.0f);
+        eng->setFilterGain(filter->slot, 0.0f);
     }
 
     ObjectBuilder b(g_biquadFilterNodeClass.make(filter, hostBiquadFilterDtor));
@@ -641,7 +692,49 @@ Value makeBiquadFilterNodeValue() {
     return b.get();
 }
 
+// The latest `n` samples of what the analyser taps (source: 0 output,
+// 1 mic, 2 both), into `dst`.
+static void readAnalyserSource(const HostAnalyserNode* analyser, float* dst, int n) {
+    auto* e = getAudioEngine();
+    if (!e || n <= 0) return;
+    if (analyser->source == 2) {
+        e->outputBuffer().readLatest(dst, n);
+        if (!e->isMicMuted()) {
+            std::vector<float> mic(static_cast<size_t>(n), 0.0f);
+            e->micBuffer().readLatest(mic.data(), n);
+            for (int i = 0; i < n; i++) dst[i] += mic[i];
+        }
+        return;
+    }
+    const auto& buf = (analyser->source == 1) ? e->micBuffer() : e->outputBuffer();
+    buf.readLatest(dst, n);
+}
+
+void decorateMediaStreamSourceNodeProto(ObjectBuilder& b) {
+    // Connecting the mic source to an analyser points the analyser at the
+    // microphone ring; any other destination is a pass-through.
+    b.def("connect", 3, [](Value, std::span<const Value> a) -> Value {
+        if (a.empty()) return ev::throwTypeError("AudioNode.connect: destination argument required");
+        if (HostAnalyserNode* analyser = analyserOf(a[0])) analyser->source = 1;
+        return a[0];
+    });
+}
+
 void decorateAnalyserNodeProto(ObjectBuilder& b) {
+    b.accessor("source",
+               [](Value self_, std::span<const Value>) {
+                   HostAnalyserNode* analyser = analyserOf(self_);
+                   if (!analyser) return ev::undefined();
+                   return ev::fromDouble(analyser->source);
+               },
+               [](Value self_, std::span<const Value> a) {
+                   HostAnalyserNode* analyser = analyserOf(self_);
+                   if (!analyser) return ev::undefined();
+                   int v = i32At(a, 0);
+                   analyser->source = (v == 2) ? 2 : (v == 1) ? 1 : 0;
+                   return ev::undefined();
+               });
+
     b.accessor("fftSize",
                [](Value self_, std::span<const Value>) {
                    HostAnalyserNode* analyser = analyserOf(self_);
@@ -714,10 +807,7 @@ void decorateAnalyserNodeProto(ObjectBuilder& b) {
         int n = analyser->fftSize;
         int halfN = n / 2;
         std::vector<float> real(n, 0.0f), imag(n, 0.0f);
-        auto* e = getAudioEngine();
-        if (e) {
-            e->outputBuffer().readLatest(real.data(), n);
-        }
+        readAnalyserSource(analyser, real.data(), n);
 
         for (int i = 0; i < n; i++) {
             float w = 0.42f - 0.5f * std::cos(2.0f * static_cast<float>(M_PI) * i / (n - 1))
@@ -755,10 +845,7 @@ void decorateAnalyserNodeProto(ObjectBuilder& b) {
         int n = analyser->fftSize;
         int halfN = n / 2;
         std::vector<float> real(n, 0.0f), imag(n, 0.0f);
-        auto* e = getAudioEngine();
-        if (e) {
-            e->outputBuffer().readLatest(real.data(), n);
-        }
+        readAnalyserSource(analyser, real.data(), n);
 
         for (int i = 0; i < n; i++) {
             float w = 0.42f - 0.5f * std::cos(2.0f * static_cast<float>(M_PI) * i / (n - 1))
@@ -801,10 +888,7 @@ void decorateAnalyserNodeProto(ObjectBuilder& b) {
 
         int n = analyser->fftSize;
         std::vector<float> real(n, 0.0f);
-        auto* e = getAudioEngine();
-        if (e) {
-            e->outputBuffer().readLatest(real.data(), n);
-        }
+        readAnalyserSource(analyser, real.data(), n);
 
         size_t count = std::min(static_cast<size_t>(info.elementCount), static_cast<size_t>(n));
         std::memcpy(info.data, real.data(), count * sizeof(float));
@@ -820,10 +904,7 @@ void decorateAnalyserNodeProto(ObjectBuilder& b) {
 
         int n = analyser->fftSize;
         std::vector<float> real(n, 0.0f);
-        auto* e = getAudioEngine();
-        if (e) {
-            e->outputBuffer().readLatest(real.data(), n);
-        }
+        readAnalyserSource(analyser, real.data(), n);
 
         std::vector<uint8_t> outData(n);
         for (int i = 0; i < n; i++) {

@@ -16,15 +16,21 @@ void registerAudioContextPlayback(ObjectBuilder& b) {
         return ev::fromDouble(e && !a.empty() ? e->getClipChannels(i32At(a, 0)) : 0);
     });
 
+    // getClipWaveform(clipId, numBins) -> Float32Array(numBins * 2) of
+    // interleaved [min, max] pairs, zero-filled where the engine has nothing
+    // (unknown clip, empty clip) so a display can index it unconditionally;
+    // undefined for numBins outside 1..1024.
     b.def("getClipWaveform", 2, [](Value, std::span<const Value> a) -> Value {
         auto* e = getAudioEngine();
-        if (!e || a.size() < 2) return ev::null();
+        if (!e || a.size() < 2) return ev::undefined();
         int clipId = i32At(a, 0);
         int numBins = i32At(a, 1);
-        if (numBins <= 0 || numBins > 1024) return ev::null();
+        if (numBins <= 0 || numBins > 1024) return ev::undefined();
+        std::vector<float> out(static_cast<size_t>(numBins) * 2, 0.0f);
         std::vector<float> wf = e->getClipWaveform(clipId, numBins);
-        if (wf.empty()) return ev::null();
-        return makeFloat32Array(wf);
+        size_t n = std::min(out.size(), wf.size());
+        if (n > 0) std::memcpy(out.data(), wf.data(), n * sizeof(float));
+        return makeFloat32Array(out);
     });
 
     // ---- Transport on a playback instance ----------------------------------
@@ -128,25 +134,38 @@ void registerAudioContextPlayback(ObjectBuilder& b) {
         return ev::undefined();
     });
 
+    // setPlaybackSend(playbackId, sendBusId, amount): aux send from a
+    // playback instance, the counterpart of setVoiceSend / setBusSend.
+    b.def("setPlaybackSend", 3, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 3) {
+            e->setPlaybackSend(i32At(a, 0), i32At(a, 1), static_cast<float>(numAt(a, 2)));
+        }
+        return ev::undefined();
+    });
+
     // ---- Streams -----------------------------------------------------------
+    // createStream(channels = 1, ringFrames = 0) -> playbackId for a live PCM
+    // source. ringFrames 0 lets the engine pick (~2 s at the engine rate).
     b.def("createStream", 2, [](Value, std::span<const Value> a) {
         auto* e = getAudioEngine();
         if (!e) return ev::fromDouble(-1);
         int channels = a.size() >= 1 ? i32At(a, 0) : 1;
-        int ringFrames = a.size() >= 2 ? i32At(a, 1) : 44100;
+        int ringFrames = a.size() >= 2 ? i32At(a, 1) : 0;
         return ev::fromDouble(e->createStream(channels, ringFrames));
     });
 
-    b.def("pushStreamSamples", 2, [](Value, std::span<const Value> a) {
+    // pushStreamSamples(streamId, Float32Array) -> frames written. Samples
+    // must be interleaved at the engine sample rate. A non-typed-array
+    // second argument is a TypeError, not a silent 0.
+    b.def("pushStreamSamples", 2, [](Value, std::span<const Value> a) -> Value {
         auto* e = getAudioEngine();
         if (!e || a.size() < 2) return ev::fromDouble(0);
         int id = i32At(a, 0);
-        const uint8_t* rawData = nullptr;
-        size_t rawLen = 0;
-        size_t elemSize = 1;
-        if (!bufferBytes(a[1], &rawData, &rawLen, &elemSize) || rawLen == 0) return ev::fromDouble(0);
-        int count = static_cast<int>(rawLen / sizeof(float));
-        return ev::fromDouble(e->pushStreamSamples(id, reinterpret_cast<const float*>(rawData), count));
+        ev::TypedArrayInfo info = ev::typedArrayInfo(a[1]);
+        if (!info || !info.data) return ev::throwTypeError("Expected Float32Array samples");
+        int count = static_cast<int>(info.byteLength / sizeof(float));
+        return ev::fromDouble(e->pushStreamSamples(id, reinterpret_cast<const float*>(info.data), count));
     });
 
     b.def("closeStream", 1, [](Value, std::span<const Value> a) {
@@ -155,23 +174,39 @@ void registerAudioContextPlayback(ObjectBuilder& b) {
         return ev::undefined();
     });
 
+    // createStreamFromFile(path, options?) -> playbackId. Disk-streamed
+    // playback: the file decodes incrementally on a broaudio worker thread
+    // into a ring the mixer consumes. Throws with the decode error on
+    // failure. options: { ringFrames, prebufferFrames, loop, gain }, each
+    // coerced the way a JS number/boolean would be (a string "4096" counts).
     b.def("createStreamFromFile", 2, [](Value, std::span<const Value> a) -> Value {
         auto* e = getAudioEngine();
-        if (!e || a.empty()) return ev::throwError("createStreamFromFile: no engine or path");
-        std::string path = ev::toUtf8(a[0]);
+        if (!e || a.empty() || ev::isUndefined(a[0])) {
+            return ev::throwTypeError("createStreamFromFile: file path required");
+        }
+        std::string path = resolveAudioPath(ev::toUtf8(a[0]));
         broaudio::FileStreamOptions opts;
         if (a.size() >= 2 && ev::isObject(a[1])) {
-            Value optVal = a[1];
-            Value rf = ev::getProperty(optVal, "ringFrames");
-            if (ev::isNumber(rf)) opts.ringFrames = static_cast<int>(ev::toDouble(rf));
-            Value loop = ev::getProperty(optVal, "loop");
-            if (ev::isBool(loop)) opts.loop = ev::toBool(loop);
+            ev::Persistent opt(a[1]);
+            auto numberOpt = [&](const char* key, double& out) {
+                Value v = ev::getProperty(opt.get(), key);
+                if (ev::isUndefined(v) || ev::isObject(v)) return false;
+                double d = ev::toDouble(v);
+                if (std::isnan(d)) return false;
+                out = d;
+                return true;
+            };
+            double d = 0.0;
+            if (numberOpt("ringFrames", d)) opts.ringFrames = static_cast<int>(d);
+            if (numberOpt("prebufferFrames", d)) opts.prebufferFrames = static_cast<int>(d);
+            if (numberOpt("gain", d)) opts.gain = static_cast<float>(d);
+            Value loop = ev::getProperty(opt.get(), "loop");
+            if (!ev::isUndefined(loop)) opts.loop = ev::toBool(loop);
         }
         std::string err;
         int id = e->createStreamFromFile(path.c_str(), opts, &err);
         if (id < 0) {
-            std::string msg = err.empty() ? ("createStreamFromFile: failed to open " + path) : err;
-            return ev::throwError(msg.c_str());
+            return ev::throwError("createStreamFromFile: " + (err.empty() ? std::string("failed to open stream") : err));
         }
         return ev::fromDouble(id);
     });

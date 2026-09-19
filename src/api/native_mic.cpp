@@ -58,6 +58,10 @@ void shutdownActiveMic() {
 } // namespace
 
 void drainMicChunks() {
+    // The host's once-per-frame call into broaudio: settle background clip
+    // loads here too (api.h tickAsyncJobs), so createClipFromFileAsync
+    // resolves without the host pumping a second thing.
+    tickAsyncJobs();
     if (!g_mic.active) return;
     uint64_t w = g_mic.writeCount.load(std::memory_order_acquire);
     if (w == g_mic.lastFired) return;

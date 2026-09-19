@@ -1,8 +1,7 @@
 // The engine-level synth methods of AudioContext that host_audio_context.cpp
 // and host_audio_synth.cpp leave out: the shared ModMatrix, wavetable banks,
-// the output spectrum, deterministic block rendering, and the four preset
-// families (voice / bus / mod / engine) with their JSON and file forms.
-// Paths go to the engine as given; the caller resolves them.
+// the output spectrum and deterministic block rendering. The preset families
+// live in host_audio_presets.cpp.
 
 #include "host_audio_internal.h"
 
@@ -10,31 +9,53 @@
 
 namespace broaudio::api {
 
+namespace {
+
+// A Float32Array of `count` zeros with the first min(count, src.size())
+// values of `src` copied in — the shape every analysis read hands back, so
+// a caller can index it without a null check.
+Value zeroPaddedFloat32Array(size_t count, const std::vector<float>& src) {
+    std::vector<float> out(count, 0.0f);
+    size_t n = std::min(count, src.size());
+    if (n > 0) std::memcpy(out.data(), src.data(), n * sizeof(float));
+    return makeFloat32Array(out);
+}
+
+}  // namespace
+
 void registerAudioContextSynthExt(ObjectBuilder& b) {
     b.def("getModMatrix", 0, [](Value, std::span<const Value>) {
         return makeModMatrixValue();
     });
 
     // ---- Wavetables --------------------------------------------------------
-    b.def("createWavetable", 2, [](Value, std::span<const Value> a) -> Value {
-        if (a.empty()) return ev::fromDouble(-1);
-        const uint8_t* rawData = nullptr;
-        size_t rawLen = 0, elemSize = 1;
-        if (!bufferBytes(a[0], &rawData, &rawLen, &elemSize) || rawLen == 0) return ev::fromDouble(-1);
-        int sr = a.size() >= 2 ? i32At(a, 1) : 44100;
-        int count = static_cast<int>(rawLen / sizeof(float));
-        auto bank = broaudio::WavetableBank::createFromWaveform(reinterpret_cast<const float*>(rawData), count, sr);
+    // createWavetable("saw" | "square" | "triangle") -> id, or undefined for
+    // any other type. The bank is built at the engine sample rate.
+    b.def("createWavetable", 1, [](Value, std::span<const Value> a) -> Value {
+        if (a.empty() || ev::isObject(a[0])) return ev::undefined();
+        auto* e = getAudioEngine();
+        int sr = e ? e->sampleRate() : 44100;
+        std::string type = ev::toUtf8(a[0]);
+        std::shared_ptr<broaudio::WavetableBank> bank;
+        if (type == "saw") bank = broaudio::WavetableBank::createSaw(sr);
+        else if (type == "square") bank = broaudio::WavetableBank::createSquare(sr);
+        else if (type == "triangle") bank = broaudio::WavetableBank::createTriangle(sr);
+        if (!bank) return ev::undefined();
         return ev::fromDouble(registerWavetable(bank));
     });
 
-    b.def("createWavetableFromWaveform", 3, [](Value, std::span<const Value> a) -> Value {
-        if (a.empty()) return ev::fromDouble(-1);
-        const uint8_t* rawData = nullptr;
-        size_t rawLen = 0, elemSize = 1;
-        if (!bufferBytes(a[0], &rawData, &rawLen, &elemSize) || rawLen == 0) return ev::fromDouble(-1);
-        int count = a.size() >= 2 ? i32At(a, 1) : static_cast<int>(rawLen / sizeof(float));
-        int sr = a.size() >= 3 ? i32At(a, 2) : 44100;
-        auto bank = broaudio::WavetableBank::createFromWaveform(reinterpret_cast<const float*>(rawData), count, sr);
+    // createWavetableFromWaveform(Float32Array oneCycle) -> id. The bank is
+    // built at the engine sample rate; the whole view is the cycle.
+    b.def("createWavetableFromWaveform", 1, [](Value, std::span<const Value> a) -> Value {
+        if (a.empty()) return ev::undefined();
+        ev::TypedArrayInfo info = ev::typedArrayInfo(a[0]);
+        if (!info || !info.data) return ev::throwTypeError("Expected Float32Array");
+        auto* e = getAudioEngine();
+        int sr = e ? e->sampleRate() : 44100;
+        int count = static_cast<int>(info.byteLength / sizeof(float));
+        auto bank = broaudio::WavetableBank::createFromWaveform(
+            reinterpret_cast<const float*>(info.data), count, sr);
+        if (!bank) return ev::undefined();
         return ev::fromDouble(registerWavetable(bank));
     });
 
@@ -43,85 +64,60 @@ void registerAudioContextSynthExt(ObjectBuilder& b) {
         return ev::undefined();
     });
 
+    // Assign the bank AND switch the voice to wavetable mode: a bank on a
+    // voice still set to "sine" is inaudible, so the two are one call.
     b.def("setVoiceWavetable", 2, [](Value, std::span<const Value> a) {
         auto* e = getAudioEngine();
-        if (e && a.size() >= 2) e->setVoiceWavetable(i32At(a, 0), findWavetable(i32At(a, 1)));
+        if (e && a.size() >= 2) {
+            int voiceId = i32At(a, 0);
+            if (auto bank = findWavetable(i32At(a, 1))) {
+                e->setVoiceWavetable(voiceId, bank);
+                e->setWaveform(voiceId, broaudio::Waveform::Wavetable);
+            }
+        }
         return ev::undefined();
     });
 
     // ---- Analysis and rendering --------------------------------------------
+    // getSpectrum(numBins) -> Float32Array(numBins), zero-filled beyond what
+    // the engine answers; undefined for numBins outside 1..8192.
     b.def("getSpectrum", 1, [](Value, std::span<const Value> a) -> Value {
         auto* e = getAudioEngine();
-        if (!e || a.empty()) return ev::null();
+        if (!e || a.empty()) return ev::undefined();
         int bins = i32At(a, 0);
-        if (bins <= 0) return ev::null();
-        std::vector<float> spec = e->getSpectrum(bins);
-        if (spec.empty()) return ev::null();
-        return makeFloat32Array(spec);
+        if (bins <= 0 || bins > 8192) return ev::undefined();
+        return zeroPaddedFloat32Array(static_cast<size_t>(bins), e->getSpectrum(bins));
     });
 
-    b.def("renderBlock", 1, [](Value, std::span<const Value> a) {
+    // renderBlock(numFrames, out?) -> Float32Array. Renders numFrames through
+    // the full pipeline (no device) and returns the latest mono mixdown: a
+    // fresh Float32Array(min(numFrames, analysis ring)) or, when `out` is a
+    // typed array, `out` itself filled in place up to its length. Headless
+    // only — driving the pipeline from the main thread while a live device
+    // callback runs would race.
+    b.def("renderBlock", 2, [](Value, std::span<const Value> a) -> Value {
         auto* e = getAudioEngine();
-        if (e && !a.empty()) e->renderBlock(i32At(a, 0));
-        return ev::undefined();
-    });
+        if (!e || a.empty()) return ev::undefined();
+        int numFrames = i32At(a, 0);
+        if (numFrames <= 0) return ev::undefined();
 
-    // ---- Presets -----------------------------------------------------------
-    b.def("voicePresetToJson", 1, [](Value, std::span<const Value> a) {
-        if (a.empty()) return ev::fromUtf8("{}");
-        return ev::fromUtf8(broaudio::toJson(broaudio::voicePresetFromJson(ev::toUtf8(a[0]))));
-    });
+        e->renderBlock(numFrames);
 
-    b.def("busPresetToJson", 1, [](Value, std::span<const Value> a) {
-        if (a.empty()) return ev::fromUtf8("{}");
-        return ev::fromUtf8(broaudio::toJson(broaudio::busPresetFromJson(ev::toUtf8(a[0]))));
-    });
+        int cap = e->outputBuffer().capacity();
+        int n = std::min(numFrames, cap);
 
-    b.def("modPresetToJson", 1, [](Value, std::span<const Value> a) {
-        if (a.empty()) return ev::fromUtf8("{}");
-        return ev::fromUtf8(broaudio::toJson(broaudio::modPresetFromJson(ev::toUtf8(a[0]))));
-    });
+        if (a.size() >= 2 && ev::isObject(a[1])) {
+            ev::TypedArrayInfo info = ev::typedArrayInfo(a[1]);
+            if (info && info.data) {
+                int rc = std::min(n, static_cast<int>(info.byteLength / sizeof(float)));
+                if (rc > 0) e->outputBuffer().readLatest(reinterpret_cast<float*>(info.data), rc);
+                return a[1];
+            }
+        }
 
-    b.def("enginePresetToJson", 1, [](Value, std::span<const Value> a) {
-        if (a.empty()) return ev::fromUtf8("{}");
-        return ev::fromUtf8(broaudio::toJson(broaudio::enginePresetFromJson(ev::toUtf8(a[0]))));
-    });
-
-    b.def("applyVoicePreset", 2, [](Value, std::span<const Value> a) {
-        auto* e = getAudioEngine();
-        if (e && a.size() >= 2) e->applyVoicePreset(i32At(a, 0), broaudio::voicePresetFromJson(ev::toUtf8(a[1])));
-        return ev::undefined();
-    });
-
-    b.def("applyBusPreset", 2, [](Value, std::span<const Value> a) {
-        auto* e = getAudioEngine();
-        if (e && a.size() >= 2) e->applyBusPreset(i32At(a, 0), broaudio::busPresetFromJson(ev::toUtf8(a[1])));
-        return ev::undefined();
-    });
-
-    b.def("applyModPreset", 1, [](Value, std::span<const Value> a) {
-        auto* e = getAudioEngine();
-        if (e && !a.empty()) e->applyModPreset(broaudio::modPresetFromJson(ev::toUtf8(a[0])));
-        return ev::undefined();
-    });
-
-    b.def("applyEnginePreset", 1, [](Value, std::span<const Value> a) {
-        auto* e = getAudioEngine();
-        if (e && !a.empty()) e->applyEnginePreset(broaudio::enginePresetFromJson(ev::toUtf8(a[0])));
-        return ev::undefined();
-    });
-
-    b.def("savePreset", 2, [](Value, std::span<const Value> a) {
-        if (a.size() < 2) return ev::fromBool(false);
-        std::string json = ev::toUtf8(a[0]);
-        std::string path = ev::toUtf8(a[1]);
-        return ev::fromBool(broaudio::savePresetToFile(json, path.c_str()));
-    });
-
-    b.def("loadPreset", 1, [](Value, std::span<const Value> a) {
-        if (a.empty()) return ev::fromUtf8("");
-        std::string path = ev::toUtf8(a[0]);
-        return ev::fromUtf8(broaudio::loadPresetFromFile(path.c_str()));
+        std::vector<float> out(static_cast<size_t>(n), 0.0f);
+        e->outputBuffer().readLatest(out.data(), n);
+        return makeFloat32Array(out);
     });
 }
 

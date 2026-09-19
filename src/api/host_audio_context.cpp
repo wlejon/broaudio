@@ -217,7 +217,11 @@ void decorateAudioContextProto(ObjectBuilder& b) {
         return makeChannelMergerNodeValue(inputs);
     });
 
-    b.def("createMediaStreamSource", 1, [](Value, std::span<const Value>) {
+    b.def("createMediaStreamSource", 1, [](Value, std::span<const Value> a) -> Value {
+        if (a.empty()) return ev::undefined();
+        if (!ev::isObject(a[0]) || !hostMediaStreamOf(a[0])) {
+            return ev::throwTypeError("Expected MediaStream argument");
+        }
         return makeMediaStreamAudioSourceNodeValue();
     });
 
@@ -233,8 +237,10 @@ void decorateAudioContextProto(ObjectBuilder& b) {
         return makeMidiInputValue();
     });
 
-    b.def("createSequence", 1, [](Value, std::span<const Value> a) {
-        HostVoiceAllocator* va = !a.empty() ? hostVoiceAllocatorOf(a[0]) : nullptr;
+    b.def("createSequence", 1, [](Value, std::span<const Value> a) -> Value {
+        if (a.empty()) return ev::undefined();
+        HostVoiceAllocator* va = ev::isObject(a[0]) ? hostVoiceAllocatorOf(a[0]) : nullptr;
+        if (!va) return ev::throwTypeError("Expected VoiceAllocator argument");
         return makeSequenceValue(va);
     });
 
@@ -324,7 +330,7 @@ void decorateAudioContextProto(ObjectBuilder& b) {
 
     b.def("decodeAudioFile", 1, [](Value, std::span<const Value> a) -> Value {
         if (a.empty()) return ev::null();
-        std::string path = ev::toUtf8(a[0]);
+        std::string path = resolveAudioPath(ev::toUtf8(a[0]));
         broaudio::AudioFileData data = broaudio::loadAudioFile(path.c_str());
         if (!data.valid()) return ev::null();
 
@@ -372,24 +378,24 @@ void decorateAudioContextProto(ObjectBuilder& b) {
     b.def("exportRecordingToWav", 1, [](Value, std::span<const Value> a) {
         auto* e = getAudioEngine();
         if (!e || a.empty()) return ev::fromBool(false);
-        std::string path = ev::toUtf8(a[0]);
+        std::string path = resolveAudioWritePath(ev::toUtf8(a[0]));
         return ev::fromBool(e->exportRecordingToWav(path.c_str()));
     });
 
-    b.def("saveWav", 4, [](Value, std::span<const Value> a) {
+    // saveWav(path, Float32Array samples, channels, sampleRate) -> bool. The
+    // samples must be a typed array (a TypeError otherwise); the path goes
+    // through the host's resolver like every other file the context writes.
+    b.def("saveWav", 4, [](Value, std::span<const Value> a) -> Value {
         if (a.size() < 4) return ev::fromBool(false);
-        std::string path = ev::toUtf8(a[0]);
-        std::vector<float> storage;
-        const float* samples = nullptr;
-        size_t count = 0;
-        if (!floatData(a[1], storage, &samples, &count) || !samples || count == 0) {
-            return ev::fromBool(false);
-        }
+        std::string path = resolveAudioWritePath(ev::toUtf8(a[0]));
+        ev::TypedArrayInfo info = ev::typedArrayInfo(a[1]);
+        if (!info || !info.data) return ev::throwTypeError("Expected Float32Array as second argument");
         int channels = i32At(a, 2);
         int sampleRate = i32At(a, 3);
         if (channels <= 0 || sampleRate <= 0) return ev::fromBool(false);
-        int frames = static_cast<int>(count / channels);
-        return ev::fromBool(broaudio::saveWav(path.c_str(), samples, frames, channels, sampleRate));
+        int frames = static_cast<int>(info.byteLength / sizeof(float)) / channels;
+        return ev::fromBool(broaudio::saveWav(path.c_str(), reinterpret_cast<const float*>(info.data),
+                                              frames, channels, sampleRate));
     });
 
     // 6. Master effect shortcuts
@@ -479,6 +485,74 @@ void decorateAudioContextProto(ObjectBuilder& b) {
     b.def("setReverbMix", 1, [](Value, std::span<const Value> a) {
         auto* e = getAudioEngine();
         if (e && !a.empty()) e->setBusReverbMix(0, static_cast<float>(numAt(a, 0)));
+        return ev::undefined();
+    });
+
+    // Master chorus and compressor: the bus-0 effects under the short names
+    // the delay and reverb shortcuts above already use.
+    b.def("setChorusEnabled", 1, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && !a.empty()) e->setBusChorusEnabled(0, boolAt(a, 0));
+        return ev::undefined();
+    });
+
+    b.def("setChorusRate", 1, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && !a.empty()) e->setBusChorusRate(0, static_cast<float>(numAt(a, 0)));
+        return ev::undefined();
+    });
+
+    b.def("setChorusDepth", 1, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && !a.empty()) e->setBusChorusDepth(0, static_cast<float>(numAt(a, 0)));
+        return ev::undefined();
+    });
+
+    b.def("setChorusMix", 1, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && !a.empty()) e->setBusChorusMix(0, static_cast<float>(numAt(a, 0)));
+        return ev::undefined();
+    });
+
+    b.def("setChorusFeedback", 1, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && !a.empty()) e->setBusChorusFeedback(0, static_cast<float>(numAt(a, 0)));
+        return ev::undefined();
+    });
+
+    b.def("setChorusBaseDelay", 1, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && !a.empty()) e->setBusChorusBaseDelay(0, static_cast<float>(numAt(a, 0)));
+        return ev::undefined();
+    });
+
+    b.def("setCompressorEnabled", 1, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && !a.empty()) e->setBusCompressorEnabled(0, boolAt(a, 0));
+        return ev::undefined();
+    });
+
+    b.def("setCompressorThreshold", 1, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && !a.empty()) e->setBusCompressorThreshold(0, static_cast<float>(numAt(a, 0)));
+        return ev::undefined();
+    });
+
+    b.def("setCompressorRatio", 1, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && !a.empty()) e->setBusCompressorRatio(0, static_cast<float>(numAt(a, 0)));
+        return ev::undefined();
+    });
+
+    b.def("setCompressorAttack", 1, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && !a.empty()) e->setBusCompressorAttack(0, static_cast<float>(numAt(a, 0)));
+        return ev::undefined();
+    });
+
+    b.def("setCompressorRelease", 1, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && !a.empty()) e->setBusCompressorRelease(0, static_cast<float>(numAt(a, 0)));
         return ev::undefined();
     });
 
@@ -576,6 +650,7 @@ void decorateAudioContextProto(ObjectBuilder& b) {
     registerAudioContextBuses(b);
     registerAudioContextBusFx(b);
     registerAudioContextSynthExt(b);
+    registerAudioContextPresets(b);
 }
 
 void installAudioGlobals() {

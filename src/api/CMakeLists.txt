@@ -15,6 +15,8 @@ set(BROAUDIO_API_SOURCES
     host_audio_bus_fx.cpp
     host_audio_synth_ext.cpp
     host_audio_sequence_ext.cpp
+    host_audio_presets.cpp
+    host_audio_io.cpp
     native_mic.cpp
 )
 

@@ -126,6 +126,11 @@ struct HostOscillatorNode {
     std::string type = "sine";
     bool started = false;
     bool stopped = false;
+    // The GainNode this oscillator was connect()ed to, read back at start():
+    // broaudio has no node graph, so `osc.connect(gain); gain.gain.value = g`
+    // reaches the voice as its gain. Undefined until connect, cleared by
+    // disconnect.
+    ev::Persistent connectedGain;
 };
 
 struct HostPeriodicWave {
@@ -148,6 +153,10 @@ struct HostAnalyserNode {
     float minDecibels = -100.0f;
     float maxDecibels = -30.0f;
     float smoothingTimeConstant = 0.8f;
+    // What the analyser taps: 0 = engine output, 1 = microphone, 2 = both
+    // summed (mic only while it is not muted). A MediaStreamAudioSourceNode
+    // connect()ed to the analyser sets 1; the `source` property sets any.
+    int source = 0;
     std::vector<float> smoothedMagnitudes;
 };
 
@@ -503,6 +512,7 @@ void decorateOscillatorNodeProto(ObjectBuilder& b);
 void decoratePeriodicWaveProto(ObjectBuilder& b);
 void decorateBiquadFilterNodeProto(ObjectBuilder& b);
 void decorateAnalyserNodeProto(ObjectBuilder& b);
+void decorateMediaStreamSourceNodeProto(ObjectBuilder& b);
 Value makeGainNodeValue();
 Value makeOscillatorNodeValue();
 Value makePeriodicWaveValue(const float* real, const float* imag, int count, bool disableNorm);
@@ -561,12 +571,35 @@ void registerAudioContextClips(ObjectBuilder& b);
 void registerAudioContextVoiceExt(ObjectBuilder& b);
 void registerAudioContextPlayback(ObjectBuilder& b);
 void registerAudioContextBusFx(ObjectBuilder& b);
-// getModMatrix, wavetables, getSpectrum, renderBlock, presets
+// getModMatrix, wavetables, getSpectrum, renderBlock
 // (host_audio_synth_ext.cpp).
 void registerAudioContextSynthExt(ObjectBuilder& b);
+// The four preset families (voice / bus / mod / engine) as plain JS objects:
+// toJson / fromJson / apply, plus savePreset / loadPreset
+// (host_audio_presets.cpp).
+void registerAudioContextPresets(ObjectBuilder& b);
 // Sequence automation lanes/points beyond addAutomationLane
 // (host_audio_sequence_ext.cpp); called from decorateSequenceProto.
 void decorateSequenceAutomation(ObjectBuilder& b);
+
+// ---------------------------------------------------------------------------
+// File paths and background work (host_audio_io.cpp)
+// ---------------------------------------------------------------------------
+
+// A file path as the host's resolver sees it (api.h setPathResolver), or as
+// given when no resolver is set.
+std::string resolveAudioPath(const std::string& path);
+// The same for a file about to be written: the parent directory resolves
+// (it exists), the file name is appended.
+std::string resolveAudioWritePath(const std::string& path);
+
+// createClipFromFileAsync's worker: decodes `resolvedPath` on a background
+// thread and returns the promise that tickAsyncJobs() (api.h) later settles
+// on the JS thread — resolved with the clip id, or rejected with an Error
+// whose message is "<path>: <decoder's reason>".
+Value launchClipLoad(const std::string& resolvedPath);
+// Join every outstanding job without touching JS (shutdownAudio).
+void shutdownAsyncJobs();
 
 // Wavetable bank registry helpers
 std::shared_ptr<broaudio::WavetableBank> findWavetable(int id);

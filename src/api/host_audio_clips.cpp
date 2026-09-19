@@ -51,6 +51,24 @@ void registerAudioContextClips(ObjectBuilder& b) {
         if (channels <= 0) channels = 1;
         const float* samples = reinterpret_cast<const float*>(rawData);
 
+        // Optional 3rd arg: the PCM's source sample rate. When it differs
+        // from the engine rate, resample so the clip plays at the right
+        // pitch/speed (mirrors decodeAudioData). Without it, the samples are
+        // assumed to be at engine rate.
+        std::vector<float> resampled;
+        if (a.size() >= 3 && ev::isNumber(a[2])) {
+            int srcRate = i32At(a, 2);
+            const int engRate = e->sampleRate();
+            if (srcRate > 0 && srcRate != engRate) {
+                resampled = broaudio::resample(samples, numSamples / channels,
+                                               channels, srcRate, engRate);
+                if (!resampled.empty()) {
+                    samples = resampled.data();
+                    numSamples = static_cast<int>(resampled.size());
+                }
+            }
+        }
+
         int clipId = e->createClip(samples, numSamples, channels);
         return ev::fromDouble(clipId);
     });
@@ -66,12 +84,20 @@ void registerAudioContextClips(ObjectBuilder& b) {
         return ev::fromDouble(e && !a.empty() ? e->getClipSampleCount(i32At(a, 0)) : 0);
     });
 
-    b.def("playClip", 3, [](Value, std::span<const Value> a) {
+    // playClip(clipId, gain?, loop?, when?) -> playbackId. A numeric 4th arg
+    // is a sample-accurate start time (engine seconds, from ctx.currentTime):
+    // the clip is queued on the audio clock so streamed chunks join
+    // gaplessly — no main-thread setTimeout jitter or clock drift. A `when`
+    // at/before now plays immediately, same as the 3-arg form.
+    b.def("playClip", 4, [](Value, std::span<const Value> a) {
         auto* e = getAudioEngine();
         if (!e || a.empty()) return ev::fromDouble(-1);
         int clipId = i32At(a, 0);
         float gain = a.size() >= 2 ? static_cast<float>(numAt(a, 1)) : 1.0f;
         bool loop = a.size() >= 3 ? boolAt(a, 2) : false;
+        if (a.size() >= 4 && ev::isNumber(a[3])) {
+            return ev::fromDouble(e->playClipAt(clipId, numAt(a, 3), gain, loop));
+        }
         return ev::fromDouble(e->playClip(clipId, gain, loop));
     });
 
@@ -141,29 +167,23 @@ void registerAudioContextClips(ObjectBuilder& b) {
     b.def("createClipFromFile", 1, [](Value, std::span<const Value> a) -> Value {
         auto* e = getAudioEngine();
         if (!e || a.empty()) return ev::fromDouble(-1);
-        std::string path = ev::toUtf8(a[0]);
+        std::string path = resolveAudioPath(ev::toUtf8(a[0]));
         return ev::fromDouble(e->createClipFromFile(path.c_str()));
     });
 
+    // createClipFromFileAsync(path) -> Promise<clipId>. Decode + resample run
+    // on a background thread (host_audio_io.cpp); the promise resolves with
+    // the clip id or rejects with an Error carrying the actionable decode
+    // message from broaudio (corrupt stream, size cap, unsupported codec)
+    // once the host ticks (api.h tickAsyncJobs / drainMicChunks).
     b.def("createClipFromFileAsync", 1, [](Value, std::span<const Value> a) -> Value {
-        ev::Persistent p{ev::createPromise()};
-        auto* e = getAudioEngine();
-        if (!e || a.empty()) {
-            ev::rejectPromise(p.get(), hostMakeDomError("Error", "createClipFromFileAsync: no engine or path"));
-            return p.get();
+        if (a.empty() || ev::isUndefined(a[0])) {
+            return ev::throwTypeError("createClipFromFileAsync: file path required");
         }
-        std::string path = ev::toUtf8(a[0]);
-        // The Ex form hands back the decoder's own message (which codec,
-        // what went wrong); the rejection carries it so the caller can act.
-        std::string err;
-        int clipId = e->createClipFromFileEx(path.c_str(), &err);
-        if (clipId >= 0) {
-            ev::resolvePromise(p.get(), ev::fromDouble(clipId));
-        } else {
-            std::string msg = err.empty() ? "createClipFromFileAsync: failed to load file" : err;
-            ev::rejectPromise(p.get(), hostMakeDomError("Error", msg));
-        }
-        return p.get();
+        // Resolve on the JS thread — the worker has no notion of the app
+        // directory or the mount table.
+        std::string path = resolveAudioPath(ev::toUtf8(a[0]));
+        return launchClipLoad(path);
     });
 }
 

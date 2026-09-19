@@ -23,6 +23,9 @@ void setAudioEngine(broaudio::Engine* engine) {
 }
 
 void shutdownAudio() {
+    // Background clip loads hold the engine pointer: join them before the
+    // engine they decode into goes away.
+    shutdownAsyncJobs();
     if (s_defaultEngine) {
         s_defaultEngine->shutdown();
         s_defaultEngine.reset();

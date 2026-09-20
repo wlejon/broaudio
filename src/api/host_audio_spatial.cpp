@@ -130,9 +130,12 @@ void decoratePannerNodeProto(ObjectBuilder& b) {
             p->posX = static_cast<float>(numAt(a, 0));
             p->posY = static_cast<float>(numAt(a, 1));
             p->posZ = static_cast<float>(numAt(a, 2));
-            if (p->posParamX) p->posParamX->value = p->posX;
-            if (p->posParamY) p->posParamY->value = p->posY;
-            if (p->posParamZ) p->posParamZ->value = p->posZ;
+            Value px = ev::getProperty(self_, "positionX");
+            if (auto* param = hostAudioParamOf(px)) param->value = p->posX;
+            Value py = ev::getProperty(self_, "positionY");
+            if (auto* param = hostAudioParamOf(py)) param->value = p->posY;
+            Value pz = ev::getProperty(self_, "positionZ");
+            if (auto* param = hostAudioParamOf(pz)) param->value = p->posZ;
         }
         return ev::undefined();
     });
@@ -155,9 +158,6 @@ Value makePannerNodeValue() {
     Value pxVal = makeAudioParamValue(AudioParamTarget::PannerPositionX, -1, 0.0f, -3.4e38f, 3.4e38f, 0.0f);
     Value pyVal = makeAudioParamValue(AudioParamTarget::PannerPositionY, -1, 0.0f, -3.4e38f, 3.4e38f, 0.0f);
     Value pzVal = makeAudioParamValue(AudioParamTarget::PannerPositionZ, -1, 0.0f, -3.4e38f, 3.4e38f, 0.0f);
-    panner->posParamX = hostAudioParamOf(pxVal);
-    panner->posParamY = hostAudioParamOf(pyVal);
-    panner->posParamZ = hostAudioParamOf(pzVal);
 
     ObjectBuilder b(g_pannerNodeClass.make(panner, hostPannerDtor));
     b.set("positionX", pxVal);

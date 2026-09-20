@@ -165,11 +165,6 @@ struct HostOscillatorNode {
     std::string type = "sine";
     bool started = false;
     bool stopped = false;
-    // The GainNode this oscillator was connect()ed to, read back at start():
-    // broaudio has no node graph, so `osc.connect(gain); gain.gain.value = g`
-    // reaches the voice as its gain. Undefined until connect, cleared by
-    // disconnect.
-    ev::Persistent connectedGain;
 };
 
 struct HostPeriodicWave {
@@ -223,9 +218,6 @@ struct HostAudioBufferSourceNode {
 
 struct HostPannerNode {
     HostAudioNode base;
-    HostAudioParam* posParamX = nullptr;
-    HostAudioParam* posParamY = nullptr;
-    HostAudioParam* posParamZ = nullptr;
     std::string panningModel = "equalpower";
     std::string distanceModel = "inverse";
     float refDistance = 1.0f;
@@ -286,7 +278,6 @@ struct HostChannelMergerNode {
 struct HostVoiceAllocator {
     uint32_t tag = kHostVoiceAllocatorTag;
     std::unique_ptr<broaudio::VoiceAllocator> allocator;
-    ev::Persistent voiceSetupCallback;
 };
 
 struct HostModMatrix {
@@ -297,9 +288,6 @@ struct HostModMatrix {
 struct HostMidiInput {
     uint32_t tag = kHostMidiInputTag;
     std::unique_ptr<broaudio::MidiInput> midi;
-    ev::Persistent pitchBendCb;
-    ev::Persistent rawCb;
-    std::vector<ev::Persistent> ccCallbacks = std::vector<ev::Persistent>(128);
 };
 
 struct HostSequence {

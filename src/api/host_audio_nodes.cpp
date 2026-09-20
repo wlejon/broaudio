@@ -134,8 +134,8 @@ void decorateAudioNodeProto(ObjectBuilder& b) {
             node->connectedTargets.emplace_back(a[0]);
             switch (node->nodeType) {
             case AudioNodeType::Oscillator:
-                if (HostOscillatorNode* osc = oscOf(self_)) {
-                    if (nodeOfKind<HostGainNode>(a[0], AudioNodeType::Gain)) osc->connectedGain = ev::Persistent(a[0]);
+                if (nodeOfKind<HostGainNode>(a[0], AudioNodeType::Gain)) {
+                    ev::setProperty(self_, "_connectedGain", a[0]);
                 }
                 break;
             case AudioNodeType::BiquadFilter:
@@ -176,7 +176,7 @@ void decorateAudioNodeProto(ObjectBuilder& b) {
                 }
             }
             if (node->nodeType == AudioNodeType::Oscillator) {
-                if (HostOscillatorNode* osc = oscOf(self_)) osc->connectedGain.set(ev::undefined());
+                ev::setProperty(self_, "_connectedGain", ev::undefined());
             } else if (node->nodeType == AudioNodeType::BiquadFilter) {
                 if (HostBiquadFilterNode* filter = filterOf(self_)) {
                     auto* eng = getAudioEngine();
@@ -305,10 +305,11 @@ void decorateOscillatorNodeProto(ObjectBuilder& b) {
         auto* eng = getAudioEngine();
         if (!eng || osc->voiceId < 0) return ev::undefined();
         double when = hasArg(a, 0) ? numAt(a, 0) : eng->currentTime();
-        if (ev::isObject(osc->connectedGain.get())) {
-            ev::Persistent gainParam(ev::getProperty(osc->connectedGain.get(), "gain"));
-            if (ev::isObject(gainParam.get())) {
-                Value v = ev::getProperty(gainParam.get(), "value");
+        Value connGain = ev::getProperty(self_, "_connectedGain");
+        if (ev::isObject(connGain)) {
+            Value gainParam = ev::getProperty(connGain, "gain");
+            if (ev::isObject(gainParam)) {
+                Value v = ev::getProperty(gainParam, "value");
                 if (ev::isNumber(v)) eng->setGain(osc->voiceId, static_cast<float>(ev::toDouble(v)));
             }
             // The reads above may have moved the heap; re-derive the node.
@@ -339,9 +340,9 @@ void decorateOscillatorNodeProto(ObjectBuilder& b) {
                 eng->setVoicePan(osc->voiceId, panVal);
             } else if (cur->nodeType == AudioNodeType::Panner) {
                 auto* pn = reinterpret_cast<HostPannerNode*>(cur);
-                float px = pn->posParamX ? pn->posParamX->evaluate(when) : pn->posX;
-                float py = pn->posParamY ? pn->posParamY->evaluate(when) : pn->posY;
-                float pz = pn->posParamZ ? pn->posParamZ->evaluate(when) : pn->posZ;
+                float px = pn->posX;
+                float py = pn->posY;
+                float pz = pn->posZ;
                 eng->setVoiceSpatialEnabled(osc->voiceId, true);
                 eng->setVoiceSpatialPosition(osc->voiceId, px, py, pz);
                 eng->setVoiceSpatialRefDistance(osc->voiceId, pn->refDistance);

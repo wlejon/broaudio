@@ -162,7 +162,6 @@ broaudio::StealPolicy parseStealPolicy(const std::string& str) {
 
 void hostVoiceAllocatorDtor(void* p) {
     auto* h = static_cast<HostVoiceAllocator*>(p);
-    h->voiceSetupCallback.set(ev::undefined());
     delete h;
 }
 
@@ -172,9 +171,6 @@ void hostModMatrixDtor(void* p) {
 
 void hostMidiInputDtor(void* p) {
     auto* h = static_cast<HostMidiInput*>(p);
-    h->pitchBendCb.set(ev::undefined());
-    h->rawCb.set(ev::undefined());
-    for (auto& cb : h->ccCallbacks) cb.set(ev::undefined());
     delete h;
 }
 
@@ -230,8 +226,18 @@ static void decorateVoiceAllocatorProto(ObjectBuilder& b) {
     b.def("noteOn", 3, [](Value self, std::span<const Value> a) {
         auto* h = hostVoiceAllocatorOf(self);
         if (h && h->allocator && a.size() >= 2) {
+            Value cb = ev::getProperty(self, "_voiceSetup");
+            if (ev::isFunction(cb)) {
+                h->allocator->setVoiceSetup([cb](int voiceId, int note, float vel) {
+                    Value args[3] = { ev::fromDouble(voiceId), ev::fromDouble(note), ev::fromDouble(vel) };
+                    ev::call(cb, ev::undefined(), std::span<const Value>(args, 3));
+                });
+            } else {
+                h->allocator->setVoiceSetup(nullptr);
+            }
             double when = a.size() >= 3 ? numAt(a, 2) : 0.0;
             int voice = h->allocator->noteOn(i32At(a, 0), static_cast<float>(numAt(a, 1)), when);
+            h->allocator->setVoiceSetup(nullptr);
             return ev::fromDouble(voice);
         }
         return ev::fromDouble(-1);
@@ -275,16 +281,9 @@ static void decorateVoiceAllocatorProto(ObjectBuilder& b) {
         auto* h = hostVoiceAllocatorOf(self);
         if (!h || !h->allocator) return ev::undefined();
         if (!a.empty() && ev::isFunction(a[0])) {
-            h->voiceSetupCallback = ev::Persistent(a[0]);
-            h->allocator->setVoiceSetup([h](int voiceId, int note, float vel) {
-                if (h && ev::isFunction(h->voiceSetupCallback.get())) {
-                    Value args[3] = { ev::fromDouble(voiceId), ev::fromDouble(note), ev::fromDouble(vel) };
-                    ev::call(h->voiceSetupCallback.get(), ev::undefined(), std::span<const Value>(args, 3));
-                }
-            });
+            ev::setProperty(self, "_voiceSetup", a[0]);
         } else {
-            h->voiceSetupCallback.set(ev::undefined());
-            h->allocator->setVoiceSetup(nullptr);
+            ev::setProperty(self, "_voiceSetup", ev::undefined());
         }
         return ev::undefined();
     });
@@ -482,6 +481,7 @@ static void decorateMidiInputProto(ObjectBuilder& b) {
         if (h && h->midi && !a.empty()) {
             auto* alloc = hostVoiceAllocatorOf(a[0]);
             h->midi->connectToAllocator(alloc ? alloc->allocator.get() : nullptr);
+            ev::setProperty(self, "_connectedAllocator", a[0]);
         }
         return ev::undefined();
     });
@@ -491,17 +491,11 @@ static void decorateMidiInputProto(ObjectBuilder& b) {
         if (h && h->midi && a.size() >= 2) {
             int cc = i32At(a, 0);
             if (cc >= 0 && cc < 128) {
+                std::string prop = "_cc_" + std::to_string(cc);
                 if (ev::isFunction(a[1])) {
-                    h->ccCallbacks[cc] = ev::Persistent(a[1]);
-                    h->midi->onControlChange(static_cast<uint8_t>(cc), [h, cc](uint8_t ch, uint8_t ccn, uint8_t val) {
-                        if (h && ev::isFunction(h->ccCallbacks[cc].get())) {
-                            Value args[3] = { ev::fromDouble(ch), ev::fromDouble(ccn), ev::fromDouble(val) };
-                            ev::call(h->ccCallbacks[cc].get(), ev::undefined(), std::span<const Value>(args, 3));
-                        }
-                    });
+                    ev::setProperty(self, prop.c_str(), a[1]);
                 } else {
-                    h->ccCallbacks[cc].set(ev::undefined());
-                    h->midi->onControlChange(static_cast<uint8_t>(cc), nullptr);
+                    ev::setProperty(self, prop.c_str(), ev::undefined());
                 }
             }
         }
@@ -512,16 +506,9 @@ static void decorateMidiInputProto(ObjectBuilder& b) {
         auto* h = hostMidiInputOf(self);
         if (h && h->midi && !a.empty()) {
             if (ev::isFunction(a[0])) {
-                h->pitchBendCb = ev::Persistent(a[0]);
-                h->midi->onPitchBend([h](uint8_t ch, int16_t val) {
-                    if (h && ev::isFunction(h->pitchBendCb.get())) {
-                        Value args[2] = { ev::fromDouble(ch), ev::fromDouble(val) };
-                        ev::call(h->pitchBendCb.get(), ev::undefined(), std::span<const Value>(args, 2));
-                    }
-                });
+                ev::setProperty(self, "_pitchBendCb", a[0]);
             } else {
-                h->pitchBendCb.set(ev::undefined());
-                h->midi->onPitchBend(nullptr);
+                ev::setProperty(self, "_pitchBendCb", ev::undefined());
             }
         }
         return ev::undefined();
@@ -531,23 +518,9 @@ static void decorateMidiInputProto(ObjectBuilder& b) {
         auto* h = hostMidiInputOf(self);
         if (h && h->midi && !a.empty()) {
             if (ev::isFunction(a[0])) {
-                h->rawCb = ev::Persistent(a[0]);
-                h->midi->onRawEvent([h](const broaudio::MidiEvent& ev) {
-                    if (h && ev::isFunction(h->rawCb.get())) {
-                        ObjectBuilder evObj;
-                        evObj.set("type", ev::fromDouble(static_cast<int>(ev.type)));
-                        evObj.set("channel", ev::fromDouble(ev.channel));
-                        evObj.set("data1", ev::fromDouble(ev.data1));
-                        evObj.set("data2", ev::fromDouble(ev.data2));
-                        evObj.set("pitchBend", ev::fromDouble(ev.pitchBend));
-                        evObj.set("timestamp", ev::fromDouble(ev.timestamp));
-                        Value v = evObj.get();
-                        ev::call(h->rawCb.get(), ev::undefined(), std::span<const Value>(&v, 1));
-                    }
-                });
+                ev::setProperty(self, "_rawCb", a[0]);
             } else {
-                h->rawCb.set(ev::undefined());
-                h->midi->onRawEvent(nullptr);
+                ev::setProperty(self, "_rawCb", ev::undefined());
             }
         }
         return ev::undefined();
@@ -555,7 +528,71 @@ static void decorateMidiInputProto(ObjectBuilder& b) {
 
     b.def("processEvents", 0, [](Value self, std::span<const Value>) {
         auto* h = hostMidiInputOf(self);
-        if (h && h->midi) h->midi->processEvents();
+        if (!h || !h->midi) return ev::undefined();
+
+        Value rawCb = ev::getProperty(self, "_rawCb");
+        if (ev::isFunction(rawCb)) {
+            h->midi->onRawEvent([rawCb](const broaudio::MidiEvent& ev) {
+                ObjectBuilder evObj;
+                evObj.set("type", ev::fromDouble(static_cast<int>(ev.type)));
+                evObj.set("channel", ev::fromDouble(ev.channel));
+                evObj.set("data1", ev::fromDouble(ev.data1));
+                evObj.set("data2", ev::fromDouble(ev.data2));
+                evObj.set("pitchBend", ev::fromDouble(ev.pitchBend));
+                evObj.set("timestamp", ev::fromDouble(ev.timestamp));
+                Value v = evObj.get();
+                ev::call(rawCb, ev::undefined(), std::span<const Value>(&v, 1));
+            });
+        } else {
+            h->midi->onRawEvent(nullptr);
+        }
+
+        Value pbCb = ev::getProperty(self, "_pitchBendCb");
+        if (ev::isFunction(pbCb)) {
+            h->midi->onPitchBend([pbCb](uint8_t ch, int16_t val) {
+                Value args[2] = { ev::fromDouble(ch), ev::fromDouble(val) };
+                ev::call(pbCb, ev::undefined(), std::span<const Value>(args, 2));
+            });
+        } else {
+            h->midi->onPitchBend(nullptr);
+        }
+
+        for (int cc = 0; cc < 128; ++cc) {
+            std::string prop = "_cc_" + std::to_string(cc);
+            Value cb = ev::getProperty(self, prop.c_str());
+            if (ev::isFunction(cb)) {
+                h->midi->onControlChange(static_cast<uint8_t>(cc), [cb](uint8_t ch, uint8_t ccn, uint8_t val) {
+                    Value args[3] = { ev::fromDouble(ch), ev::fromDouble(ccn), ev::fromDouble(val) };
+                    ev::call(cb, ev::undefined(), std::span<const Value>(args, 3));
+                });
+            } else {
+                h->midi->onControlChange(static_cast<uint8_t>(cc), nullptr);
+            }
+        }
+
+        Value allocVal = ev::getProperty(self, "_connectedAllocator");
+        HostVoiceAllocator* alloc = hostVoiceAllocatorOf(allocVal);
+        if (alloc && alloc->allocator) {
+            Value cb = ev::getProperty(allocVal, "_voiceSetup");
+            if (ev::isFunction(cb)) {
+                alloc->allocator->setVoiceSetup([cb](int voiceId, int note, float vel) {
+                    Value args[3] = { ev::fromDouble(voiceId), ev::fromDouble(note), ev::fromDouble(vel) };
+                    ev::call(cb, ev::undefined(), std::span<const Value>(args, 3));
+                });
+            }
+        }
+
+        h->midi->processEvents();
+
+        if (alloc && alloc->allocator) {
+            alloc->allocator->setVoiceSetup(nullptr);
+        }
+        h->midi->onRawEvent(nullptr);
+        h->midi->onPitchBend(nullptr);
+        for (int cc = 0; cc < 128; ++cc) {
+            h->midi->onControlChange(static_cast<uint8_t>(cc), nullptr);
+        }
+
         return ev::undefined();
     });
 }

@@ -407,9 +407,9 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
                     e->setPlaybackPan(src->playbackId, panVal);
                 }
                 if (hasSpatial && pannerNode) {
-                    float px = pannerNode->posParamX ? pannerNode->posParamX->evaluate(curTime) : pannerNode->posX;
-                    float py = pannerNode->posParamY ? pannerNode->posParamY->evaluate(curTime) : pannerNode->posY;
-                    float pz = pannerNode->posParamZ ? pannerNode->posParamZ->evaluate(curTime) : pannerNode->posZ;
+                    float px = pannerNode->posX;
+                    float py = pannerNode->posY;
+                    float pz = pannerNode->posZ;
                     e->setPlaybackSpatialEnabled(src->playbackId, true);
                     e->setPlaybackSpatialPosition(src->playbackId, px, py, pz);
                     e->setPlaybackSpatialRefDistance(src->playbackId, pannerNode->refDistance);

@@ -184,4 +184,29 @@ TEST(disabled_is_passthrough) {
     PASS();
 }
 
+TEST(foldback_handles_nan_and_inf) {
+    Distortion dist;
+    dist.enabled = true;
+    dist.mode = DistortionMode::Foldback;
+    dist.drive = 2.0f;
+    dist.mix = 1.0f;
+    dist.outputGain = 1.0f;
+
+    float nanVal = std::numeric_limits<float>::quiet_NaN();
+    float infVal = std::numeric_limits<float>::infinity();
+
+    float buf[6] = { nanVal, -nanVal, infVal, -infVal, 1000000.5f, -1000000.5f };
+    dist.processStereo(buf, 3);
+
+    ASSERT_TRUE(std::isfinite(buf[0]));
+    ASSERT_TRUE(std::isfinite(buf[1]));
+    ASSERT_TRUE(std::isfinite(buf[2]));
+    ASSERT_TRUE(std::isfinite(buf[3]));
+    ASSERT_TRUE(std::isfinite(buf[4]));
+    ASSERT_TRUE(std::isfinite(buf[5]));
+    ASSERT_LT(std::fabs(buf[4]), 1.001f);
+    ASSERT_LT(std::fabs(buf[5]), 1.001f);
+    PASS();
+}
+
 int main() { return runAllTests(); }

@@ -148,6 +148,7 @@ void decorateAudioNodeProto(ObjectBuilder& b) {
                 if (HostAnalyserNode* analyser = analyserOf(a[0])) analyser->source = 1;
                 break;
             default:
+                if (HostAnalyserNode* analyser = analyserOf(a[0])) analyser->hasConnectedInput = true;
                 break;
             }
         }
@@ -159,12 +160,14 @@ void decorateAudioNodeProto(ObjectBuilder& b) {
         if (node) {
             if (a.empty() || ev::isUndefined(a[0])) {
                 for (auto& t : node->connectedTargets) {
+                    if (HostAnalyserNode* an = analyserOf(t.get())) an->hasConnectedInput = false;
                     t.set(ev::undefined());
                 }
                 node->connectedTargets.clear();
             } else {
                 for (auto it = node->connectedTargets.begin(); it != node->connectedTargets.end();) {
                     if (it->get() == a[0] || ev::handleData(it->get()) == ev::handleData(a[0])) {
+                        if (HostAnalyserNode* an = analyserOf(it->get())) an->hasConnectedInput = false;
                         it->set(ev::undefined());
                         it = node->connectedTargets.erase(it);
                     } else {
@@ -561,7 +564,11 @@ static void readAnalyserSource(const HostAnalyserNode* analyser, float* dst, int
     auto* e = getAudioEngine();
     if (!e || n <= 0) return;
     if (analyser->source == 2) {
-        e->outputBuffer().readLatest(dst, n);
+        if (analyser->hasConnectedInput && analyser->inputTapBuffer) {
+            analyser->inputTapBuffer->readLatest(dst, n);
+        } else {
+            e->outputBuffer().readLatest(dst, n);
+        }
         if (!e->isMicMuted()) {
             std::vector<float> mic(static_cast<size_t>(n), 0.0f);
             e->micBuffer().readLatest(mic.data(), n);
@@ -569,8 +576,15 @@ static void readAnalyserSource(const HostAnalyserNode* analyser, float* dst, int
         }
         return;
     }
-    const auto& buf = (analyser->source == 1) ? e->micBuffer() : e->outputBuffer();
-    buf.readLatest(dst, n);
+    if (analyser->source == 1) {
+        e->micBuffer().readLatest(dst, n);
+        return;
+    }
+    if (analyser->hasConnectedInput && analyser->inputTapBuffer) {
+        analyser->inputTapBuffer->readLatest(dst, n);
+    } else {
+        e->outputBuffer().readLatest(dst, n);
+    }
 }
 
 void decorateMediaStreamSourceNodeProto(ObjectBuilder&) {
@@ -779,6 +793,7 @@ void decorateAnalyserNodeProto(ObjectBuilder& b) {
 Value makeAnalyserNodeValue() {
     auto* analyser = new HostAnalyserNode();
     analyser->base.nodeType = AudioNodeType::Analyser;
+    analyser->inputTapBuffer = std::make_shared<broaudio::AnalysisBuffer>(16384);
     return g_analyserNodeClass.make(analyser, hostAnalyserDtor);
 }
 

@@ -48,7 +48,9 @@ Value makeDelayNodeValue(double maxDelayTime) {
     delay->maxDelayTime = maxDelayTime;
 
     ObjectBuilder b(g_delayNodeClass.make(delay, hostDelayDtor));
-    b.set("delayTime", makeAudioParamValue(AudioParamTarget::DelayTime, -1, 0.0f, 0.0f, static_cast<float>(maxDelayTime), 0.0f));
+    Value dt = makeAudioParamValue(AudioParamTarget::DelayTime, -1, 0.0f, 0.0f, static_cast<float>(maxDelayTime), 0.0f);
+    delay->delayTimeParam = hostAudioParamOf(dt);
+    b.set("delayTime", dt);
     return b.get();
 }
 
@@ -159,7 +161,20 @@ Value makeConvolverNodeValue() {
 // ChannelSplitterNode & ChannelMergerNode
 // ---------------------------------------------------------------------------
 
-void decorateChannelSplitterNodeProto(ObjectBuilder&) {}
+void decorateChannelSplitterNodeProto(ObjectBuilder& b) {
+    b.accessor("numberOfOutputs", [](Value self_, std::span<const Value>) {
+        HostChannelSplitterNode* s = channelSplitterOf(self_);
+        return ev::fromDouble(s ? s->numberOfOutputs : 6);
+    }, nullptr);
+    b.accessor("channelCount", [](Value self_, std::span<const Value>) {
+        HostChannelSplitterNode* s = channelSplitterOf(self_);
+        return ev::fromDouble(s ? s->numberOfOutputs : 6);
+    }, [](Value, std::span<const Value>) {
+        return ev::undefined();
+    });
+    b.set("channelCountMode", ev::fromUtf8("explicit"));
+    b.set("channelInterpretation", ev::fromUtf8("discrete"));
+}
 
 Value makeChannelSplitterNodeValue(int numberOfOutputs) {
     if (numberOfOutputs <= 0) numberOfOutputs = 6;
@@ -171,7 +186,19 @@ Value makeChannelSplitterNodeValue(int numberOfOutputs) {
     return g_channelSplitterNodeClass.make(s, hostChannelSplitterDtor);
 }
 
-void decorateChannelMergerNodeProto(ObjectBuilder&) {}
+void decorateChannelMergerNodeProto(ObjectBuilder& b) {
+    b.accessor("numberOfInputs", [](Value self_, std::span<const Value>) {
+        HostChannelMergerNode* m = channelMergerOf(self_);
+        return ev::fromDouble(m ? m->numberOfInputs : 6);
+    }, nullptr);
+    b.accessor("channelCount", [](Value, std::span<const Value>) {
+        return ev::fromDouble(1.0);
+    }, [](Value, std::span<const Value>) {
+        return ev::undefined();
+    });
+    b.set("channelCountMode", ev::fromUtf8("explicit"));
+    b.set("channelInterpretation", ev::fromUtf8("speakers"));
+}
 
 Value makeChannelMergerNodeValue(int numberOfInputs) {
     if (numberOfInputs <= 0) numberOfInputs = 6;

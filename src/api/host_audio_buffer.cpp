@@ -1,4 +1,5 @@
 #include "host_audio_internal.h"
+#include <broaudio/dsp/convolution_reverb.h>
 #include <broaudio/dsp/resampler.h>
 #include <broaudio/io/audio_file.h>
 #include <cstring>
@@ -249,9 +250,7 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
                 }
             }
 
-            src->clipId = e->createClip(interleaved.data(), frames * channels, channels);
-
-            // Traverse downstream connected nodes to apply Gain and Panner settings
+            // Traverse downstream connected nodes to apply DSP processing (filters, delays, convolvers, waveshaper, gain, analyser) and spatial/pan settings
             float netGain = 1.0f;
             bool hasPan = false;
             float panVal = 0.0f;
@@ -259,6 +258,7 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
             HostPannerNode* pannerNode = nullptr;
 
             double curTime = e->currentTime();
+            int sr = e->sampleRate();
             std::vector<HostAudioNode*> queue;
             std::vector<HostAudioNode*> visited;
             for (auto& t : src->base.connectedTargets) {
@@ -278,6 +278,98 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
                     if (gn->gainParam) {
                         netGain *= gn->gainParam->evaluate(curTime);
                     }
+                } else if (cur->nodeType == AudioNodeType::BiquadFilter) {
+                    auto* bf = reinterpret_cast<HostBiquadFilterNode*>(cur);
+                    broaudio::BiquadFilter bq;
+                    if (bf->slot >= 0) {
+                        bq.type = e->getBusFilterType(0, bf->slot);
+                        bq.frequency = e->getBusFilterFrequency(0, bf->slot);
+                        bq.Q = e->getBusFilterQ(0, bf->slot);
+                        bq.gainDB = e->getBusFilterGain(0, bf->slot);
+                    } else {
+                        bq.type = parseFilterType(bf->type);
+                    }
+                    bq.computeCoefficients(sr);
+                    bq.snapToTarget();
+                    for (int f = 0; f < frames; ++f) {
+                        for (int c = 0; c < channels; ++c) {
+                            interleaved[f * channels + c] = bq.process(interleaved[f * channels + c], c % 2);
+                        }
+                    }
+                } else if (cur->nodeType == AudioNodeType::Delay) {
+                    auto* dn = reinterpret_cast<HostDelayNode*>(cur);
+                    float dt = dn->delayTimeParam ? dn->delayTimeParam->evaluate(curTime) : 0.0f;
+                    if (dt > 0.0f) {
+                        int delaySamples = static_cast<int>(dt * sr);
+                        if (delaySamples > 0 && delaySamples < frames) {
+                            std::vector<float> delayed(frames * channels, 0.0f);
+                            for (int f = delaySamples; f < frames; ++f) {
+                                for (int c = 0; c < channels; ++c) {
+                                    delayed[f * channels + c] = interleaved[(f - delaySamples) * channels + c];
+                                }
+                            }
+                            interleaved = std::move(delayed);
+                        }
+                    }
+                } else if (cur->nodeType == AudioNodeType::Convolver) {
+                    auto* conv = reinterpret_cast<HostConvolverNode*>(cur);
+                    if (conv->buffer && conv->buffer->length > 0 && conv->buffer->numberOfChannels > 0) {
+                        int irChannels = conv->buffer->numberOfChannels;
+                        int irFrames = conv->buffer->length;
+                        std::vector<float> irInterleaved(irFrames * irChannels);
+                        for (int f = 0; f < irFrames; ++f) {
+                            for (int c = 0; c < irChannels; ++c) {
+                                irInterleaved[f * irChannels + c] = (c < static_cast<int>(conv->buffer->channels.size()) && f < static_cast<int>(conv->buffer->channels[c].size()))
+                                    ? conv->buffer->channels[c][f] : 0.0f;
+                            }
+                        }
+                        broaudio::ConvolutionReverb cr;
+                        cr.init(sr, 256);
+                        cr.normalize = conv->normalize;
+                        if (cr.loadImpulseResponse(irInterleaved.data(), irFrames, irChannels, sr, true)) {
+                            cr.mix = 1.0f;
+                            cr.gain = 1.0f;
+                            if (channels == 1) {
+                                std::vector<float> stereo(frames * 2);
+                                for (int f = 0; f < frames; ++f) {
+                                    stereo[f * 2] = interleaved[f];
+                                    stereo[f * 2 + 1] = interleaved[f];
+                                }
+                                cr.processStereo(stereo.data(), frames);
+                                interleaved = std::move(stereo);
+                                channels = 2;
+                            } else if (channels == 2) {
+                                cr.processStereo(interleaved.data(), frames);
+                            }
+                        }
+                    }
+                } else if (cur->nodeType == AudioNodeType::WaveShaper) {
+                    auto* ws = reinterpret_cast<HostWaveShaperNode*>(cur);
+                    if (!ws->curve.empty()) {
+                        size_t N = ws->curve.size();
+                        for (float& s : interleaved) {
+                            float norm = std::clamp(s, -1.0f, 1.0f);
+                            float idx = (norm * 0.5f + 0.5f) * static_cast<float>(N - 1);
+                            size_t i0 = static_cast<size_t>(idx);
+                            size_t i1 = std::min(i0 + 1, N - 1);
+                            float frac = idx - static_cast<float>(i0);
+                            s = ws->curve[i0] + frac * (ws->curve[i1] - ws->curve[i0]);
+                        }
+                    }
+                } else if (cur->nodeType == AudioNodeType::Analyser) {
+                    auto* an = reinterpret_cast<HostAnalyserNode*>(cur);
+                    if (an->inputTapBuffer) {
+                        if (channels == 1) {
+                            an->inputTapBuffer->write(interleaved.data(), frames);
+                        } else {
+                            std::vector<float> mono(frames);
+                            for (int f = 0; f < frames; ++f) {
+                                mono[f] = 0.5f * (interleaved[f * channels] + interleaved[f * channels + 1]);
+                            }
+                            an->inputTapBuffer->write(mono.data(), frames);
+                        }
+                        an->hasConnectedInput = true;
+                    }
                 } else if (cur->nodeType == AudioNodeType::StereoPanner) {
                     auto* sp = reinterpret_cast<HostStereoPannerNode*>(cur);
                     hasPan = true;
@@ -296,6 +388,8 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
                     if (next) queue.push_back(next);
                 }
             }
+
+            src->clipId = e->createClip(interleaved.data(), frames * channels, channels);
 
             double when = numAt(a, 0);
             if (when > 0.0) {

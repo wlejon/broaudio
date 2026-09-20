@@ -246,7 +246,12 @@ void decorateAudioContextProto(ObjectBuilder& b) {
 
     // 4. decodeAudioData
     b.def("decodeAudioData", 3, [](Value, std::span<const Value> a) -> Value {
-        if (a.empty()) return ev::null();
+        ev::Persistent p(ev::createPromise());
+        if (a.empty()) {
+            Value err = hostMakeDomError("TypeError", "decodeAudioData: audio buffer argument required");
+            ev::rejectPromise(p.get(), err);
+            return p.get();
+        }
         Value inputV = a[0];
         Value successCb = a.size() >= 2 ? a[1] : ev::undefined();
         Value errorCb = a.size() >= 3 ? a[2] : ev::undefined();
@@ -254,21 +259,27 @@ void decorateAudioContextProto(ObjectBuilder& b) {
         const uint8_t* rawData = nullptr;
         size_t rawLen = 0, elemSize = 1;
         if (!bufferBytes(inputV, &rawData, &rawLen, &elemSize) || rawLen == 0) {
+            Value err = hostMakeDomError("EncodingError", "decodeAudioData: invalid buffer");
             if (ev::isFunction(errorCb)) {
-                Value err = hostMakeDomError("EncodingError", "decodeAudioData: invalid buffer");
-                ev::call(errorCb, ev::undefined(), std::span<const Value>(&err, 1));
+                try {
+                    ev::call(errorCb, ev::undefined(), std::span<const Value>(&err, 1));
+                } catch (...) {}
             }
-            return ev::null();
+            ev::rejectPromise(p.get(), err);
+            return p.get();
         }
 
         broaudio::AudioFileData data = broaudio::loadAudioFileFromMemory(rawData, rawLen);
         if (!data.valid()) {
+            std::string msg = data.error.empty() ? "decodeAudioData: failed to decode audio" : data.error;
+            Value err = hostMakeDomError("EncodingError", msg);
             if (ev::isFunction(errorCb)) {
-                std::string msg = data.error.empty() ? "decodeAudioData: failed to decode audio" : data.error;
-                Value err = hostMakeDomError("EncodingError", msg);
-                ev::call(errorCb, ev::undefined(), std::span<const Value>(&err, 1));
+                try {
+                    ev::call(errorCb, ev::undefined(), std::span<const Value>(&err, 1));
+                } catch (...) {}
             }
-            return ev::null();
+            ev::rejectPromise(p.get(), err);
+            return p.get();
         }
 
         auto* e = getAudioEngine();
@@ -282,50 +293,31 @@ void decorateAudioContextProto(ObjectBuilder& b) {
             samples = std::move(data.samples);
         }
 
-        ObjectBuilder res;
+        Value bufVal = makeAudioBufferValue(data.channels, numFrames, engRate);
+        HostAudioBuffer* hostBuf = hostAudioBufferOf(bufVal);
+        if (hostBuf && numFrames > 0 && data.channels > 0) {
+            hostBuf->channels.resize(data.channels, std::vector<float>(numFrames, 0.0f));
+            for (int c = 0; c < data.channels; ++c) {
+                for (int i = 0; i < numFrames; ++i) {
+                    hostBuf->channels[c][i] = samples[i * data.channels + c];
+                }
+            }
+        }
+
         Value samplesArr = ev::createTypedArray(ev::elements::Float32, static_cast<uint32_t>(samples.size()));
         ev::fillTypedArray(samplesArr, std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(samples.data()),
                                                                 samples.size() * sizeof(float)));
-        res.set("samples", samplesArr);
-        res.set("channels", ev::fromDouble(data.channels));
-        res.set("sampleRate", ev::fromDouble(engRate));
-        res.set("numFrames", ev::fromDouble(numFrames));
-        res.set("numberOfChannels", ev::fromDouble(data.channels));
-        res.set("length", ev::fromDouble(numFrames));
-        res.set("duration", ev::fromDouble(static_cast<double>(numFrames) / engRate));
+        ev::setProperty(bufVal, "samples", samplesArr);
+        ev::setProperty(bufVal, "channels", ev::fromDouble(data.channels));
+        ev::setProperty(bufVal, "numFrames", ev::fromDouble(numFrames));
 
-        int chCount = data.channels;
-        res.def("getChannelData", 1, [samples, chCount, numFrames](Value, std::span<const Value> ca) -> Value {
-            int c = ca.empty() ? 0 : i32At(ca, 0);
-            if (c < 0 || c >= chCount || numFrames <= 0) return ev::null();
-            std::vector<float> ch(numFrames);
-            for (int i = 0; i < numFrames; ++i) ch[i] = samples[i * chCount + c];
-            Value out = ev::createTypedArray(ev::elements::Float32, static_cast<uint32_t>(numFrames));
-            ev::fillTypedArray(out, std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(ch.data()),
-                                                            numFrames * sizeof(float)));
-            return out;
-        });
-
-        res.def("then", 2, [](Value self, std::span<const Value> ta) -> Value {
-            if (!ta.empty() && ev::isFunction(ta[0])) {
-                try {
-                    ev::call(ta[0], ev::undefined(), std::span<const Value>(&self, 1));
-                } catch (...) {}
-            }
-            return self;
-        });
-
-        res.def("catch", 1, [](Value self, std::span<const Value>) -> Value {
-            return self;
-        });
-
-        Value resVal = res.get();
         if (ev::isFunction(successCb)) {
             try {
-                ev::call(successCb, ev::undefined(), std::span<const Value>(&resVal, 1));
+                ev::call(successCb, ev::undefined(), std::span<const Value>(&bufVal, 1));
             } catch (...) {}
         }
-        return resVal;
+        ev::resolvePromise(p.get(), bufVal);
+        return p.get();
     });
 
     b.def("decodeAudioFile", 1, [](Value, std::span<const Value> a) -> Value {

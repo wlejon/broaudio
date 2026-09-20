@@ -21,6 +21,7 @@ constexpr int kMicRing = 4096;
 struct MicState {
     std::atomic<int> peakRingX10000[kMicRing];
     std::atomic<int> rmsRingX10000[kMicRing];
+    std::atomic<uint32_t> sampleSeq[kMicRing]{};
     std::atomic<uint64_t> writeCount{0};
     std::atomic<uint64_t> dropped{0};
 
@@ -50,6 +51,9 @@ void shutdownActiveMic() {
     g_mic.lastFired = 0;
     g_mic.chunkFrames = 0;
     g_mic.wantSamples = false;
+    for (int k = 0; k < kMicRing; ++k) {
+        g_mic.sampleSeq[k].store(0, std::memory_order_relaxed);
+    }
     g_mic.sampleRing.clear();
     g_mic.sampleRing.shrink_to_fit();
     g_mic.active = false;
@@ -84,9 +88,25 @@ void drainMicChunks() {
         o.set("index", ev::fromDouble(static_cast<double>(i)));
         o.set("peak", ev::fromDouble(pk / 10000.0));
         o.set("rms", ev::fromDouble(rms / 10000.0));
-        if (g_mic.wantSamples && g_mic.chunkFrames > 0) {
-            const float* src = g_mic.sampleRing.data() + static_cast<size_t>(slot) * static_cast<size_t>(g_mic.chunkFrames);
-            o.set("samples", makeFloat32Array(src, static_cast<size_t>(g_mic.chunkFrames)));
+        if (g_mic.wantSamples && g_mic.chunkFrames > 0 && !g_mic.sampleRing.empty()) {
+            size_t cf = static_cast<size_t>(g_mic.chunkFrames);
+            std::vector<float> chunkBuf(cf, 0.0f);
+            bool readOk = false;
+            for (int attempt = 0; attempt < 5; ++attempt) {
+                uint32_t s0 = g_mic.sampleSeq[slot].load(std::memory_order_acquire);
+                if (s0 & 1) continue;
+                const float* src = g_mic.sampleRing.data() + static_cast<size_t>(slot) * cf;
+                std::memcpy(chunkBuf.data(), src, cf * sizeof(float));
+                std::atomic_thread_fence(std::memory_order_acquire);
+                uint32_t s1 = g_mic.sampleSeq[slot].load(std::memory_order_acquire);
+                if (s0 == s1) {
+                    readOk = true;
+                    break;
+                }
+            }
+            if (readOk) {
+                o.set("samples", makeFloat32Array(chunkBuf.data(), cf));
+            }
         }
         Value chunkVal = o.get();
         ev::call(g_mic.onChunk.get(), ev::undefined(), std::span<const Value>(&chunkVal, 1));
@@ -187,14 +207,17 @@ void installMic() {
             int slot = static_cast<int>(idx % kMicRing);
             g_mic.peakRingX10000[slot].store(static_cast<int>(peak * 10000.0f), std::memory_order_relaxed);
             g_mic.rmsRingX10000[slot].store(static_cast<int>(rms * 10000.0f), std::memory_order_relaxed);
-            if (g_mic.wantSamples) {
+            if (g_mic.wantSamples && !g_mic.sampleRing.empty()) {
                 int cf = g_mic.chunkFrames;
                 int m = n < cf ? n : cf;
+                uint32_t seq = g_mic.sampleSeq[slot].load(std::memory_order_relaxed);
+                g_mic.sampleSeq[slot].store(seq + 1, std::memory_order_release);
                 float* dst = g_mic.sampleRing.data() + static_cast<size_t>(slot) * static_cast<size_t>(cf);
                 std::memcpy(dst, s, static_cast<size_t>(m) * sizeof(float));
                 if (m < cf) {
                     std::memset(dst + m, 0, static_cast<size_t>(cf - m) * sizeof(float));
                 }
+                g_mic.sampleSeq[slot].store(seq + 2, std::memory_order_release);
             }
             g_mic.writeCount.store(idx + 1, std::memory_order_release);
         });

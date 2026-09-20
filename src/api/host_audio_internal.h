@@ -195,6 +195,8 @@ struct HostAnalyserNode {
     // connect()ed to the analyser sets 1; the `source` property sets any.
     int source = 0;
     std::vector<float> smoothedMagnitudes;
+    std::shared_ptr<broaudio::AnalysisBuffer> inputTapBuffer;
+    bool hasConnectedInput = false;
 };
 
 struct HostAudioBuffer {
@@ -242,6 +244,7 @@ struct HostStereoPannerNode {
 
 struct HostDelayNode {
     HostAudioNode base;
+    HostAudioParam* delayTimeParam = nullptr;
     double maxDelayTime = 1.0;
 };
 

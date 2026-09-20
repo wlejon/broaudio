@@ -7,7 +7,9 @@ namespace broaudio {
 
 float Distortion::shapeSample(float input) const
 {
+    if (!std::isfinite(input)) return 0.0f;
     float x = input * drive;
+    if (!std::isfinite(x)) return 0.0f;
 
     switch (mode) {
         case DistortionMode::SoftClip:
@@ -18,16 +20,15 @@ float Distortion::shapeSample(float input) const
             return std::clamp(x, -1.0f, 1.0f);
 
         case DistortionMode::Foldback: {
-            // Fold signal back when it exceeds [-1, 1]
+            // Fold signal back when it exceeds [-threshold, threshold]
             // Repeated folding creates harmonically rich overtones
             float threshold = 1.0f;
-            while (x > threshold || x < -threshold) {
-                if (x > threshold)
-                    x = 2.0f * threshold - x;
-                else if (x < -threshold)
-                    x = -2.0f * threshold - x;
-            }
-            return x;
+            float absX = std::fabs(x);
+            if (absX <= threshold) return x;
+
+            float y = std::fmod(absX - threshold, 4.0f * threshold);
+            float v = (y < 2.0f * threshold) ? (threshold - y) : (y - 3.0f * threshold);
+            return (x < 0.0f) ? -v : v;
         }
 
         case DistortionMode::Bitcrush: {
@@ -51,6 +52,8 @@ void Distortion::processStereo(float* buf, int numFrames)
     for (int i = 0; i < numFrames; i++) {
         float dryL = buf[i * 2];
         float dryR = buf[i * 2 + 1];
+        if (!std::isfinite(dryL)) dryL = 0.0f;
+        if (!std::isfinite(dryR)) dryR = 0.0f;
 
         float wetL, wetR;
 

@@ -190,6 +190,52 @@ static void test_graph_script() {
             src.buffer = buf;
             src.connect(gain);
 
+            // Test 1: copyToChannel invalidates/updates cached TypedArray from getChannelData
+            const testBuf = new AudioBuffer({ length: 16, numberOfChannels: 2, sampleRate: 44100 });
+            const chData0 = testBuf.getChannelData(0);
+            if (chData0[0] !== 0 || chData0[1] !== 0) throw new Error("buffer not zero-initialized");
+            const newSamples = new Float32Array([0.125, 0.25, 0.5, 0.75]);
+            testBuf.copyToChannel(newSamples, 0, 0);
+            if (Math.abs(chData0[0] - 0.125) > 1e-5 || Math.abs(chData0[1] - 0.25) > 1e-5) {
+                throw new Error("copyToChannel failed to synchronize cached channel data: " + chData0[0]);
+            }
+            const chDataAgain = testBuf.getChannelData(0);
+            if (Math.abs(chDataAgain[2] - 0.5) > 1e-5 || Math.abs(chDataAgain[3] - 0.75) > 1e-5) {
+                throw new Error("getChannelData after copyToChannel returned stale data");
+            }
+
+            // Test 2: AudioParam linear and exponential ramps and setTarget
+            const testGain = ctx.createGain();
+            testGain.gain.setValueAtTime(0.2, 0.0);
+            testGain.gain.linearRampToValueAtTime(0.8, 2.0);
+
+            if (Math.abs(testGain.gain.getValueAtTime(0.0) - 0.2) > 1e-4) throw new Error("linearRamp at t=0");
+            if (Math.abs(testGain.gain.getValueAtTime(1.0) - 0.5) > 1e-4) throw new Error("linearRamp at t=1: " + testGain.gain.getValueAtTime(1.0));
+            if (Math.abs(testGain.gain.getValueAtTime(2.0) - 0.8) > 1e-4) throw new Error("linearRamp at t=2");
+
+            const expGain = ctx.createGain();
+            expGain.gain.setValueAtTime(1.0, 0.0);
+            expGain.gain.exponentialRampToValueAtTime(16.0, 4.0);
+            if (Math.abs(expGain.gain.getValueAtTime(0.0) - 1.0) > 1e-4) throw new Error("exponentialRamp at t=0");
+            if (Math.abs(expGain.gain.getValueAtTime(2.0) - 4.0) > 1e-4) throw new Error("exponentialRamp at t=2: " + expGain.gain.getValueAtTime(2.0));
+            if (Math.abs(expGain.gain.getValueAtTime(4.0) - 16.0) > 1e-4) throw new Error("exponentialRamp at t=4");
+
+            const targetGain = ctx.createGain();
+            targetGain.gain.setValueAtTime(1.0, 0.0);
+            targetGain.gain.setTargetAtTime(0.0, 0.0, 1.0);
+            if (Math.abs(targetGain.gain.getValueAtTime(1.0) - 0.367879) > 1e-3) throw new Error("setTarget at t=1: " + targetGain.gain.getValueAtTime(1.0));
+
+            // Test 3: AudioBufferSourceNode connected downstream settings (GainNode + PannerNode)
+            const playBuf = new AudioBuffer({ length: 64, numberOfChannels: 1, sampleRate: 44100 });
+            const playSrc = ctx.createBufferSource();
+            playSrc.buffer = playBuf;
+            const panner = ctx.createStereoPanner();
+            panner.pan.value = 0.5;
+            const routeGain = ctx.createGain();
+            routeGain.gain.value = 0.4;
+            playSrc.connect(panner).connect(routeGain).connect(ctx.destination);
+            playSrc.start();
+
             let threw = false;
             try { osc.connect(); } catch (e) { threw = e instanceof TypeError; }
             if (!threw) throw new Error("connect() with no destination should throw TypeError");

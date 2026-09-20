@@ -130,6 +130,9 @@ void decoratePannerNodeProto(ObjectBuilder& b) {
             p->posX = static_cast<float>(numAt(a, 0));
             p->posY = static_cast<float>(numAt(a, 1));
             p->posZ = static_cast<float>(numAt(a, 2));
+            if (p->posParamX) p->posParamX->value = p->posX;
+            if (p->posParamY) p->posParamY->value = p->posY;
+            if (p->posParamZ) p->posParamZ->value = p->posZ;
         }
         return ev::undefined();
     });
@@ -149,10 +152,17 @@ Value makePannerNodeValue() {
     auto* panner = new HostPannerNode();
     panner->base.nodeType = AudioNodeType::Panner;
 
+    Value pxVal = makeAudioParamValue(AudioParamTarget::PannerPositionX, -1, 0.0f, -3.4e38f, 3.4e38f, 0.0f);
+    Value pyVal = makeAudioParamValue(AudioParamTarget::PannerPositionY, -1, 0.0f, -3.4e38f, 3.4e38f, 0.0f);
+    Value pzVal = makeAudioParamValue(AudioParamTarget::PannerPositionZ, -1, 0.0f, -3.4e38f, 3.4e38f, 0.0f);
+    panner->posParamX = hostAudioParamOf(pxVal);
+    panner->posParamY = hostAudioParamOf(pyVal);
+    panner->posParamZ = hostAudioParamOf(pzVal);
+
     ObjectBuilder b(g_pannerNodeClass.make(panner, hostPannerDtor));
-    b.set("positionX", makeAudioParamValue(AudioParamTarget::PannerPositionX, -1, 0.0f, -3.4e38f, 3.4e38f, 0.0f));
-    b.set("positionY", makeAudioParamValue(AudioParamTarget::PannerPositionY, -1, 0.0f, -3.4e38f, 3.4e38f, 0.0f));
-    b.set("positionZ", makeAudioParamValue(AudioParamTarget::PannerPositionZ, -1, 0.0f, -3.4e38f, 3.4e38f, 0.0f));
+    b.set("positionX", pxVal);
+    b.set("positionY", pyVal);
+    b.set("positionZ", pzVal);
     b.set("orientationX", makeAudioParamValue(AudioParamTarget::PannerOrientationX, -1, 1.0f, -3.4e38f, 3.4e38f, 1.0f));
     b.set("orientationY", makeAudioParamValue(AudioParamTarget::PannerOrientationY, -1, 0.0f, -3.4e38f, 3.4e38f, 0.0f));
     b.set("orientationZ", makeAudioParamValue(AudioParamTarget::PannerOrientationZ, -1, 0.0f, -3.4e38f, 3.4e38f, 0.0f));
@@ -165,8 +175,11 @@ Value makeStereoPannerNodeValue() {
     auto* panner = new HostStereoPannerNode();
     panner->base.nodeType = AudioNodeType::StereoPanner;
 
+    Value panVal = makeAudioParamValue(AudioParamTarget::Pan, -1, 0.0f, -1.0f, 1.0f, 0.0f);
+    panner->panParam = hostAudioParamOf(panVal);
+
     ObjectBuilder b(g_stereoPannerNodeClass.make(panner, hostStereoPannerDtor));
-    b.set("pan", makeAudioParamValue(AudioParamTarget::Pan, -1, 0.0f, -1.0f, 1.0f, 0.0f));
+    b.set("pan", panVal);
     return b.get();
 }
 

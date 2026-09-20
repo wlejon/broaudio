@@ -117,6 +117,24 @@ void decorateAudioBufferProto(ObjectBuilder& b) {
                     buf->channels.resize(buf->numberOfChannels, std::vector<float>(buf->length, 0.0f));
                 }
                 std::memcpy(buf->channels[ch].data() + startInChannel, srcPtr, toCopy * sizeof(float));
+
+                std::string key = "_ch" + std::to_string(ch);
+                Value cached = ev::getProperty(thisValue, key);
+                if (ev::isTypedArray(cached)) {
+                    ev::TypedArrayInfo cachedInfo = ev::typedArrayInfo(cached);
+                    if (cachedInfo && cachedInfo.data) {
+                        float* dstPtr = reinterpret_cast<float*>(cachedInfo.data);
+                        size_t cachedLimit = cachedInfo.elementCount > static_cast<size_t>(startInChannel)
+                                                 ? cachedInfo.elementCount - startInChannel
+                                                 : 0;
+                        size_t toWrite = std::min(toCopy, cachedLimit);
+                        if (toWrite > 0) {
+                            std::memcpy(dstPtr + startInChannel, srcPtr, toWrite * sizeof(float));
+                        }
+                    } else {
+                        ev::setProperty(thisValue, key, ev::undefined());
+                    }
+                }
             }
         }
         return ev::undefined();
@@ -232,23 +250,88 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
             }
 
             src->clipId = e->createClip(interleaved.data(), frames * channels, channels);
-            double when = numAt(a, 0);
-            if (when > 0.0) {
-                src->playbackId = e->playClipAt(src->clipId, when, 1.0f, src->loop);
-            } else {
-                src->playbackId = e->playClip(src->clipId, 1.0f, src->loop);
+
+            // Traverse downstream connected nodes to apply Gain and Panner settings
+            float netGain = 1.0f;
+            bool hasPan = false;
+            float panVal = 0.0f;
+            bool hasSpatial = false;
+            HostPannerNode* pannerNode = nullptr;
+
+            double curTime = e->currentTime();
+            std::vector<HostAudioNode*> queue;
+            std::vector<HostAudioNode*> visited;
+            for (auto& t : src->base.connectedTargets) {
+                HostAudioNode* n = hostAudioNodeOf(t.get());
+                if (n) queue.push_back(n);
             }
 
-            Value rateVal = ev::getProperty(thisValue, "playbackRate");
-            if (auto* rateParam = hostAudioParamOf(rateVal)) {
-                if (rateParam->value != 1.0f && src->playbackId >= 0) {
-                    e->setPlaybackRate(src->playbackId, rateParam->value);
+            while (!queue.empty()) {
+                HostAudioNode* cur = queue.back();
+                queue.pop_back();
+
+                if (std::find(visited.begin(), visited.end(), cur) != visited.end()) continue;
+                visited.push_back(cur);
+
+                if (cur->nodeType == AudioNodeType::Gain) {
+                    auto* gn = reinterpret_cast<HostGainNode*>(cur);
+                    if (gn->gainParam) {
+                        netGain *= gn->gainParam->evaluate(curTime);
+                    }
+                } else if (cur->nodeType == AudioNodeType::StereoPanner) {
+                    auto* sp = reinterpret_cast<HostStereoPannerNode*>(cur);
+                    hasPan = true;
+                    if (sp->panParam) {
+                        panVal = sp->panParam->evaluate(curTime);
+                    } else {
+                        panVal = sp->pan;
+                    }
+                } else if (cur->nodeType == AudioNodeType::Panner) {
+                    hasSpatial = true;
+                    pannerNode = reinterpret_cast<HostPannerNode*>(cur);
+                }
+
+                for (auto& t : cur->connectedTargets) {
+                    HostAudioNode* next = hostAudioNodeOf(t.get());
+                    if (next) queue.push_back(next);
                 }
             }
 
-            double offset = numAt(a, 1);
-            if (offset > 0.0 && src->playbackId >= 0) {
-                e->seekPlayback(src->playbackId, offset);
+            double when = numAt(a, 0);
+            if (when > 0.0) {
+                src->playbackId = e->playClipAt(src->clipId, when, netGain, src->loop);
+            } else {
+                src->playbackId = e->playClip(src->clipId, netGain, src->loop);
+            }
+
+            if (src->playbackId >= 0) {
+                if (hasPan) {
+                    e->setPlaybackPan(src->playbackId, panVal);
+                }
+                if (hasSpatial && pannerNode) {
+                    float px = pannerNode->posParamX ? pannerNode->posParamX->evaluate(curTime) : pannerNode->posX;
+                    float py = pannerNode->posParamY ? pannerNode->posParamY->evaluate(curTime) : pannerNode->posY;
+                    float pz = pannerNode->posParamZ ? pannerNode->posParamZ->evaluate(curTime) : pannerNode->posZ;
+                    e->setPlaybackSpatialEnabled(src->playbackId, true);
+                    e->setPlaybackSpatialPosition(src->playbackId, px, py, pz);
+                    e->setPlaybackSpatialRefDistance(src->playbackId, pannerNode->refDistance);
+                    e->setPlaybackSpatialMaxDistance(src->playbackId, pannerNode->maxDistance);
+                    e->setPlaybackSpatialRolloff(src->playbackId, pannerNode->rolloffFactor);
+                    e->setPlaybackSpatialDistanceModel(src->playbackId, parseDistanceModel(pannerNode->distanceModel));
+                }
+
+                Value rateVal = ev::getProperty(thisValue, "playbackRate");
+                if (auto* rateParam = hostAudioParamOf(rateVal)) {
+                    float r = rateParam->evaluate(curTime);
+                    if (r != 1.0f) {
+                        e->setPlaybackRate(src->playbackId, r);
+                    }
+                }
+
+                double offset = numAt(a, 1);
+                if (offset > 0.0) {
+                    e->seekPlayback(src->playbackId, offset);
+                }
             }
         }
         return ev::undefined();

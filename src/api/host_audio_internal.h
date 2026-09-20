@@ -74,6 +74,13 @@ enum class AudioNodeType : uint8_t {
 struct HostAudioNode {
     uint32_t tag = kHostAudioNodeTag;
     AudioNodeType nodeType = AudioNodeType::Generic;
+    std::vector<ev::Persistent> connectedTargets;
+
+    ~HostAudioNode() {
+        for (auto& t : connectedTargets) {
+            t.set(ev::undefined());
+        }
+    }
 };
 
 enum class AudioParamTarget : uint8_t {
@@ -107,6 +114,23 @@ enum class AudioParamTarget : uint8_t {
     VoicePitchBend,
 };
 
+enum class ParamEventType : uint8_t {
+    SetValue,
+    LinearRamp,
+    ExponentialRamp,
+    SetTarget,
+    SetValueCurve,
+};
+
+struct ParamTimelineEvent {
+    ParamEventType type = ParamEventType::SetValue;
+    double time = 0.0;
+    double duration = 0.0;
+    float value = 0.0f;
+    float timeConstant = 0.0f;
+    std::vector<float> curve;
+};
+
 struct HostAudioParam {
     uint32_t tag = kHostAudioParamTag;
     AudioParamTarget target = AudioParamTarget::Generic;
@@ -115,10 +139,22 @@ struct HostAudioParam {
     float defaultValue = 1.0f;
     float minValue = -3.402823466e+38f;
     float maxValue = 3.402823466e+38f;
+
+    std::vector<ParamTimelineEvent> timeline;
+
+    float evaluate(double t) const;
+    void addSetValue(float val, double startTime);
+    void addLinearRamp(float val, double endTime);
+    void addExponentialRamp(float val, double endTime);
+    void addSetTarget(float target, double startTime, float timeConstant);
+    void addSetValueCurve(const float* data, size_t count, double startTime, double duration);
+    void cancelScheduledValues(double cancelTime);
+    void cancelAndHoldAtTime(double cancelTime);
 };
 
 struct HostGainNode {
     HostAudioNode base;
+    HostAudioParam* gainParam = nullptr;
 };
 
 struct HostOscillatorNode {
@@ -183,6 +219,9 @@ struct HostAudioBufferSourceNode {
 
 struct HostPannerNode {
     HostAudioNode base;
+    HostAudioParam* posParamX = nullptr;
+    HostAudioParam* posParamY = nullptr;
+    HostAudioParam* posParamZ = nullptr;
     std::string panningModel = "equalpower";
     std::string distanceModel = "inverse";
     float refDistance = 1.0f;
@@ -197,6 +236,7 @@ struct HostPannerNode {
 
 struct HostStereoPannerNode {
     HostAudioNode base;
+    HostAudioParam* panParam = nullptr;
     float pan = 0.0f;
 };
 

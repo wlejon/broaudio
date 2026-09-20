@@ -4,7 +4,6 @@ namespace broaudio::api {
 
 HostClass g_audioNodeClass;
 HostClass g_audioDestinationNodeClass;
-HostClass g_audioParamClass;
 HostClass g_gainNodeClass;
 HostClass g_oscillatorNodeClass;
 HostClass g_periodicWaveClass;
@@ -67,10 +66,6 @@ void hostAudioNodeDtor(void* p) {
     delete static_cast<HostAudioNode*>(p);
 }
 
-void hostAudioParamDtor(void* p) {
-    delete static_cast<HostAudioParam*>(p);
-}
-
 void hostGainDtor(void* p) {
     delete static_cast<HostGainNode*>(p);
 }
@@ -117,13 +112,6 @@ HostAudioNode* hostAudioNodeOf(Value v) {
     return p;
 }
 
-HostAudioParam* hostAudioParamOf(Value v) {
-    if (!ev::isObject(v)) return nullptr;
-    auto* p = static_cast<HostAudioParam*>(ev::handleData(v));
-    if (!p || p->tag != kHostAudioParamTag) return nullptr;
-    return p;
-}
-
 HostPeriodicWave* hostPeriodicWaveOf(Value v) {
     if (!ev::isObject(v)) return nullptr;
     auto* p = static_cast<HostPeriodicWave*>(ev::handleData(v));
@@ -131,160 +119,10 @@ HostPeriodicWave* hostPeriodicWaveOf(Value v) {
     return p;
 }
 
-void syncAudioParamValue(HostAudioParam* p, float val) {
-    p->value = std::clamp(val, p->minValue, p->maxValue);
-    auto* e = getAudioEngine();
-    if (!e || p->targetId < 0) return;
-    switch (p->target) {
-        case AudioParamTarget::VoiceFrequency:
-            e->setFrequency(p->targetId, p->value);
-            break;
-        case AudioParamTarget::VoicePan:
-        case AudioParamTarget::Pan:
-            e->setVoicePan(p->targetId, p->value);
-            break;
-        case AudioParamTarget::FilterFrequency:
-            e->setFilterFrequency(p->targetId, p->value);
-            break;
-        case AudioParamTarget::FilterQ:
-            e->setFilterQ(p->targetId, p->value);
-            break;
-        case AudioParamTarget::FilterGain:
-            e->setFilterGain(p->targetId, p->value);
-            break;
-        case AudioParamTarget::PlaybackRate:
-            e->setPlaybackRate(p->targetId, p->value);
-            break;
-        case AudioParamTarget::DelayTime:
-            e->setDelayTime(p->value);
-            break;
-        case AudioParamTarget::Gain:
-            e->setGain(p->targetId, p->value);
-            break;
-        case AudioParamTarget::VoiceAttack:
-            e->setAttackTime(p->targetId, p->value);
-            break;
-        case AudioParamTarget::VoiceDecay:
-            e->setDecayTime(p->targetId, p->value);
-            break;
-        case AudioParamTarget::VoiceSustain:
-            e->setSustainLevel(p->targetId, p->value);
-            break;
-        case AudioParamTarget::VoiceRelease:
-            e->setReleaseTime(p->targetId, p->value);
-            break;
-        case AudioParamTarget::VoicePitchBend:
-            e->setVoicePitchBend(p->targetId, p->value);
-            break;
-        case AudioParamTarget::VoiceDetune:
-        case AudioParamTarget::PlaybackDetune:
-        case AudioParamTarget::PannerPositionX:
-        case AudioParamTarget::PannerPositionY:
-        case AudioParamTarget::PannerPositionZ:
-        case AudioParamTarget::PannerOrientationX:
-        case AudioParamTarget::PannerOrientationY:
-        case AudioParamTarget::PannerOrientationZ:
-        case AudioParamTarget::CompressorThreshold:
-        case AudioParamTarget::CompressorKnee:
-        case AudioParamTarget::CompressorRatio:
-        case AudioParamTarget::CompressorAttack:
-        case AudioParamTarget::CompressorRelease:
-        case AudioParamTarget::Generic:
-        default:
-            break;
-    }
-}
-
-void decorateAudioParamProto(ObjectBuilder& b) {
-    b.accessor("value",
-               [](Value self_, std::span<const Value>) {
-                   HostAudioParam* p = hostAudioParamOf(self_);
-                   if (!p) return ev::undefined();
-                   return ev::fromDouble(p->value);
-               },
-               [](Value self_, std::span<const Value> a) {
-                   HostAudioParam* p = hostAudioParamOf(self_);
-                   if (!p) return ev::undefined();
-                   syncAudioParamValue(p, static_cast<float>(numAt(a, 0)));
-                   return ev::undefined();
-               });
-
-    b.accessor("defaultValue", [](Value self_, std::span<const Value>) {
-        HostAudioParam* p = hostAudioParamOf(self_);
-        return ev::fromDouble(p ? p->defaultValue : 1.0);
-    }, nullptr);
-
-    b.accessor("minValue", [](Value self_, std::span<const Value>) {
-        HostAudioParam* p = hostAudioParamOf(self_);
-        return ev::fromDouble(p ? p->minValue : -3.4e38f);
-    }, nullptr);
-
-    b.accessor("maxValue", [](Value self_, std::span<const Value>) {
-        HostAudioParam* p = hostAudioParamOf(self_);
-        return ev::fromDouble(p ? p->maxValue : 3.4e38f);
-    }, nullptr);
-
-    b.def("setValueAtTime", 2, [](Value self_, std::span<const Value> a) -> Value {
-        HostAudioParam* p = hostAudioParamOf(self_);
-        if (p && !a.empty()) syncAudioParamValue(p, static_cast<float>(numAt(a, 0)));
-        return self_;
-    });
-
-    b.def("linearRampToValueAtTime", 2, [](Value self_, std::span<const Value> a) -> Value {
-        HostAudioParam* p = hostAudioParamOf(self_);
-        if (p && !a.empty()) syncAudioParamValue(p, static_cast<float>(numAt(a, 0)));
-        return self_;
-    });
-
-    b.def("exponentialRampToValueAtTime", 2, [](Value self_, std::span<const Value> a) -> Value {
-        HostAudioParam* p = hostAudioParamOf(self_);
-        if (p && !a.empty()) syncAudioParamValue(p, static_cast<float>(numAt(a, 0)));
-        return self_;
-    });
-
-    b.def("setTargetAtTime", 3, [](Value self_, std::span<const Value> a) -> Value {
-        HostAudioParam* p = hostAudioParamOf(self_);
-        if (p && !a.empty()) syncAudioParamValue(p, static_cast<float>(numAt(a, 0)));
-        return self_;
-    });
-
-    b.def("setValueCurveAtTime", 3, [](Value self_, std::span<const Value> a) -> Value {
-        HostAudioParam* p = hostAudioParamOf(self_);
-        if (p && !a.empty()) {
-            std::vector<float> storage;
-            const float* data = nullptr;
-            size_t count = 0;
-            if (floatData(a[0], storage, &data, &count) && count > 0) {
-                syncAudioParamValue(p, data[count - 1]);
-            }
-        }
-        return self_;
-    });
-
-    b.def("cancelScheduledValues", 1, [](Value self_, std::span<const Value>) -> Value {
-        return self_;
-    });
-
-    b.def("cancelAndHoldAtTime", 1, [](Value self_, std::span<const Value>) -> Value {
-        return self_;
-    });
-}
-
-Value makeAudioParamValue(AudioParamTarget target, int targetId,
-                          float initialVal, float minVal, float maxVal, float defaultVal) {
-    auto* param = new HostAudioParam();
-    param->target = target;
-    param->targetId = targetId;
-    param->value = initialVal;
-    param->defaultValue = defaultVal;
-    param->minValue = minVal;
-    param->maxValue = maxVal;
-    return g_audioParamClass.make(param, hostAudioParamDtor);
-}
-
 // connect/disconnect live once on AudioNode.prototype (the class check pins
-// that); broaudio has no node graph, so the base method dispatches on the
-// node kind for the few connections that mean something to the engine:
+// that); broaudio tracks connectedTargets on every AudioNode for graph
+// traversal (e.g. GainNode volume and PannerNode spatialization), and dispatches
+// on the node kind for connections that mean something to the engine:
 // oscillator -> gain remembers the GainNode so start() reads gain.value,
 // biquad connect/disconnect enables/disables its filter slot, and the mic
 // source connecting to an analyser points the analyser at the mic ring.
@@ -293,6 +131,7 @@ void decorateAudioNodeProto(ObjectBuilder& b) {
         if (a.empty()) return ev::throwTypeError("AudioNode.connect: destination argument required");
         HostAudioNode* node = hostAudioNodeOf(self_);
         if (node) {
+            node->connectedTargets.emplace_back(a[0]);
             switch (node->nodeType) {
             case AudioNodeType::Oscillator:
                 if (HostOscillatorNode* osc = oscOf(self_)) {
@@ -315,9 +154,24 @@ void decorateAudioNodeProto(ObjectBuilder& b) {
         return a[0];
     });
 
-    b.def("disconnect", 1, [](Value self_, std::span<const Value>) -> Value {
+    b.def("disconnect", 1, [](Value self_, std::span<const Value> a) -> Value {
         HostAudioNode* node = hostAudioNodeOf(self_);
         if (node) {
+            if (a.empty() || ev::isUndefined(a[0])) {
+                for (auto& t : node->connectedTargets) {
+                    t.set(ev::undefined());
+                }
+                node->connectedTargets.clear();
+            } else {
+                for (auto it = node->connectedTargets.begin(); it != node->connectedTargets.end();) {
+                    if (it->get() == a[0] || ev::handleData(it->get()) == ev::handleData(a[0])) {
+                        it->set(ev::undefined());
+                        it = node->connectedTargets.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+            }
             if (node->nodeType == AudioNodeType::Oscillator) {
                 if (HostOscillatorNode* osc = oscOf(self_)) osc->connectedGain.set(ev::undefined());
             } else if (node->nodeType == AudioNodeType::BiquadFilter) {
@@ -370,8 +224,9 @@ void decorateAudioNodeProto(ObjectBuilder& b) {
 Value makeGainNodeValue() {
     auto* gain = new HostGainNode();
     gain->base.nodeType = AudioNodeType::Gain;
-    ObjectBuilder b(g_gainNodeClass.make(gain, hostGainDtor));
     Value gainParam = makeAudioParamValue(AudioParamTarget::Gain, -1, 1.0f, -3.4e38f, 3.4e38f, 1.0f);
+    gain->gainParam = hostAudioParamOf(gainParam);
+    ObjectBuilder b(g_gainNodeClass.make(gain, hostGainDtor));
     b.set("gain", gainParam);
     return b.get();
 }

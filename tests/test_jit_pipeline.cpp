@@ -230,7 +230,7 @@ TEST(jit_compiler_cache) {
 
 TEST(engine_bus_jit_activation_and_fallback) {
     Engine engine;
-    engine.init();
+    engine.initHeadless();
 
     int busId = engine.createBus();
     ASSERT_TRUE(engine.isBusJitEnabled(busId));
@@ -241,11 +241,12 @@ TEST(engine_bus_jit_activation_and_fallback) {
     engine.setBusFilterFrequency(busId, 0, 1500.0f);
     engine.setBusFilterQ(busId, 0, 1.2f);
 
-    // Give background compilation thread a brief moment to compile and publish
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-    // Render a block
-    engine.renderBlock(128);
+    // Wait for background compilation thread to compile and publish
+    for (int retry = 0; retry < 50; ++retry) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        engine.renderBlock(128);
+        if (engine.isBusJitActive(busId)) break;
+    }
 
     // JIT should be active for this bus
     ASSERT_TRUE(engine.isBusJitActive(busId));

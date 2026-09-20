@@ -1,4 +1,5 @@
 #include "host_audio_internal.h"
+#include "host_audio_dsp.h"
 
 namespace broaudio::api {
 
@@ -58,6 +59,63 @@ Value makeDelayNodeValue(double maxDelayTime) {
 // DynamicsCompressorNode
 // ---------------------------------------------------------------------------
 
+void processDynamicsCompressor(HostDynamicsCompressorNode* comp,
+                               float* buffer,
+                               int frames,
+                               int channels,
+                               int sampleRate,
+                               double curTime) {
+    if (!comp || !buffer || frames <= 0 || channels <= 0) return;
+
+    float threshold = comp->thresholdParam ? comp->thresholdParam->evaluate(curTime) : -24.0f;
+    float knee = comp->kneeParam ? comp->kneeParam->evaluate(curTime) : 30.0f;
+    float ratio = comp->ratioParam ? comp->ratioParam->evaluate(curTime) : 12.0f;
+    float attack = comp->attackParam ? comp->attackParam->evaluate(curTime) : 0.003f;
+    float release = comp->releaseParam ? comp->releaseParam->evaluate(curTime) : 0.25f;
+
+    float sr = static_cast<float>(sampleRate > 0 ? sampleRate : 44100);
+    float alphaA = (attack <= 0.0f) ? 1.0f : (1.0f - std::exp(-1.0f / (attack * sr)));
+    float alphaR = (release <= 0.0f) ? 1.0f : (1.0f - std::exp(-1.0f / (release * sr)));
+    alphaA = std::clamp(alphaA, 0.0f, 1.0f);
+    alphaR = std::clamp(alphaR, 0.0f, 1.0f);
+    ratio = std::max(1.0f, ratio);
+    knee = std::max(0.0f, knee);
+
+    float env = comp->envelope;
+
+    for (int f = 0; f < frames; ++f) {
+        float maxAbs = 0.0f;
+        for (int c = 0; c < channels; ++c) {
+            maxAbs = std::max(maxAbs, std::fabs(buffer[f * channels + c]));
+        }
+
+        float xDb = (maxAbs < 1e-5f) ? -100.0f : 20.0f * std::log10(maxAbs);
+        float yDb = xDb;
+
+        if (knee > 0.0f && xDb > (threshold - knee * 0.5f) && xDb < (threshold + knee * 0.5f)) {
+            float diff = xDb - threshold + knee * 0.5f;
+            yDb = xDb + ((1.0f / ratio - 1.0f) * diff * diff) / (2.0f * knee);
+        } else if (xDb >= (threshold + knee * 0.5f)) {
+            yDb = threshold + (xDb - threshold) / ratio;
+        }
+
+        float targetReductionDb = yDb - xDb;
+        if (targetReductionDb < env) {
+            env += alphaA * (targetReductionDb - env);
+        } else {
+            env += alphaR * (targetReductionDb - env);
+        }
+
+        float gain = std::pow(10.0f, env / 20.0f);
+        for (int c = 0; c < channels; ++c) {
+            buffer[f * channels + c] *= gain;
+        }
+    }
+
+    comp->envelope = env;
+    comp->reduction = env;
+}
+
 void decorateDynamicsCompressorNodeProto(ObjectBuilder& b) {
     b.accessor("reduction", [](Value self_, std::span<const Value>) {
         HostDynamicsCompressorNode* comp = compressorOf(self_);
@@ -69,12 +127,24 @@ Value makeDynamicsCompressorNodeValue() {
     auto* comp = new HostDynamicsCompressorNode();
     comp->base.nodeType = AudioNodeType::DynamicsCompressor;
 
+    Value th = makeAudioParamValue(AudioParamTarget::CompressorThreshold, -1, -24.0f, -100.0f, 0.0f, -24.0f);
+    Value kn = makeAudioParamValue(AudioParamTarget::CompressorKnee, -1, 30.0f, 0.0f, 40.0f, 30.0f);
+    Value ra = makeAudioParamValue(AudioParamTarget::CompressorRatio, -1, 12.0f, 1.0f, 20.0f, 12.0f);
+    Value at = makeAudioParamValue(AudioParamTarget::CompressorAttack, -1, 0.003f, 0.0f, 1.0f, 0.003f);
+    Value re = makeAudioParamValue(AudioParamTarget::CompressorRelease, -1, 0.25f, 0.0f, 1.0f, 0.25f);
+
+    comp->thresholdParam = hostAudioParamOf(th);
+    comp->kneeParam = hostAudioParamOf(kn);
+    comp->ratioParam = hostAudioParamOf(ra);
+    comp->attackParam = hostAudioParamOf(at);
+    comp->releaseParam = hostAudioParamOf(re);
+
     ObjectBuilder b(g_dynamicsCompressorNodeClass.make(comp, hostDynamicsCompressorDtor));
-    b.set("threshold", makeAudioParamValue(AudioParamTarget::CompressorThreshold, -1, -24.0f, -100.0f, 0.0f, -24.0f));
-    b.set("knee", makeAudioParamValue(AudioParamTarget::CompressorKnee, -1, 30.0f, 0.0f, 40.0f, 30.0f));
-    b.set("ratio", makeAudioParamValue(AudioParamTarget::CompressorRatio, -1, 12.0f, 1.0f, 20.0f, 12.0f));
-    b.set("attack", makeAudioParamValue(AudioParamTarget::CompressorAttack, -1, 0.003f, 0.0f, 1.0f, 0.003f));
-    b.set("release", makeAudioParamValue(AudioParamTarget::CompressorRelease, -1, 0.25f, 0.0f, 1.0f, 0.25f));
+    b.set("threshold", th);
+    b.set("knee", kn);
+    b.set("ratio", ra);
+    b.set("attack", at);
+    b.set("release", re);
     return b.get();
 }
 

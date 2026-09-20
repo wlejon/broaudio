@@ -1,4 +1,5 @@
 #include "host_audio_internal.h"
+#include "host_audio_dsp.h"
 #include <broaudio/dsp/convolution_reverb.h>
 #include <broaudio/dsp/resampler.h>
 #include <broaudio/io/audio_file.h>
@@ -381,6 +382,9 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
                 } else if (cur->nodeType == AudioNodeType::Panner) {
                     hasSpatial = true;
                     pannerNode = reinterpret_cast<HostPannerNode*>(cur);
+                } else if (cur->nodeType == AudioNodeType::DynamicsCompressor) {
+                    auto* comp = reinterpret_cast<HostDynamicsCompressorNode*>(cur);
+                    processDynamicsCompressor(comp, interleaved.data(), frames, channels, sr, curTime);
                 }
 
                 for (auto& t : cur->connectedTargets) {

@@ -236,6 +236,43 @@ static void test_graph_script() {
             playSrc.connect(panner).connect(routeGain).connect(ctx.destination);
             playSrc.start();
 
+            // Test 4: DynamicsCompressorNode
+            const comp = ctx.createDynamicsCompressor();
+            if (!(comp instanceof DynamicsCompressorNode)) throw new Error("createDynamicsCompressor type");
+            if (!(comp.threshold instanceof AudioParam) || !(comp.ratio instanceof AudioParam)) throw new Error("compressor params");
+            if (typeof comp.reduction !== "number") throw new Error("compressor reduction not number");
+            comp.threshold.value = -20;
+            comp.ratio.value = 8;
+            comp.attack.value = 0.001;
+            comp.release.value = 0.05;
+
+            // Connect buffer through compressor to verify graph wiring
+            const compSrc = ctx.createBufferSource();
+            const compBuf = new AudioBuffer({ length: 128, numberOfChannels: 1, sampleRate: 44100 });
+            const cData = compBuf.getChannelData(0);
+            for (let i = 0; i < 128; i++) cData[i] = 1.0;
+            compSrc.buffer = compBuf;
+            compSrc.connect(comp).connect(ctx.destination);
+            compSrc.start();
+            if (comp.reduction > 0) throw new Error("compressor reduction should be <= 0");
+
+            // Test 5: StereoPannerNode prototype
+            if (typeof Object.getOwnPropertyDescriptor(StereoPannerNode.prototype, "pan") === "undefined" &&
+                typeof Object.getOwnPropertyDescriptor(Object.getPrototypeOf(panner), "pan") === "undefined") {
+                throw new Error("StereoPannerNode prototype pan accessor missing");
+            }
+            if (typeof panner.pan.value !== "number") throw new Error("panner.pan.value missing");
+
+            // Test 6: AudioContext lifecycle & state tracking
+            if (ctx.state !== "running") throw new Error("AudioContext initial state should be running, got: " + ctx.state);
+            ctx.suspend();
+            if (ctx.state !== "suspended") throw new Error("AudioContext state after suspend should be suspended, got: " + ctx.state);
+            ctx.resume();
+            if (ctx.state !== "running") throw new Error("AudioContext state after resume should be running, got: " + ctx.state);
+            const closePromise = ctx.close();
+            if (ctx.state !== "closed") throw new Error("AudioContext state after close should be closed, got: " + ctx.state);
+            if (!(closePromise instanceof Promise)) throw new Error("close() must return a Promise");
+
             let threw = false;
             try { osc.connect(); } catch (e) { threw = e instanceof TypeError; }
             if (!threw) throw new Error("connect() with no destination should throw TypeError");

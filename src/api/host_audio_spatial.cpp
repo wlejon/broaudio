@@ -169,7 +169,24 @@ Value makePannerNodeValue() {
     return b.get();
 }
 
-void decorateStereoPannerNodeProto(ObjectBuilder&) {}
+void decorateStereoPannerNodeProto(ObjectBuilder& b) {
+    b.accessor("pan",
+               [](Value self_, std::span<const Value>) {
+                   HostStereoPannerNode* p = stereoPannerOf(self_);
+                   if (!p) return ev::undefined();
+                   Value v = ev::getProperty(self_, "_pan");
+                   if (ev::isObject(v)) return v;
+                   return ev::getProperty(self_, "pan");
+               },
+               [](Value self_, std::span<const Value> a) {
+                   HostStereoPannerNode* p = stereoPannerOf(self_);
+                   if (!p || a.empty()) return ev::undefined();
+                   float val = static_cast<float>(numAt(a, 0));
+                   p->pan = val;
+                   if (p->panParam) p->panParam->value = val;
+                   return ev::undefined();
+               });
+}
 
 Value makeStereoPannerNodeValue() {
     auto* panner = new HostStereoPannerNode();
@@ -179,6 +196,7 @@ Value makeStereoPannerNodeValue() {
     panner->panParam = hostAudioParamOf(panVal);
 
     ObjectBuilder b(g_stereoPannerNodeClass.make(panner, hostStereoPannerDtor));
+    b.set("_pan", panVal);
     b.set("pan", panVal);
     return b.get();
 }

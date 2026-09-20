@@ -19,6 +19,9 @@ HostAudioContext* hostAudioContextOf(Value v) {
 
 Value makeAudioContextValue() {
     auto* ctx = new HostAudioContext();
+    ctx->state = "running";
+    auto* e = getAudioEngine();
+    if (e) e->setMasterPaused(false);
     ObjectBuilder b(g_audioContextClass.make(ctx, hostAudioContextDtor));
 
     b.set("destination", makeDestinationNodeValue());
@@ -39,8 +42,9 @@ void decorateAudioContextProto(ObjectBuilder& b) {
         return ev::fromDouble(e ? e->sampleRate() : 44100);
     }, nullptr);
 
-    b.accessor("state", [](Value, std::span<const Value>) {
-        return ev::fromUtf8("running");
+    b.accessor("state", [](Value self_, std::span<const Value>) {
+        HostAudioContext* ctx = hostAudioContextOf(self_);
+        return ev::fromUtf8(ctx ? ctx->state : "running");
     }, nullptr);
 
     b.accessor("outputLatency", [](Value, std::span<const Value>) {
@@ -113,23 +117,46 @@ void decorateAudioContextProto(ObjectBuilder& b) {
         });
 
     // 2. Lifecycle
-    b.def("suspend", 0, [](Value, std::span<const Value>) {
-        auto* e = getAudioEngine();
-        if (e) e->setMasterPaused(true);
+    b.def("suspend", 0, [](Value self_, std::span<const Value>) {
+        HostAudioContext* ctx = hostAudioContextOf(self_);
+        if (ctx && ctx->state != "closed") {
+            ctx->state = "suspended";
+            auto* e = getAudioEngine();
+            if (e) e->setMasterPaused(true);
+        }
         ev::Persistent p{ev::createPromise()};
         ev::resolvePromise(p.get(), ev::undefined());
         return p.get();
     });
 
-    b.def("resume", 0, [](Value, std::span<const Value>) {
-        auto* e = getAudioEngine();
-        if (e) e->setMasterPaused(false);
+    b.def("resume", 0, [](Value self_, std::span<const Value>) {
+        HostAudioContext* ctx = hostAudioContextOf(self_);
+        if (ctx && ctx->state != "closed") {
+            ctx->state = "running";
+            auto* e = getAudioEngine();
+            if (e) e->setMasterPaused(false);
+        }
         ev::Persistent p{ev::createPromise()};
         ev::resolvePromise(p.get(), ev::undefined());
         return p.get();
     });
 
-    b.def("close", 0, [](Value, std::span<const Value>) {
+    b.def("close", 0, [](Value self_, std::span<const Value>) {
+        HostAudioContext* ctx = hostAudioContextOf(self_);
+        if (ctx) {
+            ctx->state = "closed";
+            auto* e = getAudioEngine();
+            if (e) {
+                for (int vid : ctx->voiceIds) {
+                    e->stopVoice(vid, 0.0);
+                    e->removeVoice(vid);
+                }
+                ctx->voiceIds.clear();
+                e->stopMicCapture();
+                e->stopRecording();
+                e->setMasterPaused(true);
+            }
+        }
         ev::Persistent p{ev::createPromise()};
         ev::resolvePromise(p.get(), ev::undefined());
         return p.get();
@@ -140,8 +167,16 @@ void decorateAudioContextProto(ObjectBuilder& b) {
         return makeGainNodeValue();
     });
 
-    b.def("createOscillator", 0, [](Value, std::span<const Value>) {
-        return makeOscillatorNodeValue();
+    b.def("createOscillator", 0, [](Value self_, std::span<const Value>) {
+        Value oscVal = makeOscillatorNodeValue();
+        HostAudioContext* ctx = hostAudioContextOf(self_);
+        if (ctx) {
+            HostOscillatorNode* osc = oscOf(oscVal);
+            if (osc && osc->voiceId >= 0) {
+                ctx->voiceIds.push_back(osc->voiceId);
+            }
+        }
+        return oscVal;
     });
 
     b.def("createPeriodicWave", 3, [](Value, std::span<const Value> a) -> Value {

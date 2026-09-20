@@ -315,6 +315,47 @@ void decorateOscillatorNodeProto(ObjectBuilder& b) {
             osc = oscOf(self_);
             if (!osc) return ev::undefined();
         }
+
+        std::vector<HostAudioNode*> queue;
+        std::vector<HostAudioNode*> visited;
+        for (auto& t : osc->base.connectedTargets) {
+            HostAudioNode* n = hostAudioNodeOf(t.get());
+            if (n) queue.push_back(n);
+        }
+        while (!queue.empty()) {
+            HostAudioNode* cur = queue.back();
+            queue.pop_back();
+            if (std::find(visited.begin(), visited.end(), cur) != visited.end()) continue;
+            visited.push_back(cur);
+
+            if (cur->nodeType == AudioNodeType::Gain) {
+                auto* gn = reinterpret_cast<HostGainNode*>(cur);
+                if (gn->gainParam) {
+                    eng->setGain(osc->voiceId, gn->gainParam->evaluate(when));
+                }
+            } else if (cur->nodeType == AudioNodeType::StereoPanner) {
+                auto* sp = reinterpret_cast<HostStereoPannerNode*>(cur);
+                float panVal = sp->panParam ? sp->panParam->evaluate(when) : sp->pan;
+                eng->setVoicePan(osc->voiceId, panVal);
+            } else if (cur->nodeType == AudioNodeType::Panner) {
+                auto* pn = reinterpret_cast<HostPannerNode*>(cur);
+                float px = pn->posParamX ? pn->posParamX->evaluate(when) : pn->posX;
+                float py = pn->posParamY ? pn->posParamY->evaluate(when) : pn->posY;
+                float pz = pn->posParamZ ? pn->posParamZ->evaluate(when) : pn->posZ;
+                eng->setVoiceSpatialEnabled(osc->voiceId, true);
+                eng->setVoiceSpatialPosition(osc->voiceId, px, py, pz);
+                eng->setVoiceSpatialRefDistance(osc->voiceId, pn->refDistance);
+                eng->setVoiceSpatialMaxDistance(osc->voiceId, pn->maxDistance);
+                eng->setVoiceSpatialRolloff(osc->voiceId, pn->rolloffFactor);
+                eng->setVoiceSpatialDistanceModel(osc->voiceId, parseDistanceModel(pn->distanceModel));
+            }
+
+            for (auto& t : cur->connectedTargets) {
+                HostAudioNode* next = hostAudioNodeOf(t.get());
+                if (next) queue.push_back(next);
+            }
+        }
+
         eng->startVoice(osc->voiceId, when);
         return ev::undefined();
     });

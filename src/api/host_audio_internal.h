@@ -50,6 +50,8 @@ inline constexpr uint32_t kHostMediaStreamNodeTag    = 0x4D534E44u; // 'MSND'
 
 struct HostAudioContext {
     uint32_t tag = kHostAudioContextTag;
+    std::string state = "running";
+    std::vector<int> voiceIds;
 };
 
 enum class AudioNodeType : uint8_t {
@@ -250,7 +252,13 @@ struct HostDelayNode {
 
 struct HostDynamicsCompressorNode {
     HostAudioNode base;
+    HostAudioParam* thresholdParam = nullptr;
+    HostAudioParam* kneeParam = nullptr;
+    HostAudioParam* ratioParam = nullptr;
+    HostAudioParam* attackParam = nullptr;
+    HostAudioParam* releaseParam = nullptr;
     float reduction = 0.0f;
+    float envelope = 0.0f;
 };
 
 struct HostWaveShaperNode {

@@ -4,6 +4,7 @@
 #include "object_builder.h"
 
 #include <functional>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
@@ -40,6 +41,11 @@ using Value = bronze::Value;
 
 class HostClass {
 public:
+    struct Slots {
+        ev::Persistent* proto = nullptr;
+        ev::Persistent* ctor = nullptr;
+    };
+
     void install(const char* name, uint32_t arity, ev::NativeFn body,
                  const std::function<void(ObjectBuilder&)>& decorate = nullptr);
 
@@ -56,9 +62,11 @@ public:
     Value prototype() const;
     Value constructor() const;
 
+    bool installed() const;
+
 private:
-    ev::Persistent* proto_ = nullptr;
-    ev::Persistent* ctor_ = nullptr;
+    Slots& slots() const;
+    const Slots* slotsIfAny() const;
 };
 
 Value hostArrayOf(size_t count, const std::function<Value(size_t)>& make);

@@ -256,6 +256,21 @@ static void test_graph_script() {
             compSrc.start();
             if (comp.reduction > 0) throw new Error("compressor reduction should be <= 0");
 
+            // Test 4b: Real-time DSP node routing (Delay, WaveShaper, Convolver, DynamicsCompressor)
+            const osc2 = ctx.createOscillator();
+            const delay = ctx.createDelay(2.0);
+            delay.delayTime.value = 0.25;
+            const ws = ctx.createWaveShaper();
+            const conv = ctx.createConvolver();
+            conv.buffer = compBuf;
+
+            osc2.connect(delay).connect(ws).connect(conv).connect(comp).connect(ctx.destination);
+            osc2.start();
+            osc2.disconnect();
+            delay.disconnect();
+            ws.disconnect();
+            conv.disconnect();
+
             // Test 5: StereoPannerNode prototype
             if (typeof Object.getOwnPropertyDescriptor(StereoPannerNode.prototype, "pan") === "undefined" &&
                 typeof Object.getOwnPropertyDescriptor(Object.getPrototypeOf(panner), "pan") === "undefined") {

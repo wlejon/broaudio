@@ -144,12 +144,92 @@ void decorateAudioNodeProto(ObjectBuilder& b) {
                     if (eng && filter->slot >= 0) eng->setFilterEnabled(filter->slot, true);
                 }
                 break;
+            case AudioNodeType::Delay:
+                if (HostDelayNode* delay = delayOf(self_)) {
+                    auto* eng = getAudioEngine();
+                    if (eng) {
+                        eng->setDelayEnabled(true);
+                        float dt = delay->delayTimeParam ? delay->delayTimeParam->value : 0.0f;
+                        eng->setDelayTime(dt);
+                        eng->setDelayMix(1.0f);
+                    }
+                }
+                break;
+            case AudioNodeType::DynamicsCompressor:
+                if (HostDynamicsCompressorNode* comp = compressorOf(self_)) {
+                    auto* eng = getAudioEngine();
+                    if (eng) {
+                        eng->setBusCompressorEnabled(Engine::MASTER_BUS_ID, true);
+                        float th = comp->thresholdParam ? comp->thresholdParam->value : -24.0f;
+                        float ra = comp->ratioParam ? comp->ratioParam->value : 12.0f;
+                        float at = comp->attackParam ? comp->attackParam->value * 1000.0f : 3.0f;
+                        float re = comp->releaseParam ? comp->releaseParam->value * 1000.0f : 250.0f;
+                        eng->setBusCompressorThreshold(Engine::MASTER_BUS_ID, th);
+                        eng->setBusCompressorRatio(Engine::MASTER_BUS_ID, ra);
+                        eng->setBusCompressorAttack(Engine::MASTER_BUS_ID, at);
+                        eng->setBusCompressorRelease(Engine::MASTER_BUS_ID, re);
+                    }
+                }
+                break;
+            case AudioNodeType::WaveShaper:
+                if (HostWaveShaperNode* ws = waveShaperOf(self_)) {
+                    auto* eng = getAudioEngine();
+                    if (eng) {
+                        eng->setBusDistortionEnabled(Engine::MASTER_BUS_ID, true);
+                        eng->setBusDistortionMode(Engine::MASTER_BUS_ID, DistortionMode::SoftClip);
+                        eng->setBusDistortionMix(Engine::MASTER_BUS_ID, 1.0f);
+                    }
+                }
+                break;
+            case AudioNodeType::Convolver:
+                if (HostConvolverNode* conv = convolverOf(self_)) {
+                    auto* eng = getAudioEngine();
+                    if (eng) {
+                        eng->setBusReverbEnabled(Engine::MASTER_BUS_ID, true);
+                        eng->setBusReverbMix(Engine::MASTER_BUS_ID, 1.0f);
+                    }
+                }
+                break;
             case AudioNodeType::MediaStreamSource:
                 if (HostAnalyserNode* analyser = analyserOf(a[0])) analyser->source = 1;
                 break;
             default:
                 if (HostAnalyserNode* analyser = analyserOf(a[0])) analyser->hasConnectedInput = true;
                 break;
+            }
+
+            HostAudioNode* destNode = hostAudioNodeOf(a[0]);
+            if (destNode) {
+                auto* eng = getAudioEngine();
+                if (eng) {
+                    if (destNode->nodeType == AudioNodeType::Delay) {
+                        HostDelayNode* delay = reinterpret_cast<HostDelayNode*>(destNode);
+                        eng->setDelayEnabled(true);
+                        float dt = delay && delay->delayTimeParam ? delay->delayTimeParam->value : 0.0f;
+                        eng->setDelayTime(dt);
+                        eng->setDelayMix(1.0f);
+                    } else if (destNode->nodeType == AudioNodeType::DynamicsCompressor) {
+                        HostDynamicsCompressorNode* comp = reinterpret_cast<HostDynamicsCompressorNode*>(destNode);
+                        eng->setBusCompressorEnabled(Engine::MASTER_BUS_ID, true);
+                        if (comp) {
+                            float th = comp->thresholdParam ? comp->thresholdParam->value : -24.0f;
+                            float ra = comp->ratioParam ? comp->ratioParam->value : 12.0f;
+                            float at = comp->attackParam ? comp->attackParam->value * 1000.0f : 3.0f;
+                            float re = comp->releaseParam ? comp->releaseParam->value * 1000.0f : 250.0f;
+                            eng->setBusCompressorThreshold(Engine::MASTER_BUS_ID, th);
+                            eng->setBusCompressorRatio(Engine::MASTER_BUS_ID, ra);
+                            eng->setBusCompressorAttack(Engine::MASTER_BUS_ID, at);
+                            eng->setBusCompressorRelease(Engine::MASTER_BUS_ID, re);
+                        }
+                    } else if (destNode->nodeType == AudioNodeType::WaveShaper) {
+                        eng->setBusDistortionEnabled(Engine::MASTER_BUS_ID, true);
+                        eng->setBusDistortionMode(Engine::MASTER_BUS_ID, DistortionMode::SoftClip);
+                        eng->setBusDistortionMix(Engine::MASTER_BUS_ID, 1.0f);
+                    } else if (destNode->nodeType == AudioNodeType::Convolver) {
+                        eng->setBusReverbEnabled(Engine::MASTER_BUS_ID, true);
+                        eng->setBusReverbMix(Engine::MASTER_BUS_ID, 1.0f);
+                    }
+                }
             }
         }
         return a[0];
@@ -182,6 +262,18 @@ void decorateAudioNodeProto(ObjectBuilder& b) {
                     auto* eng = getAudioEngine();
                     if (eng && filter->slot >= 0) eng->setFilterEnabled(filter->slot, false);
                 }
+            } else if (node->nodeType == AudioNodeType::Delay) {
+                auto* eng = getAudioEngine();
+                if (eng) eng->setDelayEnabled(false);
+            } else if (node->nodeType == AudioNodeType::DynamicsCompressor) {
+                auto* eng = getAudioEngine();
+                if (eng) eng->setBusCompressorEnabled(Engine::MASTER_BUS_ID, false);
+            } else if (node->nodeType == AudioNodeType::WaveShaper) {
+                auto* eng = getAudioEngine();
+                if (eng) eng->setBusDistortionEnabled(Engine::MASTER_BUS_ID, false);
+            } else if (node->nodeType == AudioNodeType::Convolver) {
+                auto* eng = getAudioEngine();
+                if (eng) eng->setBusReverbEnabled(Engine::MASTER_BUS_ID, false);
             }
         }
         return ev::undefined();
@@ -349,6 +441,30 @@ void decorateOscillatorNodeProto(ObjectBuilder& b) {
                 eng->setVoiceSpatialMaxDistance(osc->voiceId, pn->maxDistance);
                 eng->setVoiceSpatialRolloff(osc->voiceId, pn->rolloffFactor);
                 eng->setVoiceSpatialDistanceModel(osc->voiceId, parseDistanceModel(pn->distanceModel));
+            } else if (cur->nodeType == AudioNodeType::Delay) {
+                auto* dn = reinterpret_cast<HostDelayNode*>(cur);
+                eng->setDelayEnabled(true);
+                float dt = dn->delayTimeParam ? dn->delayTimeParam->evaluate(when) : 0.0f;
+                eng->setDelayTime(dt);
+                eng->setDelayMix(1.0f);
+            } else if (cur->nodeType == AudioNodeType::DynamicsCompressor) {
+                auto* comp = reinterpret_cast<HostDynamicsCompressorNode*>(cur);
+                eng->setBusCompressorEnabled(Engine::MASTER_BUS_ID, true);
+                float th = comp->thresholdParam ? comp->thresholdParam->evaluate(when) : -24.0f;
+                float ra = comp->ratioParam ? comp->ratioParam->evaluate(when) : 12.0f;
+                float at = comp->attackParam ? comp->attackParam->evaluate(when) * 1000.0f : 3.0f;
+                float re = comp->releaseParam ? comp->releaseParam->evaluate(when) * 1000.0f : 250.0f;
+                eng->setBusCompressorThreshold(Engine::MASTER_BUS_ID, th);
+                eng->setBusCompressorRatio(Engine::MASTER_BUS_ID, ra);
+                eng->setBusCompressorAttack(Engine::MASTER_BUS_ID, at);
+                eng->setBusCompressorRelease(Engine::MASTER_BUS_ID, re);
+            } else if (cur->nodeType == AudioNodeType::WaveShaper) {
+                eng->setBusDistortionEnabled(Engine::MASTER_BUS_ID, true);
+                eng->setBusDistortionMode(Engine::MASTER_BUS_ID, DistortionMode::SoftClip);
+                eng->setBusDistortionMix(Engine::MASTER_BUS_ID, 1.0f);
+            } else if (cur->nodeType == AudioNodeType::Convolver) {
+                eng->setBusReverbEnabled(Engine::MASTER_BUS_ID, true);
+                eng->setBusReverbMix(Engine::MASTER_BUS_ID, 1.0f);
             }
 
             for (auto& t : cur->connectedTargets) {

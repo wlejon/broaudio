@@ -294,6 +294,9 @@ void decorateAudioContextProto(ObjectBuilder& b) {
         const uint8_t* rawData = nullptr;
         size_t rawLen = 0, elemSize = 1;
         if (!bufferBytes(inputV, &rawData, &rawLen, &elemSize) || rawLen == 0) {
+            if (!ev::isFunction(successCb) && !ev::isFunction(errorCb)) {
+                return ev::null();
+            }
             Value err = hostMakeDomError("EncodingError", "decodeAudioData: invalid buffer");
             if (ev::isFunction(errorCb)) {
                 try {
@@ -306,6 +309,9 @@ void decorateAudioContextProto(ObjectBuilder& b) {
 
         broaudio::AudioFileData data = broaudio::loadAudioFileFromMemory(rawData, rawLen);
         if (!data.valid()) {
+            if (!ev::isFunction(successCb) && !ev::isFunction(errorCb)) {
+                return ev::null();
+            }
             std::string msg = data.error.empty() ? "decodeAudioData: failed to decode audio" : data.error;
             Value err = hostMakeDomError("EncodingError", msg);
             if (ev::isFunction(errorCb)) {
@@ -344,7 +350,13 @@ void decorateAudioContextProto(ObjectBuilder& b) {
                                                                 samples.size() * sizeof(float)));
         ev::setProperty(bufVal, "samples", samplesArr);
         ev::setProperty(bufVal, "channels", ev::fromDouble(data.channels));
+        ev::setProperty(bufVal, "sampleRate", ev::fromDouble(engRate));
         ev::setProperty(bufVal, "numFrames", ev::fromDouble(numFrames));
+
+        ev::setProperty(p.get(), "samples", samplesArr);
+        ev::setProperty(p.get(), "channels", ev::fromDouble(data.channels));
+        ev::setProperty(p.get(), "sampleRate", ev::fromDouble(engRate));
+        ev::setProperty(p.get(), "numFrames", ev::fromDouble(numFrames));
 
         if (ev::isFunction(successCb)) {
             try {

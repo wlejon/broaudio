@@ -578,6 +578,34 @@ static void decorateMidiInputProto(ObjectBuilder& b) {
         return ev::undefined();
     });
 
+    // injectMessage(bytes, timestamp?) -> bool: feed one raw MIDI message
+    // (array or typed array of status + data bytes) in as if it came from the
+    // open port; the next processEvents() dispatches it. Works with no port
+    // open, for tests and on-screen keyboards. false for system messages,
+    // truncated messages, or a full queue.
+    b.def("injectMessage", 2, [](Value self, std::span<const Value> a) {
+        auto* h = hostMidiInputOf(self);
+        if (!h || !h->midi || a.empty()) return ev::fromBool(false);
+        double when = hasArg(a, 1) ? numAt(a, 1) : -1.0;
+        std::vector<uint8_t> bytes;
+        ev::TypedArrayInfo info = ev::typedArrayInfo(a[0]);
+        if (info && info.bytesPerElement == 1) {
+            bytes.assign(info.data, info.data + info.byteLength);
+        } else {
+            std::vector<double> storage;
+            const double* data = nullptr;
+            size_t count = 0;
+            if (!plainArrayData<double>(a[0], storage, [](double d) { return d; }, &data, &count)) {
+                return ev::fromBool(false);
+            }
+            bytes.reserve(count);
+            for (size_t i = 0; i < count; ++i) {
+                bytes.push_back(static_cast<uint8_t>(static_cast<int>(data[i]) & 0xFF));
+            }
+        }
+        return ev::fromBool(h->midi->injectMessage(bytes.data(), bytes.size(), when));
+    });
+
     b.def("processEvents", 0, [](Value self_, std::span<const Value>) {
         auto* h = hostMidiInputOf(self_);
         if (!h || !h->midi) return ev::undefined();

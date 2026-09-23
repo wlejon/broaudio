@@ -74,10 +74,29 @@ public:
     using RawCallback = std::function<void(const MidiEvent&)>;
     void onRawEvent(RawCallback fn) { rawCallback_ = std::move(fn); }
 
+    // Injection seam: feed one raw MIDI message (status byte + data bytes) in
+    // exactly as if it had arrived from the open port — same parsing, same
+    // ring, dispatched by the next processEvents(). Works with no port open
+    // and in builds without libremidi, which is what makes MIDI input
+    // testable headless; also usable as a virtual keyboard. `timestamp` is
+    // engine seconds; negative stamps it with engine.currentTime().
+    //
+    // Returns false when the bytes are not a channel message this class
+    // understands (sysex, clock and other system messages are ignored, as
+    // from a port), are truncated, or the ring is full (the event is dropped,
+    // as from a port). Single-producer like the port callback: do not call
+    // it while a port is open and delivering on its own thread.
+    bool injectMessage(const uint8_t* bytes, size_t size, double timestamp = -1.0);
+
+    // Parse one raw message into `event` (timestamp left 0). False for the
+    // same inputs injectMessage rejects before the ring.
+    static bool parseMessage(const uint8_t* bytes, size_t size, MidiEvent& event);
+
 private:
     static constexpr int RING_SIZE = 1024;
 
-    void pushEvent(const MidiEvent& event);
+    bool pushEvent(const MidiEvent& event);
+    bool receiveMessage(const uint8_t* bytes, size_t size, double timestamp);
 
     Engine& engine_;
     VoiceAllocator* allocator_ = nullptr;

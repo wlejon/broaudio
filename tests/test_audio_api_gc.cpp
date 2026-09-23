@@ -234,6 +234,44 @@ static void test_sequencer() {
     )JS"));
 }
 
+static void test_midi() {
+    runScript("MidiInput.injectMessage through processEvents", withPrelude(R"JS(
+        const midi = ctx.createMidiInput();
+        expect(midi instanceof MidiInput, "createMidiInput");
+        const va = ctx.createVoiceAllocator(4);
+        const setup = [];
+        va.setVoiceSetup((voice, note, vel) => { churn(); setup.push(note); });
+        midi.connectToAllocator(va);
+
+        const raw = [], ccs = [], bends = [];
+        midi.onRawEvent((e) => { churn(); raw.push(e.type + ":" + e.channel + ":" + e.data1 + ":" + e.data2); });
+        midi.onControlChange(74, (ch, cc, v) => { churn(); ccs.push(ch + "/" + cc + "/" + v); });
+        midi.onPitchBend((ch, v) => { churn(); bends.push(ch + "/" + v); });
+
+        expect(midi.injectMessage([0x90, 60, 127]) === true, "note on accepted");
+        expect(midi.injectMessage(new Uint8Array([0x91, 64, 64]), ctx.currentTime) === true, "Uint8Array accepted");
+        expect(midi.injectMessage([0xB2, 74, 99]) === true, "CC accepted");
+        expect(midi.injectMessage([0xE0, 0x00, 0x40]) === true, "pitch bend accepted");
+        expect(midi.injectMessage([0xF8]) === false, "clock ignored");
+        expect(midi.injectMessage([0x90, 60]) === false, "truncated note ignored");
+        expect(va.activeVoiceCount === 0, "nothing dispatched before processEvents");
+
+        midi.processEvents();
+        expect(raw.join(",") === "noteon:0:60:127,noteon:1:64:64,controlchange:2:74:99,pitchbend:0:0:0",
+               "raw events: " + raw.join(","));
+        expect(ccs.join(",") === "2/74/99", "CC callback: " + ccs.join(","));
+        expect(bends.join(",") === "0/0", "pitch bend callback: " + bends.join(","));
+        expect(va.activeVoiceCount === 2, "allocator voices: " + va.activeVoiceCount);
+        expect(setup.join(",") === "60,64", "voice setup ran for MIDI notes: " + setup.join(","));
+
+        midi.injectMessage([0x80, 60, 0]);
+        midi.injectMessage([0x91, 64, 0]);
+        midi.processEvents();
+        expect(va.activeVoiceCount === 0, "note offs released: " + va.activeVoiceCount);
+        return "SUCCESS";
+    )JS"));
+}
+
 static void test_mic_and_media() {
     runScript("bro.mic options and chunk delivery", withPrelude(R"JS(
         const chunks = [];
@@ -278,6 +316,7 @@ int main() {
         test_decode();
         test_nodes();
         test_sequencer();
+        test_midi();
         test_mic_and_media();
         broaudio::api::shutdownAudio();
     }

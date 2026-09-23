@@ -293,7 +293,10 @@ struct HostMidiInput {
 struct HostSequence {
     uint32_t tag = kHostSequenceTag;
     std::unique_ptr<broaudio::Sequence> seq;
-    std::vector<ev::Persistent> automationCallbacks;
+    // One per automation lane, in lane order. Each lane's closure holds its
+    // own reference, so removing a lane (which shifts the indices of the
+    // ones after it) never re-points a later lane at the wrong callback.
+    std::vector<std::shared_ptr<ev::Persistent>> automationCallbacks;
 };
 
 struct HostMediaStream {
@@ -454,19 +457,24 @@ inline bool hasArg(std::span<const Value> args, size_t i) {
 }
 
 inline Value hostMakeDomError(const char* name, const std::string& message) {
+    // Each allocation below may move every Value before it, so the message,
+    // the constructor and the error all ride in Persistents.
+    ev::Persistent msgVal(ev::fromUtf8(message));
     auto g = ev::globalValue("Error");
-    Value errObj;
-    Value msgVal = ev::fromUtf8(message);
-    if (g.found) {
-        ev::CallResult res = ev::construct(g.value, std::span<const Value>(&msgVal, 1));
-        errObj = res.thrown ? ev::createObject() : res.value;
+    ev::Persistent errObj;
+    if (g.found && ev::isFunction(g.value)) {
+        ev::Persistent ctor(g.value);
+        const Value arg = msgVal.get();
+        ev::CallResult res = ev::construct(ctor.get(), std::span<const Value>(&arg, 1));
+        errObj.set(res.thrown ? ev::createObject() : res.value);
     } else {
-        errObj = ev::createObject();
+        errObj.set(ev::createObject());
     }
     if (name && name[0]) {
-        ev::setProperty(errObj, "name", ev::fromUtf8(name));
+        ev::Persistent nameVal(ev::fromUtf8(name));
+        errObj.set(ev::setProperty(errObj.get(), "name", nameVal.get()));
     }
-    return errObj;
+    return errObj.get();
 }
 
 template <typename T, typename Convert>
@@ -488,17 +496,27 @@ inline bool plainArrayData(Value v, std::vector<T>& storage, Convert convert,
     return true;
 }
 
+// A Float32Array's elements (or a plain array's, converted) COPIED into
+// `storage`, which `*outData` then points at. A typed array's own bytes live
+// in the moving heap, so a pointer into them is stale after the next
+// allocating embed call; the copy is what lets a caller read more arguments
+// (getProperty on an options object) before it consumes the data.
 inline bool floatData(Value v, std::vector<float>& storage,
                       const float** outData, size_t* outCount) {
     if (auto info = ev::typedArrayInfo(v)) {
-        *outData = reinterpret_cast<const float*>(info.data);
-        *outCount = info.byteLength / sizeof(float);
+        size_t n = info.byteLength / sizeof(float);
+        storage.resize(n);
+        if (n > 0) std::memcpy(storage.data(), info.data, n * sizeof(float));
+        *outData = storage.data();
+        *outCount = n;
         return true;
     }
     return plainArrayData<float>(
         v, storage, [](double d) { return static_cast<float>(d); }, outData, outCount);
 }
 
+// A view's or ArrayBuffer's bytes IN PLACE: the pointer is valid only until
+// the next allocating embed call, so consume it before making one.
 inline bool bufferBytes(Value v, const uint8_t** outData, size_t* outLen,
                         size_t* outElemSize) {
     if (auto info = ev::typedArrayInfo(v)) {
@@ -578,6 +596,15 @@ Value makeDestinationNodeValue();
 Value makeListenerValue();
 Value makePannerNodeValue();
 Value makeStereoPannerNodeValue();
+// Pull a PannerNode's position/orientation AudioParams (evaluated at `when`)
+// into its HostPannerNode, so `panner.positionX.value = x` (or a scheduled
+// ramp) is what a source started through the panner is placed at. Reads
+// properties, so it may allocate.
+void syncPannerFromParams(Value pannerObj, double when);
+// Queue the nodes in `targets` for a start()-time graph walk, syncing any
+// PannerNode among them from its params first (may allocate).
+void pushConnectedTargets(const std::vector<ev::Persistent>& targets,
+                          std::vector<HostAudioNode*>& queue, double when);
 
 // DSP creators & decorators (host_audio_dsp.cpp)
 void decorateDelayNodeProto(ObjectBuilder& b);
@@ -600,7 +627,9 @@ void installAudioSequencerGlobals();
 Value makeVoiceAllocatorValue(int maxVoices);
 Value makeModMatrixValue();
 Value makeMidiInputValue();
-Value makeSequenceValue(HostVoiceAllocator* va);
+// `allocatorObj` is the VoiceAllocator JS object; the sequence keeps it (as
+// `_allocator`) so update() can run the allocator's voice-setup callback.
+Value makeSequenceValue(Value allocatorObj);
 Value makeMediaStreamValue();
 Value makeMediaStreamAudioSourceNodeValue();
 void registerAudioContextVoice(ObjectBuilder& b);

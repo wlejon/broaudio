@@ -130,12 +130,10 @@ void decoratePannerNodeProto(ObjectBuilder& b) {
             p->posX = static_cast<float>(numAt(a, 0));
             p->posY = static_cast<float>(numAt(a, 1));
             p->posZ = static_cast<float>(numAt(a, 2));
-            Value px = ev::getProperty(self_, "positionX");
-            if (auto* param = hostAudioParamOf(px)) param->value = p->posX;
-            Value py = ev::getProperty(self_, "positionY");
-            if (auto* param = hostAudioParamOf(py)) param->value = p->posY;
-            Value pz = ev::getProperty(self_, "positionZ");
-            if (auto* param = hostAudioParamOf(pz)) param->value = p->posZ;
+            ev::Persistent self(self_);  // each read may move the node
+            if (auto* param = hostAudioParamOf(ev::getProperty(self.get(), "positionX"))) param->value = p->posX;
+            if (auto* param = hostAudioParamOf(ev::getProperty(self.get(), "positionY"))) param->value = p->posY;
+            if (auto* param = hostAudioParamOf(ev::getProperty(self.get(), "positionZ"))) param->value = p->posZ;
         }
         return ev::undefined();
     });
@@ -146,23 +144,51 @@ void decoratePannerNodeProto(ObjectBuilder& b) {
             p->orientX = static_cast<float>(numAt(a, 0));
             p->orientY = static_cast<float>(numAt(a, 1));
             p->orientZ = static_cast<float>(numAt(a, 2));
+            ev::Persistent self(self_);
+            if (auto* param = hostAudioParamOf(ev::getProperty(self.get(), "orientationX"))) param->value = p->orientX;
+            if (auto* param = hostAudioParamOf(ev::getProperty(self.get(), "orientationY"))) param->value = p->orientY;
+            if (auto* param = hostAudioParamOf(ev::getProperty(self.get(), "orientationZ"))) param->value = p->orientZ;
         }
         return ev::undefined();
     });
+}
+
+void syncPannerFromParams(Value pannerObj, double when) {
+    HostPannerNode* p = pannerOf(pannerObj);
+    if (!p) return;
+    ev::Persistent self(pannerObj);
+    auto read = [&](const char* name, float& out) {
+        if (auto* param = hostAudioParamOf(ev::getProperty(self.get(), name))) {
+            out = param->evaluate(when);
+        }
+    };
+    read("positionX", p->posX);
+    read("positionY", p->posY);
+    read("positionZ", p->posZ);
+    read("orientationX", p->orientX);
+    read("orientationY", p->orientY);
+    read("orientationZ", p->orientZ);
+}
+
+void pushConnectedTargets(const std::vector<ev::Persistent>& targets,
+                          std::vector<HostAudioNode*>& queue, double when) {
+    for (const auto& t : targets) {
+        HostAudioNode* n = hostAudioNodeOf(t.get());
+        if (!n) continue;
+        if (n->nodeType == AudioNodeType::Panner) syncPannerFromParams(t.get(), when);
+        queue.push_back(n);
+    }
 }
 
 Value makePannerNodeValue() {
     auto* panner = new HostPannerNode();
     panner->base.nodeType = AudioNodeType::Panner;
 
-    Value pxVal = makeAudioParamValue(AudioParamTarget::PannerPositionX, -1, 0.0f, -3.4e38f, 3.4e38f, 0.0f);
-    Value pyVal = makeAudioParamValue(AudioParamTarget::PannerPositionY, -1, 0.0f, -3.4e38f, 3.4e38f, 0.0f);
-    Value pzVal = makeAudioParamValue(AudioParamTarget::PannerPositionZ, -1, 0.0f, -3.4e38f, 3.4e38f, 0.0f);
-
+    // Each param is made and attached before the next allocation.
     ObjectBuilder b(g_pannerNodeClass.make(panner, hostPannerDtor));
-    b.set("positionX", pxVal);
-    b.set("positionY", pyVal);
-    b.set("positionZ", pzVal);
+    b.set("positionX", makeAudioParamValue(AudioParamTarget::PannerPositionX, -1, 0.0f, -3.4e38f, 3.4e38f, 0.0f));
+    b.set("positionY", makeAudioParamValue(AudioParamTarget::PannerPositionY, -1, 0.0f, -3.4e38f, 3.4e38f, 0.0f));
+    b.set("positionZ", makeAudioParamValue(AudioParamTarget::PannerPositionZ, -1, 0.0f, -3.4e38f, 3.4e38f, 0.0f));
     b.set("orientationX", makeAudioParamValue(AudioParamTarget::PannerOrientationX, -1, 1.0f, -3.4e38f, 3.4e38f, 1.0f));
     b.set("orientationY", makeAudioParamValue(AudioParamTarget::PannerOrientationY, -1, 0.0f, -3.4e38f, 3.4e38f, 0.0f));
     b.set("orientationZ", makeAudioParamValue(AudioParamTarget::PannerOrientationZ, -1, 0.0f, -3.4e38f, 3.4e38f, 0.0f));
@@ -174,9 +200,9 @@ void decorateStereoPannerNodeProto(ObjectBuilder& b) {
                [](Value self_, std::span<const Value>) {
                    HostStereoPannerNode* p = stereoPannerOf(self_);
                    if (!p) return ev::undefined();
-                   Value v = ev::getProperty(self_, "_pan");
-                   if (ev::isObject(v)) return v;
-                   return ev::getProperty(self_, "pan");
+                   // The AudioParam lives on the instance as `_pan` (and as
+                   // an own `pan`, which shadows this accessor).
+                   return ev::getProperty(self_, "_pan");
                },
                [](Value self_, std::span<const Value> a) {
                    HostStereoPannerNode* p = stereoPannerOf(self_);
@@ -192,12 +218,12 @@ Value makeStereoPannerNodeValue() {
     auto* panner = new HostStereoPannerNode();
     panner->base.nodeType = AudioNodeType::StereoPanner;
 
-    Value panVal = makeAudioParamValue(AudioParamTarget::Pan, -1, 0.0f, -1.0f, 1.0f, 0.0f);
-    panner->panParam = hostAudioParamOf(panVal);
+    ev::Persistent panVal(makeAudioParamValue(AudioParamTarget::Pan, -1, 0.0f, -1.0f, 1.0f, 0.0f));
+    panner->panParam = hostAudioParamOf(panVal.get());
 
     ObjectBuilder b(g_stereoPannerNodeClass.make(panner, hostStereoPannerDtor));
-    b.set("_pan", panVal);
-    b.set("pan", panVal);
+    b.set("_pan", panVal.get());
+    b.set("pan", panVal.get());
     return b.get();
 }
 

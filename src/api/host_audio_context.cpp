@@ -181,21 +181,32 @@ void decorateAudioContextProto(ObjectBuilder& b) {
 
     b.def("createPeriodicWave", 3, [](Value, std::span<const Value> a) -> Value {
         if (a.size() < 2) return ev::null();
-        const uint8_t* rData = nullptr; size_t rLen = 0, rElem = 1;
-        const uint8_t* iData = nullptr; size_t iLen = 0, iElem = 1;
-        if (!bufferBytes(a[0], &rData, &rLen, &rElem) || !bufferBytes(a[1], &iData, &iLen, &iElem)) {
-            return ev::null();
-        }
-        int count = static_cast<int>(std::min(rLen, iLen) / sizeof(float));
+        // The options read may run a getter and move the heap, so it goes
+        // first and the arrays' bytes are copied out after it.
         bool disableNorm = false;
         if (a.size() >= 3 && ev::isObject(a[2])) {
-            Value opt = a[2];
-            Value dn = ev::getProperty(opt, "disableNormalization");
+            Value dn = ev::getProperty(a[2], "disableNormalization");
             if (ev::isBool(dn)) disableNorm = ev::toBool(dn);
         }
-        return makePeriodicWaveValue(reinterpret_cast<const float*>(rData),
-                                     reinterpret_cast<const float*>(iData),
-                                     count, disableNorm);
+        if (!ev::typedArrayInfo(a[0]) && !ev::arrayBufferInfo(a[0])) return ev::null();
+        if (!ev::typedArrayInfo(a[1]) && !ev::arrayBufferInfo(a[1])) return ev::null();
+        std::vector<float> real, imag;
+        const float* rData = nullptr; size_t rCount = 0;
+        const float* iData = nullptr; size_t iCount = 0;
+        if (!floatData(a[0], real, &rData, &rCount)) {
+            const uint8_t* bytes = nullptr; size_t len = 0, elem = 1;
+            if (!bufferBytes(a[0], &bytes, &len, &elem)) return ev::null();
+            real.resize(len / sizeof(float));
+            if (!real.empty()) std::memcpy(real.data(), bytes, real.size() * sizeof(float));
+        }
+        if (!floatData(a[1], imag, &iData, &iCount)) {
+            const uint8_t* bytes = nullptr; size_t len = 0, elem = 1;
+            if (!bufferBytes(a[1], &bytes, &len, &elem)) return ev::null();
+            imag.resize(len / sizeof(float));
+            if (!imag.empty()) std::memcpy(imag.data(), bytes, imag.size() * sizeof(float));
+        }
+        int count = static_cast<int>(std::min(real.size(), imag.size()));
+        return makePeriodicWaveValue(real.data(), imag.data(), count, disableNorm);
     });
 
     b.def("createBiquadFilter", 0, [](Value, std::span<const Value>) {
@@ -276,51 +287,44 @@ void decorateAudioContextProto(ObjectBuilder& b) {
         if (a.empty()) return ev::undefined();
         HostVoiceAllocator* va = ev::isObject(a[0]) ? hostVoiceAllocatorOf(a[0]) : nullptr;
         if (!va) return ev::throwTypeError("Expected VoiceAllocator argument");
-        return makeSequenceValue(va);
+        return makeSequenceValue(a[0]);
     });
 
     // 4. decodeAudioData
     b.def("decodeAudioData", 3, [](Value, std::span<const Value> a) -> Value {
+        // The callbacks are read from `a` (rooted) at each use, never from a
+        // local copy: every call below allocates.
+        const bool hasSuccessCb = a.size() >= 2 && ev::isFunction(a[1]);
+        const bool hasErrorCb = a.size() >= 3 && ev::isFunction(a[2]);
         ev::Persistent p(ev::createPromise());
+        auto fail = [&](const std::string& msg) -> Value {
+            ev::Persistent err(hostMakeDomError("EncodingError", msg));
+            if (hasErrorCb) {
+                const Value arg = err.get();
+                ev::call(a[2], ev::undefined(), std::span<const Value>(&arg, 1));
+            }
+            ev::rejectPromise(p.get(), err.get());
+            return p.get();
+        };
         if (a.empty()) {
-            Value err = hostMakeDomError("TypeError", "decodeAudioData: audio buffer argument required");
-            ev::rejectPromise(p.get(), err);
+            ev::Persistent err(hostMakeDomError("TypeError", "decodeAudioData: audio buffer argument required"));
+            ev::rejectPromise(p.get(), err.get());
             return p.get();
         }
-        Value inputV = a[0];
-        Value successCb = a.size() >= 2 ? a[1] : ev::undefined();
-        Value errorCb = a.size() >= 3 ? a[2] : ev::undefined();
 
         const uint8_t* rawData = nullptr;
         size_t rawLen = 0, elemSize = 1;
-        if (!bufferBytes(inputV, &rawData, &rawLen, &elemSize) || rawLen == 0) {
-            if (!ev::isFunction(successCb) && !ev::isFunction(errorCb)) {
-                return ev::null();
-            }
-            Value err = hostMakeDomError("EncodingError", "decodeAudioData: invalid buffer");
-            if (ev::isFunction(errorCb)) {
-                try {
-                    ev::call(errorCb, ev::undefined(), std::span<const Value>(&err, 1));
-                } catch (...) {}
-            }
-            ev::rejectPromise(p.get(), err);
-            return p.get();
+        if (!bufferBytes(a[0], &rawData, &rawLen, &elemSize) || rawLen == 0) {
+            if (!hasSuccessCb && !hasErrorCb) return ev::null();
+            return fail("decodeAudioData: invalid buffer");
         }
 
+        // rawData points into the moving heap; the decode consumes it before
+        // anything allocates.
         broaudio::AudioFileData data = broaudio::loadAudioFileFromMemory(rawData, rawLen);
         if (!data.valid()) {
-            if (!ev::isFunction(successCb) && !ev::isFunction(errorCb)) {
-                return ev::null();
-            }
-            std::string msg = data.error.empty() ? "decodeAudioData: failed to decode audio" : data.error;
-            Value err = hostMakeDomError("EncodingError", msg);
-            if (ev::isFunction(errorCb)) {
-                try {
-                    ev::call(errorCb, ev::undefined(), std::span<const Value>(&err, 1));
-                } catch (...) {}
-            }
-            ev::rejectPromise(p.get(), err);
-            return p.get();
+            if (!hasSuccessCb && !hasErrorCb) return ev::null();
+            return fail(data.error.empty() ? "decodeAudioData: failed to decode audio" : data.error);
         }
 
         auto* e = getAudioEngine();
@@ -334,8 +338,8 @@ void decorateAudioContextProto(ObjectBuilder& b) {
             samples = std::move(data.samples);
         }
 
-        Value bufVal = makeAudioBufferValue(data.channels, numFrames, engRate);
-        HostAudioBuffer* hostBuf = hostAudioBufferOf(bufVal);
+        ev::Persistent bufVal(makeAudioBufferValue(data.channels, numFrames, engRate));
+        HostAudioBuffer* hostBuf = hostAudioBufferOf(bufVal.get());
         if (hostBuf && numFrames > 0 && data.channels > 0) {
             hostBuf->channels.resize(data.channels, std::vector<float>(numFrames, 0.0f));
             for (int c = 0; c < data.channels; ++c) {
@@ -345,25 +349,24 @@ void decorateAudioContextProto(ObjectBuilder& b) {
             }
         }
 
-        Value samplesArr = ev::createTypedArray(ev::elements::Float32, static_cast<uint32_t>(samples.size()));
-        ev::fillTypedArray(samplesArr, std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(samples.data()),
-                                                                samples.size() * sizeof(float)));
-        ev::setProperty(bufVal, "samples", samplesArr);
-        ev::setProperty(bufVal, "channels", ev::fromDouble(data.channels));
-        ev::setProperty(bufVal, "sampleRate", ev::fromDouble(engRate));
-        ev::setProperty(bufVal, "numFrames", ev::fromDouble(numFrames));
+        ev::Persistent samplesArr(makeFloat32Array(samples));
+        // The AudioDecodedBuffer fields, on the AudioBuffer and (for the
+        // synchronous `ctx.decodeAudioData(bytes).samples` form) on the
+        // promise itself.
+        auto decorate = [&](ev::Persistent& target) {
+            target.set(ev::setProperty(target.get(), "samples", samplesArr.get()));
+            target.set(ev::setProperty(target.get(), "channels", ev::fromDouble(data.channels)));
+            target.set(ev::setProperty(target.get(), "sampleRate", ev::fromDouble(engRate)));
+            target.set(ev::setProperty(target.get(), "numFrames", ev::fromDouble(numFrames)));
+        };
+        decorate(bufVal);
+        decorate(p);
 
-        ev::setProperty(p.get(), "samples", samplesArr);
-        ev::setProperty(p.get(), "channels", ev::fromDouble(data.channels));
-        ev::setProperty(p.get(), "sampleRate", ev::fromDouble(engRate));
-        ev::setProperty(p.get(), "numFrames", ev::fromDouble(numFrames));
-
-        if (ev::isFunction(successCb)) {
-            try {
-                ev::call(successCb, ev::undefined(), std::span<const Value>(&bufVal, 1));
-            } catch (...) {}
+        if (hasSuccessCb) {
+            const Value arg = bufVal.get();
+            ev::call(a[1], ev::undefined(), std::span<const Value>(&arg, 1));
         }
-        ev::resolvePromise(p.get(), bufVal);
+        ev::resolvePromise(p.get(), bufVal.get());
         return p.get();
     });
 
@@ -727,12 +730,13 @@ void installAudioGlobals() {
         [](Value, std::span<const Value> a) -> Value {
             int length = 0, channels = 1, sampleRate = 44100;
             if (!a.empty() && ev::isObject(a[0])) {
-                Value opt = a[0];
-                Value lenV = ev::getProperty(opt, "length");
+                // Read the options off a[0] (rooted) each time: a getProperty
+                // may move the object.
+                Value lenV = ev::getProperty(a[0], "length");
                 if (!ev::isUndefined(lenV) && !ev::isObject(lenV)) length = static_cast<int>(ev::toDouble(lenV));
-                Value chV = ev::getProperty(opt, "numberOfChannels");
+                Value chV = ev::getProperty(a[0], "numberOfChannels");
                 if (!ev::isUndefined(chV) && !ev::isObject(chV)) channels = static_cast<int>(ev::toDouble(chV));
-                Value srV = ev::getProperty(opt, "sampleRate");
+                Value srV = ev::getProperty(a[0], "sampleRate");
                 if (!ev::isUndefined(srV) && !ev::isObject(srV)) sampleRate = static_cast<int>(ev::toDouble(srV));
             }
             if (length <= 0) return ev::throwTypeError("AudioBuffer: length must be positive");
@@ -816,6 +820,8 @@ void installAudioGlobals() {
     // 15. PeriodicWave
     g_periodicWaveClass.install("PeriodicWave", 0,
         [](Value, std::span<const Value> a) {
+            // floatData copies into the storage vectors, so the pointers
+            // survive the later reads (which may allocate).
             std::vector<float> rStorage, iStorage;
             const float* rData = nullptr;
             const float* iData = nullptr;
@@ -824,18 +830,51 @@ void installAudioGlobals() {
             if (a.size() >= 2) floatData(a[1], iStorage, &iData, &iCount);
             bool disableNorm = false;
             if (a.size() >= 3 && ev::isObject(a[2])) {
-                Value opt = a[2];
-                Value dn = ev::getProperty(opt, "disableNormalization");
+                Value dn = ev::getProperty(a[2], "disableNormalization");
                 if (!ev::isUndefined(dn)) disableNorm = ev::toBool(dn);
             }
-            int count = static_cast<int>(std::max(rCount, iCount));
-            return makePeriodicWaveValue(rData, iData, count, disableNorm);
+            // A shorter (or missing) half is zero-padded to the longer one;
+            // makePeriodicWaveValue reads `count` values from each.
+            size_t count = std::max(rCount, iCount);
+            rStorage.resize(count, 0.0f);
+            iStorage.resize(count, 0.0f);
+            return makePeriodicWaveValue(rStorage.data(), iStorage.data(),
+                                         static_cast<int>(count), disableNorm);
         },
         decoratePeriodicWaveProto);
 
     // 16. Synth & Sequencer Globals
     installAudioSynthGlobals();
     installAudioSequencerGlobals();
+
+    // 17. getUserMedia: starts engine mic capture and resolves with a
+    // MediaStream (for createMediaStreamSource), or rejects with
+    // Error("Failed to access microphone"). Installed as the global
+    // `__nativeGetUserMedia` and, when the realm already has a `navigator`,
+    // as navigator.mediaDevices.getUserMedia — the QuickJS binding's shape.
+    ev::setGlobalFunction("__nativeGetUserMedia", 1, [](Value, std::span<const Value>) -> Value {
+        ev::Persistent p(ev::createPromise());
+        auto* e = getAudioEngine();
+        if (!e || !e->startMicCapture()) {
+            ev::Persistent err(hostMakeDomError(nullptr, "Failed to access microphone"));
+            ev::rejectPromise(p.get(), err.get());
+            return p.get();
+        }
+        ev::Persistent stream(makeMediaStreamValue());
+        ev::resolvePromise(p.get(), stream.get());
+        return p.get();
+    });
+    ev::GlobalValue nav = ev::globalValue("navigator");
+    if (nav.found && ev::isObject(nav.value)) {
+        ev::Persistent navigator(nav.value);
+        ev::Persistent mediaDevices(ev::getProperty(navigator.get(), "mediaDevices"));
+        if (!ev::isObject(mediaDevices.get())) {
+            mediaDevices.set(ev::createObject());
+            ev::setProperty(navigator.get(), "mediaDevices", mediaDevices.get());
+        }
+        ev::Persistent fn(ev::getGlobal("__nativeGetUserMedia"));
+        ev::setProperty(mediaDevices.get(), "getUserMedia", fn.get());
+    }
 }
 
 } // namespace broaudio::api

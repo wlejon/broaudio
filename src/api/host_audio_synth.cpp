@@ -176,7 +176,9 @@ void hostMidiInputDtor(void* p) {
 
 void hostSequenceDtor(void* p) {
     auto* h = static_cast<HostSequence*>(p);
-    for (auto& cb : h->automationCallbacks) cb.set(ev::undefined());
+    for (auto& cb : h->automationCallbacks) {
+        if (cb) cb->set(ev::undefined());
+    }
     delete h;
 }
 
@@ -222,22 +224,70 @@ HostMediaStreamAudioSourceNode* hostMediaStreamNodeOf(Value v) {
 // VoiceAllocator
 // ---------------------------------------------------------------------------
 
+namespace {
+
+// The JS voice-setup callback (setVoiceSetup) lives on the allocator object
+// as `_voiceSetup`, where the collector traces it, rather than in a
+// Persistent inside the finalized HostVoiceAllocator. Any path that can
+// allocate voices — noteOn, a Sequence's update(), MidiInput.processEvents()
+// — installs it on the C++ allocator for the duration of the call through
+// this scope, so the callback fires for every voice the allocator hands out,
+// the way the QuickJS binding's permanently-installed callback did. The
+// callback is held in a Persistent: it runs JS, which allocates, and it may
+// be called once per voice.
+class ScopedVoiceSetup {
+public:
+    ScopedVoiceSetup(Value allocatorObj) {
+        va_ = hostVoiceAllocatorOf(allocatorObj);
+        if (!va_ || !va_->allocator) {
+            va_ = nullptr;
+            return;
+        }
+        auto cb = std::make_shared<ev::Persistent>(ev::getProperty(allocatorObj, "_voiceSetup"));
+        if (!ev::isFunction(cb->get())) {
+            va_->allocator->setVoiceSetup(nullptr);
+            return;
+        }
+        va_->allocator->setVoiceSetup([cb](int voiceId, int note, float vel) {
+            const Value args[3] = {ev::fromDouble(voiceId), ev::fromDouble(note), ev::fromDouble(vel)};
+            ev::call(cb->get(), ev::undefined(), std::span<const Value>(args, 3));
+        });
+    }
+    ~ScopedVoiceSetup() {
+        if (va_ && va_->allocator) va_->allocator->setVoiceSetup(nullptr);
+    }
+    ScopedVoiceSetup(const ScopedVoiceSetup&) = delete;
+    ScopedVoiceSetup& operator=(const ScopedVoiceSetup&) = delete;
+
+private:
+    HostVoiceAllocator* va_ = nullptr;
+};
+
+// MidiRawEvent.type: the lowercase label the QuickJS binding (and
+// audio-api.js) use, not the enum's number.
+const char* midiEventTypeName(broaudio::MidiEvent::Type t) {
+    switch (t) {
+        case broaudio::MidiEvent::Type::NoteOn:          return "noteon";
+        case broaudio::MidiEvent::Type::NoteOff:         return "noteoff";
+        case broaudio::MidiEvent::Type::ControlChange:   return "controlchange";
+        case broaudio::MidiEvent::Type::PitchBend:       return "pitchbend";
+        case broaudio::MidiEvent::Type::ProgramChange:   return "programchange";
+        case broaudio::MidiEvent::Type::Aftertouch:      return "aftertouch";
+        case broaudio::MidiEvent::Type::ChannelPressure: return "channelpressure";
+    }
+    return "unknown";
+}
+
+}  // namespace
+
 static void decorateVoiceAllocatorProto(ObjectBuilder& b) {
     b.def("noteOn", 3, [](Value self, std::span<const Value> a) {
         auto* h = hostVoiceAllocatorOf(self);
         if (h && h->allocator && a.size() >= 2) {
-            Value cb = ev::getProperty(self, "_voiceSetup");
-            if (ev::isFunction(cb)) {
-                h->allocator->setVoiceSetup([cb](int voiceId, int note, float vel) {
-                    Value args[3] = { ev::fromDouble(voiceId), ev::fromDouble(note), ev::fromDouble(vel) };
-                    ev::call(cb, ev::undefined(), std::span<const Value>(args, 3));
-                });
-            } else {
-                h->allocator->setVoiceSetup(nullptr);
-            }
-            double when = a.size() >= 3 ? numAt(a, 2) : 0.0;
+            ScopedVoiceSetup setup(self);
+            auto* e = getAudioEngine();
+            double when = a.size() >= 3 ? numAt(a, 2) : (e ? e->currentTime() : 0.0);
             int voice = h->allocator->noteOn(i32At(a, 0), static_cast<float>(numAt(a, 1)), when);
-            h->allocator->setVoiceSetup(nullptr);
             return ev::fromDouble(voice);
         }
         return ev::fromDouble(-1);
@@ -246,7 +296,8 @@ static void decorateVoiceAllocatorProto(ObjectBuilder& b) {
     b.def("noteOff", 2, [](Value self, std::span<const Value> a) {
         auto* h = hostVoiceAllocatorOf(self);
         if (h && h->allocator && !a.empty()) {
-            double when = a.size() >= 2 ? numAt(a, 1) : 0.0;
+            auto* e = getAudioEngine();
+            double when = a.size() >= 2 ? numAt(a, 1) : (e ? e->currentTime() : 0.0);
             h->allocator->noteOff(i32At(a, 0), when);
         }
         return ev::undefined();
@@ -255,7 +306,8 @@ static void decorateVoiceAllocatorProto(ObjectBuilder& b) {
     b.def("allNotesOff", 1, [](Value self, std::span<const Value> a) {
         auto* h = hostVoiceAllocatorOf(self);
         if (h && h->allocator) {
-            double when = !a.empty() ? numAt(a, 0) : 0.0;
+            auto* e = getAudioEngine();
+            double when = !a.empty() ? numAt(a, 0) : (e ? e->currentTime() : 0.0);
             h->allocator->allNotesOff(when);
         }
         return ev::undefined();
@@ -526,67 +578,63 @@ static void decorateMidiInputProto(ObjectBuilder& b) {
         return ev::undefined();
     });
 
-    b.def("processEvents", 0, [](Value self, std::span<const Value>) {
-        auto* h = hostMidiInputOf(self);
+    b.def("processEvents", 0, [](Value self_, std::span<const Value>) {
+        auto* h = hostMidiInputOf(self_);
         if (!h || !h->midi) return ev::undefined();
 
-        Value rawCb = ev::getProperty(self, "_rawCb");
-        if (ev::isFunction(rawCb)) {
+        // Every read below may allocate (and every callback runs JS, which
+        // does), so the receiver and each callback are held in Persistents;
+        // a callback's closure owns its Persistent through a shared_ptr.
+        ev::Persistent self(self_);
+        auto rooted = [&](const std::string& key) {
+            return std::make_shared<ev::Persistent>(ev::getProperty(self.get(), key));
+        };
+
+        auto rawCb = rooted("_rawCb");
+        if (ev::isFunction(rawCb->get())) {
             h->midi->onRawEvent([rawCb](const broaudio::MidiEvent& ev) {
                 ObjectBuilder evObj;
-                evObj.set("type", ev::fromDouble(static_cast<int>(ev.type)));
+                evObj.set("type", midiEventTypeName(ev.type));
                 evObj.set("channel", ev::fromDouble(ev.channel));
                 evObj.set("data1", ev::fromDouble(ev.data1));
                 evObj.set("data2", ev::fromDouble(ev.data2));
                 evObj.set("pitchBend", ev::fromDouble(ev.pitchBend));
                 evObj.set("timestamp", ev::fromDouble(ev.timestamp));
-                Value v = evObj.get();
-                ev::call(rawCb, ev::undefined(), std::span<const Value>(&v, 1));
+                const Value v = evObj.get();
+                ev::call(rawCb->get(), ev::undefined(), std::span<const Value>(&v, 1));
             });
         } else {
             h->midi->onRawEvent(nullptr);
         }
 
-        Value pbCb = ev::getProperty(self, "_pitchBendCb");
-        if (ev::isFunction(pbCb)) {
+        auto pbCb = rooted("_pitchBendCb");
+        if (ev::isFunction(pbCb->get())) {
             h->midi->onPitchBend([pbCb](uint8_t ch, int16_t val) {
-                Value args[2] = { ev::fromDouble(ch), ev::fromDouble(val) };
-                ev::call(pbCb, ev::undefined(), std::span<const Value>(args, 2));
+                const Value args[2] = { ev::fromDouble(ch), ev::fromDouble(val) };
+                ev::call(pbCb->get(), ev::undefined(), std::span<const Value>(args, 2));
             });
         } else {
             h->midi->onPitchBend(nullptr);
         }
 
         for (int cc = 0; cc < 128; ++cc) {
-            std::string prop = "_cc_" + std::to_string(cc);
-            Value cb = ev::getProperty(self, prop.c_str());
-            if (ev::isFunction(cb)) {
+            auto cb = rooted("_cc_" + std::to_string(cc));
+            if (ev::isFunction(cb->get())) {
                 h->midi->onControlChange(static_cast<uint8_t>(cc), [cb](uint8_t ch, uint8_t ccn, uint8_t val) {
-                    Value args[3] = { ev::fromDouble(ch), ev::fromDouble(ccn), ev::fromDouble(val) };
-                    ev::call(cb, ev::undefined(), std::span<const Value>(args, 3));
+                    const Value args[3] = { ev::fromDouble(ch), ev::fromDouble(ccn), ev::fromDouble(val) };
+                    ev::call(cb->get(), ev::undefined(), std::span<const Value>(args, 3));
                 });
             } else {
                 h->midi->onControlChange(static_cast<uint8_t>(cc), nullptr);
             }
         }
 
-        Value allocVal = ev::getProperty(self, "_connectedAllocator");
-        HostVoiceAllocator* alloc = hostVoiceAllocatorOf(allocVal);
-        if (alloc && alloc->allocator) {
-            Value cb = ev::getProperty(allocVal, "_voiceSetup");
-            if (ev::isFunction(cb)) {
-                alloc->allocator->setVoiceSetup([cb](int voiceId, int note, float vel) {
-                    Value args[3] = { ev::fromDouble(voiceId), ev::fromDouble(note), ev::fromDouble(vel) };
-                    ev::call(cb, ev::undefined(), std::span<const Value>(args, 3));
-                });
-            }
+        ev::Persistent allocVal(ev::getProperty(self.get(), "_connectedAllocator"));
+        {
+            ScopedVoiceSetup setup(allocVal.get());
+            h->midi->processEvents();
         }
 
-        h->midi->processEvents();
-
-        if (alloc && alloc->allocator) {
-            alloc->allocator->setVoiceSetup(nullptr);
-        }
         h->midi->onRawEvent(nullptr);
         h->midi->onPitchBend(nullptr);
         for (int cc = 0; cc < 128; ++cc) {
@@ -746,6 +794,10 @@ static void decorateSequenceProto(ObjectBuilder& b) {
         auto* h = hostSequenceOf(self);
         if (h && h->seq) {
             double when = !a.empty() ? numAt(a, 0) : (getAudioEngine() ? getAudioEngine()->currentTime() : 0.0);
+            // The notes this update fires go through the allocator: run its
+            // voice-setup callback for them.
+            ev::Persistent allocatorObj(ev::getProperty(self, "_allocator"));
+            ScopedVoiceSetup setup(allocatorObj.get());
             h->seq->update(when);
         }
         return ev::undefined();
@@ -755,13 +807,12 @@ static void decorateSequenceProto(ObjectBuilder& b) {
         auto* h = hostSequenceOf(self);
         if (!h || !h->seq || a.empty() || !ev::isFunction(a[0])) return ev::fromDouble(-1);
         int laneIdx = h->seq->automationLaneCount();
-        h->automationCallbacks.emplace_back(a[0]);
-        size_t cbIdx = h->automationCallbacks.size() - 1;
-        h->seq->addAutomationLane([h, cbIdx](float val) {
-            if (h && cbIdx < h->automationCallbacks.size() && ev::isFunction(h->automationCallbacks[cbIdx].get())) {
-                Value arg = ev::fromDouble(val);
-                ev::call(h->automationCallbacks[cbIdx].get(), ev::undefined(), std::span<const Value>(&arg, 1));
-            }
+        auto cb = std::make_shared<ev::Persistent>(a[0]);
+        h->automationCallbacks.push_back(cb);
+        h->seq->addAutomationLane([cb](float val) {
+            if (!ev::isFunction(cb->get())) return;
+            const Value arg = ev::fromDouble(val);
+            ev::call(cb->get(), ev::undefined(), std::span<const Value>(&arg, 1));
         });
         return ev::fromDouble(laneIdx);
     });
@@ -769,11 +820,17 @@ static void decorateSequenceProto(ObjectBuilder& b) {
     decorateSequenceAutomation(b);
 }
 
-Value makeSequenceValue(HostVoiceAllocator* va) {
+Value makeSequenceValue(Value allocatorObj) {
+    HostVoiceAllocator* va = hostVoiceAllocatorOf(allocatorObj);
     if (!va || !va->allocator) return ev::null();
+    ev::Persistent alloc(allocatorObj);
     auto* h = new HostSequence();
     h->seq = std::make_unique<broaudio::Sequence>(*va->allocator);
-    return g_sequenceClass.make(h, hostSequenceDtor);
+    // The sequence drives the allocator by reference: keep the allocator
+    // object (and so the C++ allocator) alive as long as the sequence.
+    ObjectBuilder b(g_sequenceClass.make(h, hostSequenceDtor));
+    b.set("_allocator", alloc.get());
+    return b.get();
 }
 
 // ---------------------------------------------------------------------------
@@ -955,8 +1012,7 @@ void installAudioSynthGlobals() {
 void installAudioSequencerGlobals() {
     g_sequenceClass.install("Sequence", 1,
         [](Value, std::span<const Value> a) {
-            HostVoiceAllocator* va = !a.empty() ? hostVoiceAllocatorOf(a[0]) : nullptr;
-            return makeSequenceValue(va);
+            return a.empty() ? ev::null() : makeSequenceValue(a[0]);
         },
         decorateSequenceProto);
 }

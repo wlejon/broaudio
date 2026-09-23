@@ -319,10 +319,11 @@ void decorateAudioNodeProto(ObjectBuilder& b) {
 Value makeGainNodeValue() {
     auto* gain = new HostGainNode();
     gain->base.nodeType = AudioNodeType::Gain;
-    Value gainParam = makeAudioParamValue(AudioParamTarget::Gain, -1, 1.0f, -3.4e38f, 3.4e38f, 1.0f);
-    gain->gainParam = hostAudioParamOf(gainParam);
+    // The param is rooted across the node's own allocation.
+    ev::Persistent gainParam(makeAudioParamValue(AudioParamTarget::Gain, -1, 1.0f, -3.4e38f, 3.4e38f, 1.0f));
+    gain->gainParam = hostAudioParamOf(gainParam.get());
     ObjectBuilder b(g_gainNodeClass.make(gain, hostGainDtor));
-    b.set("gain", gainParam);
+    b.set("gain", gainParam.get());
     return b.get();
 }
 
@@ -404,17 +405,13 @@ void decorateOscillatorNodeProto(ObjectBuilder& b) {
                 Value v = ev::getProperty(gainParam, "value");
                 if (ev::isNumber(v)) eng->setGain(osc->voiceId, static_cast<float>(ev::toDouble(v)));
             }
-            // The reads above may have moved the heap; re-derive the node.
-            osc = oscOf(self_);
-            if (!osc) return ev::undefined();
+            // `osc` is host memory and does not move; self_ is stale from
+            // here on and is not read again.
         }
 
         std::vector<HostAudioNode*> queue;
         std::vector<HostAudioNode*> visited;
-        for (auto& t : osc->base.connectedTargets) {
-            HostAudioNode* n = hostAudioNodeOf(t.get());
-            if (n) queue.push_back(n);
-        }
+        pushConnectedTargets(osc->base.connectedTargets, queue, when);
         while (!queue.empty()) {
             HostAudioNode* cur = queue.back();
             queue.pop_back();
@@ -467,10 +464,7 @@ void decorateOscillatorNodeProto(ObjectBuilder& b) {
                 eng->setBusReverbMix(Engine::MASTER_BUS_ID, 1.0f);
             }
 
-            for (auto& t : cur->connectedTargets) {
-                HostAudioNode* next = hostAudioNodeOf(t.get());
-                if (next) queue.push_back(next);
-            }
+            pushConnectedTargets(cur->connectedTargets, queue, when);
         }
 
         eng->startVoice(osc->voiceId, when);
@@ -561,31 +555,34 @@ void decorateBiquadFilterNodeProto(ObjectBuilder& b) {
         HostBiquadFilterNode* filter = filterOf(self_);
         if (!filter || a.size() < 3) return ev::undefined();
 
+        // The param reads allocate, so they come first (off a rooted self);
+        // the typed arrays' bytes are looked up only after the last of them.
+        double f0 = 350.0;
+        double Q = 1.0;
+        double gainDb = 0.0;
+        double detuneCents = 0.0;
+        {
+            ev::Persistent self(self_);
+            if (auto* p = hostAudioParamOf(ev::getProperty(self.get(), "frequency"))) f0 = p->value;
+            if (auto* p = hostAudioParamOf(ev::getProperty(self.get(), "Q"))) Q = p->value;
+            if (auto* p = hostAudioParamOf(ev::getProperty(self.get(), "gain"))) gainDb = p->value;
+            if (auto* p = hostAudioParamOf(ev::getProperty(self.get(), "detune"))) detuneCents = p->value;
+        }
+        // computedFrequency = frequency * 2^(detune / 1200) (Web Audio).
+        if (detuneCents != 0.0) f0 *= std::pow(2.0, detuneCents / 1200.0);
+
         std::vector<float> freqStorage;
         const float* freqs = nullptr;
         size_t count = 0;
         if (!floatData(a[0], freqStorage, &freqs, &count) || count == 0) return ev::undefined();
 
-        Value magArr = a[1];
-        Value phaseArr = a[2];
-        if (!ev::isTypedArray(magArr) || !ev::isTypedArray(phaseArr)) return ev::undefined();
-        ev::TypedArrayInfo magInfo = ev::typedArrayInfo(magArr);
-        ev::TypedArrayInfo phaseInfo = ev::typedArrayInfo(phaseArr);
+        if (!ev::isTypedArray(a[1]) || !ev::isTypedArray(a[2])) return ev::undefined();
+        ev::TypedArrayInfo magInfo = ev::typedArrayInfo(a[1]);
+        ev::TypedArrayInfo phaseInfo = ev::typedArrayInfo(a[2]);
         if (!magInfo || !phaseInfo || !magInfo.data || !phaseInfo.data) return ev::undefined();
 
         auto* eng = getAudioEngine();
         int sr = eng ? eng->sampleRate() : 44100;
-
-        Value freqVal = ev::getProperty(self_, "frequency");
-        Value qVal = ev::getProperty(self_, "Q");
-        Value gainVal = ev::getProperty(self_, "gain");
-
-        double f0 = 350.0;
-        double Q = 1.0;
-        double gainDb = 0.0;
-        if (auto* p = hostAudioParamOf(freqVal)) f0 = p->value;
-        if (auto* p = hostAudioParamOf(qVal)) Q = p->value;
-        if (auto* p = hostAudioParamOf(gainVal)) gainDb = p->value;
 
         // Compute RBJ filter coefficients
         double w0 = 2.0 * M_PI * f0 / sr;

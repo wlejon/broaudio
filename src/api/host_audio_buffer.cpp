@@ -65,30 +65,48 @@ void decorateAudioBufferProto(ObjectBuilder& b) {
         if (ch < 0 || ch >= buf->numberOfChannels) {
             return ev::throwRangeError("AudioBuffer.getChannelData: channel index out of range");
         }
+        // thisValue is a plain copy: root it before the first allocation.
+        ev::Persistent self(thisValue);
         std::string key = "_ch" + std::to_string(ch);
-        Value arr = ev::getProperty(thisValue, key);
+        Value arr = ev::getProperty(self.get(), key);
         if (ev::isTypedArray(arr)) return arr;
 
-        Value newArr = ev::createTypedArray(ev::elements::Float32, buf->length);
+        ev::Persistent newArr(ev::createTypedArray(ev::elements::Float32, buf->length));
         if (ch < static_cast<int>(buf->channels.size()) && !buf->channels[ch].empty()) {
             std::span<const uint8_t> bytes(reinterpret_cast<const uint8_t*>(buf->channels[ch].data()),
                                            buf->channels[ch].size() * sizeof(float));
-            ev::fillTypedArray(newArr, bytes);
+            ev::fillTypedArray(newArr.get(), bytes);
         }
-        ev::setProperty(thisValue, key, newArr);
-        return newArr;
+        ev::setProperty(self.get(), key, newArr.get());
+        return newArr.get();
     });
 
     b.def("copyFromChannel", 3, [](Value thisValue, std::span<const Value> a) -> Value {
         HostAudioBuffer* buf = hostAudioBufferOf(thisValue);
         if (!buf || a.size() < 2) return ev::undefined();
-        Value dest = a[0];
         int ch = i32At(a, 1);
         int startInChannel = a.size() >= 3 ? i32At(a, 2) : 0;
-        if (ch < 0 || ch >= buf->numberOfChannels || startInChannel >= buf->length) return ev::undefined();
+        if (ch < 0 || ch >= buf->numberOfChannels || startInChannel < 0 ||
+            startInChannel >= buf->length) {
+            return ev::undefined();
+        }
 
-        if (ev::isTypedArray(dest)) {
-            ev::TypedArrayInfo info = ev::typedArrayInfo(dest);
+        // A getChannelData() view is the channel's live storage (the script
+        // may have written into it); fold it into the host copy first. The
+        // read may allocate, so the destination's bytes are looked up after.
+        {
+            ev::Persistent self(thisValue);
+            Value cached = ev::getProperty(self.get(), "_ch" + std::to_string(ch));
+            ev::TypedArrayInfo cachedInfo = ev::typedArrayInfo(cached);
+            if (cachedInfo && ch < static_cast<int>(buf->channels.size())) {
+                auto& chan = buf->channels[ch];
+                size_t n = std::min(chan.size(), static_cast<size_t>(cachedInfo.elementCount));
+                if (n > 0) std::memcpy(chan.data(), cachedInfo.data, n * sizeof(float));
+            }
+        }
+
+        if (ev::isTypedArray(a[0])) {
+            ev::TypedArrayInfo info = ev::typedArrayInfo(a[0]);
             if (info && info.data) {
                 float* dst = reinterpret_cast<float*>(info.data);
                 size_t toCopy = std::min(static_cast<size_t>(info.elementCount),
@@ -104,13 +122,15 @@ void decorateAudioBufferProto(ObjectBuilder& b) {
     b.def("copyToChannel", 3, [](Value thisValue, std::span<const Value> a) -> Value {
         HostAudioBuffer* buf = hostAudioBufferOf(thisValue);
         if (!buf || a.size() < 2) return ev::undefined();
-        Value src = a[0];
         int ch = i32At(a, 1);
         int startInChannel = a.size() >= 3 ? i32At(a, 2) : 0;
-        if (ch < 0 || ch >= buf->numberOfChannels || startInChannel >= buf->length) return ev::undefined();
+        if (ch < 0 || ch >= buf->numberOfChannels || startInChannel < 0 ||
+            startInChannel >= buf->length) {
+            return ev::undefined();
+        }
 
-        if (ev::isTypedArray(src)) {
-            ev::TypedArrayInfo info = ev::typedArrayInfo(src);
+        if (ev::isTypedArray(a[0])) {
+            ev::TypedArrayInfo info = ev::typedArrayInfo(a[0]);
             if (info && info.data) {
                 const float* srcPtr = reinterpret_cast<const float*>(info.data);
                 size_t toCopy = std::min(static_cast<size_t>(info.elementCount),
@@ -120,8 +140,12 @@ void decorateAudioBufferProto(ObjectBuilder& b) {
                 }
                 std::memcpy(buf->channels[ch].data() + startInChannel, srcPtr, toCopy * sizeof(float));
 
+                // The read below may allocate: srcPtr is dead after it, so
+                // the cache is refreshed from the host copy just written, and
+                // thisValue is rooted for the write-back.
+                ev::Persistent self(thisValue);
                 std::string key = "_ch" + std::to_string(ch);
-                Value cached = ev::getProperty(thisValue, key);
+                Value cached = ev::getProperty(self.get(), key);
                 if (ev::isTypedArray(cached)) {
                     ev::TypedArrayInfo cachedInfo = ev::typedArrayInfo(cached);
                     if (cachedInfo && cachedInfo.data) {
@@ -131,10 +155,12 @@ void decorateAudioBufferProto(ObjectBuilder& b) {
                                                  : 0;
                         size_t toWrite = std::min(toCopy, cachedLimit);
                         if (toWrite > 0) {
-                            std::memcpy(dstPtr + startInChannel, srcPtr, toWrite * sizeof(float));
+                            std::memcpy(dstPtr + startInChannel,
+                                        buf->channels[ch].data() + startInChannel,
+                                        toWrite * sizeof(float));
                         }
                     } else {
-                        ev::setProperty(thisValue, key, ev::undefined());
+                        ev::setProperty(self.get(), key, ev::undefined());
                     }
                 }
             }
@@ -166,9 +192,9 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
                [](Value self_, std::span<const Value> a) {
                    HostAudioBufferSourceNode* src = bufSrcOf(self_);
                    if (!src) return ev::undefined();
-                   Value bufVal = !a.empty() ? a[0] : ev::null();
-                   ev::setProperty(self_, "_buffer", bufVal);
-                   src->buffer = hostAudioBufferOf(bufVal);
+                   // Unwrap before the write: setProperty moves the heap.
+                   src->buffer = a.empty() ? nullptr : hostAudioBufferOf(a[0]);
+                   ev::setProperty(self_, "_buffer", a.empty() ? ev::null() : a[0]);
                    return ev::undefined();
                });
 
@@ -223,8 +249,11 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
         if (src->started) return ev::throwError("AudioBufferSourceNode cannot be started more than once");
         src->started = true;
 
-        Value bufVal = ev::getProperty(thisValue, "_buffer");
-        HostAudioBuffer* hostBuf = hostAudioBufferOf(bufVal);
+        // Every getProperty below may allocate: the node and its buffer are
+        // read back through Persistents, never through a held Value.
+        ev::Persistent self(thisValue);
+        ev::Persistent bufVal(ev::getProperty(self.get(), "_buffer"));
+        HostAudioBuffer* hostBuf = hostAudioBufferOf(bufVal.get());
         if (hostBuf && hostBuf->length > 0 && hostBuf->numberOfChannels > 0) {
             int channels = hostBuf->numberOfChannels;
             int frames = hostBuf->length;
@@ -232,7 +261,7 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
             for (int c = 0; c < channels; ++c) {
                 chData[c].resize(frames, 0.0f);
                 std::string key = "_ch" + std::to_string(c);
-                Value arr = ev::getProperty(bufVal, key);
+                Value arr = ev::getProperty(bufVal.get(), key);
                 if (ev::isTypedArray(arr)) {
                     ev::TypedArrayInfo info = ev::typedArrayInfo(arr);
                     if (info && info.data) {
@@ -262,10 +291,7 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
             int sr = e->sampleRate();
             std::vector<HostAudioNode*> queue;
             std::vector<HostAudioNode*> visited;
-            for (auto& t : src->base.connectedTargets) {
-                HostAudioNode* n = hostAudioNodeOf(t.get());
-                if (n) queue.push_back(n);
-            }
+            pushConnectedTargets(src->base.connectedTargets, queue, curTime);
 
             while (!queue.empty()) {
                 HostAudioNode* cur = queue.back();
@@ -387,10 +413,7 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
                     processDynamicsCompressor(comp, interleaved.data(), frames, channels, sr, curTime);
                 }
 
-                for (auto& t : cur->connectedTargets) {
-                    HostAudioNode* next = hostAudioNodeOf(t.get());
-                    if (next) queue.push_back(next);
-                }
+                pushConnectedTargets(cur->connectedTargets, queue, curTime);
             }
 
             src->clipId = e->createClip(interleaved.data(), frames * channels, channels);
@@ -418,12 +441,21 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
                     e->setPlaybackSpatialDistanceModel(src->playbackId, parseDistanceModel(pannerNode->distanceModel));
                 }
 
-                Value rateVal = ev::getProperty(thisValue, "playbackRate");
-                if (auto* rateParam = hostAudioParamOf(rateVal)) {
-                    float r = rateParam->evaluate(curTime);
-                    if (r != 1.0f) {
-                        e->setPlaybackRate(src->playbackId, r);
-                    }
+                // Computed playback rate = playbackRate * 2^(detune / 1200),
+                // as Web Audio defines it.
+                float r = 1.0f;
+                if (auto* rateParam = hostAudioParamOf(ev::getProperty(self.get(), "playbackRate"))) {
+                    r = rateParam->evaluate(curTime);
+                    // Bind the param to the playing instance so a later
+                    // `src.playbackRate.value = x` reaches the engine.
+                    rateParam->targetId = src->playbackId;
+                }
+                if (auto* detuneParam = hostAudioParamOf(ev::getProperty(self.get(), "detune"))) {
+                    float cents = detuneParam->evaluate(curTime);
+                    if (cents != 0.0f) r *= std::pow(2.0f, cents / 1200.0f);
+                }
+                if (r != 1.0f) {
+                    e->setPlaybackRate(src->playbackId, r);
                 }
 
                 double offset = numAt(a, 1);
@@ -442,6 +474,9 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
         if (e && src->playbackId >= 0) {
             e->stopPlayback(src->playbackId);
             src->playbackId = -1;
+            if (auto* rateParam = hostAudioParamOf(ev::getProperty(self_, "playbackRate"))) {
+                rateParam->targetId = -1;
+            }
         }
         src->stopped = true;
         return ev::undefined();

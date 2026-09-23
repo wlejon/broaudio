@@ -428,6 +428,37 @@ static void test_mic_and_media() {
         expect(chunks.length === 4, "chunks delivered: " + chunks.length);
         expect(chunks[0].samples instanceof Float32Array && chunks[0].samples.length === 160, "chunk samples");
         expect(chunks[1].peak > 0.3, "chunk peak " + chunks[1].peak);
+        near(chunks[2].samples[7], input[2 * 160 + 7], 1e-6, "chunk samples are the fed PCM");
+
+        // A backlog past the ring: the oldest chunks are dropped and counted,
+        // the rest arrive in order with their own samples.
+        const seen = [];
+        bro.mic.start({ chunkFrames: 1, targetRate: 0, live: false, samples: true,
+                        onChunk: (c) => { seen.push(c.index, c.samples[0]); } });
+        const backlog = new Float32Array(4096 + 10);
+        for (let i = 0; i < backlog.length; i++) backlog[i] = i / 8192;
+        bro.mic.feed(backlog);
+        bro.mic.drain();
+        const st = bro.mic.stats();
+        expect(st.dropped === 10 && st.chunkCount === 4106, "backlog stats " + JSON.stringify(st));
+        expect(seen.length === 2 * 4096 && seen[0] === 10, "backlog delivered from chunk 10: " + seen[0]);
+        near(seen[1], 10 / 8192, 1e-7, "chunk 10's own samples");
+        near(seen[seen.length - 1], 4105 / 8192, 1e-7, "last chunk's own samples");
+
+        // Stop from inside a chunk callback, then restart with another size.
+        let calls = 0;
+        bro.mic.start({ chunkFrames: 8, targetRate: 0, live: false, samples: true,
+                        onChunk: () => { calls++; bro.mic.stop(); } });
+        bro.mic.feed(new Float32Array(8 * 3));
+        bro.mic.drain();
+        expect(calls === 1 && !bro.mic.isActive(), "stop inside onChunk ends the batch");
+        const sizes = [];
+        bro.mic.start({ chunkFrames: 32, targetRate: 0, live: false, samples: true,
+                        onChunk: (c) => { sizes.push(c.samples.length); } });
+        bro.mic.feed(new Float32Array(32 * 2));
+        bro.mic.drain();
+        bro.mic.stop();
+        expect(sizes.length === 2 && sizes[0] === 32, "restart with a new chunk size: " + sizes);
 
         expect(typeof __nativeGetUserMedia === "function", "__nativeGetUserMedia installed");
         const ms = ctx.createMediaStreamSource(new MediaStream());

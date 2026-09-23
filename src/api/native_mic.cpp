@@ -5,10 +5,11 @@
 #include <broaudio/engine.h>
 #include <broaudio/mic_tap.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
-#include <cstring>
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -17,19 +18,116 @@ namespace broaudio::api {
 namespace {
 
 constexpr int kMicRing = 4096;
+// Sample-ring budget in floats (64 MB). A large chunkFrames gets fewer sample
+// slots rather than a kMicRing * chunkFrames allocation (16 GB at the cap).
+constexpr size_t kSampleRingBudget = size_t{1} << 24;
+
+// One bro.mic.start()'s ring, shared by the main thread and the tap callback.
+// The callback owns a reference, so a callback still running on the audio
+// thread after removeMicTap (the tap list is reclaimed by QSBR, not
+// synchronously) writes into the session it started with — never into a
+// freed ring or one resized by a restart.
+//
+// Each chunk slot is a seqlock whose sequence encodes the chunk index: the
+// writer publishes 2*idx+1 while writing chunk idx and 2*idx+2 when done. A
+// reader of chunk i expects exactly 2*i+2 before and after its copy; any other
+// value means the writer lapped the slot (it only moves forward), so chunk i
+// is gone and a retry would only yield a newer chunk under i's index — the
+// chunk counts as dropped instead. PCM is copied element-wise through
+// relaxed atomic_ref accesses, so the overlap a lap can cause is not a data
+// race. The audio thread never waits.
+struct MicSession {
+    MicSession(int chunkFrames_, bool wantSamples_)
+        : chunkFrames(chunkFrames_), wantSamples(wantSamples_ && chunkFrames_ > 0)
+    {
+        if (wantSamples) {
+            const size_t cf = static_cast<size_t>(chunkFrames);
+            sampleSlots = static_cast<int>(std::min<size_t>(
+                kMicRing, std::max<size_t>(8, kSampleRingBudget / cf)));
+            sampleRing.assign(static_cast<size_t>(sampleSlots) * cf, 0.0f);
+            sampleSeq = std::make_unique<std::atomic<uint64_t>[]>(static_cast<size_t>(sampleSlots));
+        }
+    }
+
+    const int chunkFrames;
+    const bool wantSamples;
+    // The sample ring can have fewer slots than the level ring, so it has
+    // its own sequence per slot, on the same protocol.
+    int sampleSlots = 0;
+
+    std::atomic<uint64_t> slotSeq[kMicRing]{};
+    std::atomic<int> peakRingX10000[kMicRing]{};
+    std::atomic<int> rmsRingX10000[kMicRing]{};
+    std::unique_ptr<std::atomic<uint64_t>[]> sampleSeq;  // value-initialized: 0
+    std::vector<float> sampleRing;
+    std::atomic<uint64_t> writeCount{0};
+
+    // Main thread only.
+    uint64_t lastFired = 0;
+    uint64_t dropped = 0;
+
+    // Audio thread (the tap callback) only: the single writer.
+    void write(const float* s, int n) {
+        float peak = 0.0f, sumSq = 0.0f;
+        for (int i = 0; i < n; ++i) {
+            float absVal = std::fabs(s[i]);
+            if (absVal > peak) peak = absVal;
+            sumSq += s[i] * s[i];
+        }
+        float rms = std::sqrt(sumSq / static_cast<float>(n));
+
+        const uint64_t idx = writeCount.load(std::memory_order_relaxed);
+        const int slot = static_cast<int>(idx % kMicRing);
+        const size_t sslot = wantSamples ? static_cast<size_t>(idx % static_cast<uint64_t>(sampleSlots)) : 0;
+        slotSeq[slot].store(2 * idx + 1, std::memory_order_relaxed);
+        if (wantSamples) sampleSeq[sslot].store(2 * idx + 1, std::memory_order_relaxed);
+        // Orders the odd stores before every payload store below.
+        std::atomic_thread_fence(std::memory_order_release);
+        peakRingX10000[slot].store(static_cast<int>(peak * 10000.0f), std::memory_order_relaxed);
+        rmsRingX10000[slot].store(static_cast<int>(rms * 10000.0f), std::memory_order_relaxed);
+        if (wantSamples) {
+            const int cf = chunkFrames;
+            const int m = n < cf ? n : cf;
+            float* dst = sampleRing.data() + sslot * static_cast<size_t>(cf);
+            for (int k = 0; k < m; ++k)
+                std::atomic_ref<float>(dst[k]).store(s[k], std::memory_order_relaxed);
+            for (int k = m; k < cf; ++k)
+                std::atomic_ref<float>(dst[k]).store(0.0f, std::memory_order_relaxed);
+            sampleSeq[sslot].store(2 * idx + 2, std::memory_order_release);
+        }
+        slotSeq[slot].store(2 * idx + 2, std::memory_order_release);
+        writeCount.store(idx + 1, std::memory_order_release);
+    }
+
+    // Main thread: read chunk i (i < an acquire-loaded writeCount). False when
+    // the writer has lapped it. `samples` is filled only when wantSamples.
+    bool read(uint64_t i, int& peak, int& rms, std::vector<float>& samples) const {
+        const int slot = static_cast<int>(i % kMicRing);
+        const size_t sslot = wantSamples ? static_cast<size_t>(i % static_cast<uint64_t>(sampleSlots)) : 0;
+        const uint64_t want = 2 * i + 2;
+        if (slotSeq[slot].load(std::memory_order_acquire) != want) return false;
+        if (wantSamples && sampleSeq[sslot].load(std::memory_order_acquire) != want) return false;
+        peak = peakRingX10000[slot].load(std::memory_order_relaxed);
+        rms = rmsRingX10000[slot].load(std::memory_order_relaxed);
+        if (wantSamples) {
+            const size_t cf = static_cast<size_t>(chunkFrames);
+            samples.resize(cf);
+            const float* src = sampleRing.data() + sslot * cf;
+            for (size_t k = 0; k < cf; ++k)
+                samples[k] = std::atomic_ref<float>(const_cast<float&>(src[k]))
+                                 .load(std::memory_order_relaxed);
+        }
+        // Orders the payload loads before the re-checks: a payload load that
+        // saw a lapping write makes that write's odd sequence visible below.
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (slotSeq[slot].load(std::memory_order_relaxed) != want) return false;
+        if (wantSamples && sampleSeq[sslot].load(std::memory_order_relaxed) != want) return false;
+        return true;
+    }
+};
 
 struct MicState {
-    std::atomic<int> peakRingX10000[kMicRing];
-    std::atomic<int> rmsRingX10000[kMicRing];
-    std::atomic<uint32_t> sampleSeq[kMicRing]{};
-    std::atomic<uint64_t> writeCount{0};
-    std::atomic<uint64_t> dropped{0};
-
-    bool wantSamples = false;
-    std::vector<float> sampleRing;
-
-    uint64_t lastFired = 0;
-    int chunkFrames = 0;
+    std::shared_ptr<MicSession> session;  // null while stopped
     broaudio::MicTapId tapId = broaudio::kInvalidMicTapId;
     bool active = false;
 
@@ -46,16 +144,9 @@ void shutdownActiveMic() {
     }
     g_mic.tapId = broaudio::kInvalidMicTapId;
     g_mic.onChunk.set(ev::undefined());
-    g_mic.writeCount.store(0, std::memory_order_relaxed);
-    g_mic.dropped.store(0, std::memory_order_relaxed);
-    g_mic.lastFired = 0;
-    g_mic.chunkFrames = 0;
-    g_mic.wantSamples = false;
-    for (int k = 0; k < kMicRing; ++k) {
-        g_mic.sampleSeq[k].store(0, std::memory_order_relaxed);
-    }
-    g_mic.sampleRing.clear();
-    g_mic.sampleRing.shrink_to_fit();
+    // The callback's own reference keeps the ring alive for a callback that
+    // is still in flight; this only drops the main thread's.
+    g_mic.session.reset();
     g_mic.active = false;
 }
 
@@ -66,55 +157,46 @@ void drainMicChunks() {
     // loads here too (api.h tickAsyncJobs), so createClipFromFileAsync
     // resolves without the host pumping a second thing.
     tickAsyncJobs();
-    if (!g_mic.active) return;
-    uint64_t w = g_mic.writeCount.load(std::memory_order_acquire);
-    if (w == g_mic.lastFired) return;
-    if (ev::isUndefined(g_mic.onChunk.get()) || !ev::isFunction(g_mic.onChunk.get())) {
-        g_mic.lastFired = w;
+    if (!g_mic.active || !g_mic.session) return;
+    // Held for the whole batch: a chunk callback may stop or restart the mic.
+    std::shared_ptr<MicSession> sess = g_mic.session;
+    uint64_t w = sess->writeCount.load(std::memory_order_acquire);
+    if (w == sess->lastFired) return;
+    if (!ev::isFunction(g_mic.onChunk.get())) {
+        sess->lastFired = w;
         return;
     }
 
-    uint64_t start = g_mic.lastFired;
+    uint64_t start = sess->lastFired;
     if (w - start > static_cast<uint64_t>(kMicRing)) {
-        g_mic.dropped.fetch_add(w - start - kMicRing, std::memory_order_relaxed);
+        sess->dropped += w - start - kMicRing;
         start = w - kMicRing;
     }
+    std::vector<float> chunkBuf;
     for (uint64_t i = start; i < w; ++i) {
         // A chunk callback may have called bro.mic.stop() (or restarted
         // with a new handler): stop delivering the old batch then.
-        if (!g_mic.active || !ev::isFunction(g_mic.onChunk.get())) return;
-        int slot = static_cast<int>(i % kMicRing);
-        int pk = g_mic.peakRingX10000[slot].load(std::memory_order_relaxed);
-        int rms = g_mic.rmsRingX10000[slot].load(std::memory_order_relaxed);
+        if (!g_mic.active || g_mic.session != sess || !ev::isFunction(g_mic.onChunk.get()))
+            return;
+        sess->lastFired = i + 1;
+        int pk = 0, rms = 0;
+        if (!sess->read(i, pk, rms, chunkBuf)) {
+            // Overwritten while earlier chunks of this batch ran their
+            // callbacks: the writer lapped it.
+            sess->dropped++;
+            continue;
+        }
 
         ObjectBuilder o;
         o.set("index", ev::fromDouble(static_cast<double>(i)));
         o.set("peak", ev::fromDouble(pk / 10000.0));
         o.set("rms", ev::fromDouble(rms / 10000.0));
-        if (g_mic.wantSamples && g_mic.chunkFrames > 0 && !g_mic.sampleRing.empty()) {
-            size_t cf = static_cast<size_t>(g_mic.chunkFrames);
-            std::vector<float> chunkBuf(cf, 0.0f);
-            bool readOk = false;
-            for (int attempt = 0; attempt < 5; ++attempt) {
-                uint32_t s0 = g_mic.sampleSeq[slot].load(std::memory_order_acquire);
-                if (s0 & 1) continue;
-                const float* src = g_mic.sampleRing.data() + static_cast<size_t>(slot) * cf;
-                std::memcpy(chunkBuf.data(), src, cf * sizeof(float));
-                std::atomic_thread_fence(std::memory_order_acquire);
-                uint32_t s1 = g_mic.sampleSeq[slot].load(std::memory_order_acquire);
-                if (s0 == s1) {
-                    readOk = true;
-                    break;
-                }
-            }
-            if (readOk) {
-                o.set("samples", makeFloat32Array(chunkBuf.data(), cf));
-            }
+        if (sess->wantSamples) {
+            o.set("samples", makeFloat32Array(chunkBuf.data(), chunkBuf.size()));
         }
         Value chunkVal = o.get();
         ev::call(g_mic.onChunk.get(), ev::undefined(), std::span<const Value>(&chunkVal, 1));
     }
-    g_mic.lastFired = w;
 }
 
 void installMic() {
@@ -197,48 +279,20 @@ void installMic() {
         cfg.targetRate = targetRate;
         cfg.agc = agc;
 
-        g_mic.chunkFrames = chunkFrames;
-        g_mic.wantSamples = samples;
         if (ev::isFunction(onChunkCb.get())) {
             g_mic.onChunk.set(onChunkCb.get());
         }
-        if (samples) {
-            g_mic.sampleRing.assign(static_cast<size_t>(kMicRing) * static_cast<size_t>(chunkFrames), 0.0f);
-        }
-        g_mic.writeCount.store(0, std::memory_order_relaxed);
-        g_mic.dropped.store(0, std::memory_order_relaxed);
-        g_mic.lastFired = 0;
+        auto sess = std::make_shared<MicSession>(chunkFrames, samples);
+        g_mic.session = sess;
 
-        g_mic.tapId = e->addMicTap(cfg, [](const float* s, int n) {
-            if (n <= 0) return;
-            float peak = 0.0f, sumSq = 0.0f;
-            for (int i = 0; i < n; ++i) {
-                float absVal = std::fabs(s[i]);
-                if (absVal > peak) peak = absVal;
-                sumSq += s[i] * s[i];
-            }
-            float rms = std::sqrt(sumSq / static_cast<float>(n));
-            uint64_t idx = g_mic.writeCount.load(std::memory_order_relaxed);
-            int slot = static_cast<int>(idx % kMicRing);
-            g_mic.peakRingX10000[slot].store(static_cast<int>(peak * 10000.0f), std::memory_order_relaxed);
-            g_mic.rmsRingX10000[slot].store(static_cast<int>(rms * 10000.0f), std::memory_order_relaxed);
-            if (g_mic.wantSamples && !g_mic.sampleRing.empty()) {
-                int cf = g_mic.chunkFrames;
-                int m = n < cf ? n : cf;
-                uint32_t seq = g_mic.sampleSeq[slot].load(std::memory_order_relaxed);
-                g_mic.sampleSeq[slot].store(seq + 1, std::memory_order_release);
-                float* dst = g_mic.sampleRing.data() + static_cast<size_t>(slot) * static_cast<size_t>(cf);
-                std::memcpy(dst, s, static_cast<size_t>(m) * sizeof(float));
-                if (m < cf) {
-                    std::memset(dst + m, 0, static_cast<size_t>(cf - m) * sizeof(float));
-                }
-                g_mic.sampleSeq[slot].store(seq + 2, std::memory_order_release);
-            }
-            g_mic.writeCount.store(idx + 1, std::memory_order_release);
+        g_mic.tapId = e->addMicTap(cfg, [sess](const float* s, int n) {
+            if (n > 0) sess->write(s, n);
         });
 
         if (g_mic.tapId == broaudio::kInvalidMicTapId) {
-            shutdownActiveMic();
+            // Not active yet, so shutdownActiveMic would skip this.
+            g_mic.session.reset();
+            g_mic.onChunk.set(ev::undefined());
             return ev::throwError("bro.mic.start: addMicTap failed");
         }
 
@@ -273,9 +327,10 @@ void installMic() {
         res.set("framesDelivered", static_cast<double>(s.framesDelivered));
         res.set("samplesDelivered", static_cast<double>(s.samplesDelivered));
         res.set("rollingPeak", static_cast<double>(s.rollingPeak));
-        res.set("chunkCount", static_cast<double>(g_mic.writeCount.load(std::memory_order_acquire)));
-        res.set("dropped", static_cast<double>(g_mic.dropped.load(std::memory_order_relaxed)));
-        res.set("chunkFrames", static_cast<double>(g_mic.chunkFrames));
+        const MicSession* sess = g_mic.session.get();
+        res.set("chunkCount", static_cast<double>(sess ? sess->writeCount.load(std::memory_order_acquire) : 0));
+        res.set("dropped", static_cast<double>(sess ? sess->dropped : 0));
+        res.set("chunkFrames", static_cast<double>(sess ? sess->chunkFrames : 0));
         return res.get();
     });
 
@@ -285,13 +340,17 @@ void installMic() {
             int maxC = i32At(a, 0);
             if (maxC >= 0 && maxC < limit) limit = maxC;
         }
-        uint64_t w = g_mic.writeCount.load(std::memory_order_acquire);
+        // Held across the array build (which allocates and so may run code
+        // that stops the mic).
+        std::shared_ptr<MicSession> sess = g_mic.session;
+        uint64_t w = sess ? sess->writeCount.load(std::memory_order_acquire) : 0;
         int avail = static_cast<int>(w < static_cast<uint64_t>(kMicRing) ? w : static_cast<uint64_t>(kMicRing));
         int count = avail < limit ? avail : limit;
 
-        return hostArrayOf(static_cast<size_t>(count), [w, count](size_t k) {
+        return hostArrayOf(static_cast<size_t>(count), [&sess, w, count](size_t k) {
             uint64_t idx = w - static_cast<uint64_t>(count) + static_cast<uint64_t>(k);
-            int pk = g_mic.peakRingX10000[idx % kMicRing].load(std::memory_order_relaxed);
+            // Level meter: a lapped slot just reads a newer level.
+            int pk = sess->peakRingX10000[idx % kMicRing].load(std::memory_order_relaxed);
             return ev::fromDouble(pk / 10000.0);
         });
     });

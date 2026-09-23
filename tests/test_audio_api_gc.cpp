@@ -77,6 +77,10 @@ static void test_buffers() {
         const ch0 = buf.getChannelData(0);
         expect(ch0 instanceof Float32Array && ch0.length === 32, "getChannelData shape");
         expect(buf.getChannelData(0) === ch0, "getChannelData returns the cached view");
+        // The cache is the binding's, not a property a script can see or break.
+        expect(Object.keys(buf).length === 0 && buf._ch0 === undefined, "no script-visible channel cache");
+        buf._ch0 = new Float32Array(32);
+        expect(buf.getChannelData(0) === ch0, "a script property does not replace the cached view");
 
         // Writes into the view are what copyFromChannel reads back.
         ch0[3] = 0.5;

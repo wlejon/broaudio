@@ -7,8 +7,6 @@ void registerAudioContextClips(ObjectBuilder& b) {
         auto* e = getAudioEngine();
         if (!e || a.empty()) return ev::fromDouble(-1);
 
-        // a[0] is read from the rooted span each time: the per-channel
-        // getProperty below may move it.
         if (auto* hostBuf = hostAudioBufferOf(a[0])) {
             int channels = hostBuf->numberOfChannels;
             int frames = hostBuf->length;
@@ -17,8 +15,7 @@ void registerAudioContextClips(ObjectBuilder& b) {
             std::vector<std::vector<float>> chData(channels);
             for (int c = 0; c < channels; ++c) {
                 chData[c].resize(frames, 0.0f);
-                std::string key = "_ch" + std::to_string(c);
-                Value arr = ev::getProperty(a[0], key);
+                Value arr = audioBufferChannelView(a[0], c);
                 if (isFloat32Array(arr)) {
                     ev::TypedArrayInfo info = ev::typedArrayInfo(arr);
                     if (info && info.data) {

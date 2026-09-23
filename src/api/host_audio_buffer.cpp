@@ -67,6 +67,12 @@ HostAudioBuffer* hostAudioBufferOf(Value v) {
     return h ? h->buffer.get() : nullptr;
 }
 
+Value audioBufferChannelView(Value v, int ch) {
+    HostAudioBufferHandle* h = bufferHandleOf(v);
+    if (!h || ch < 0 || ch >= static_cast<int>(h->channelViews.size())) return ev::undefined();
+    return h->channelViews[ch].get();
+}
+
 BufferRef hostAudioBufferRef(Value v) {
     HostAudioBufferHandle* h = bufferHandleOf(v);
     return h ? h->buffer : nullptr;
@@ -104,21 +110,23 @@ void decorateAudioBufferProto(ObjectBuilder& b) {
         if (ch < 0 || ch >= buf->numberOfChannels) {
             return ev::throwRangeError("AudioBuffer.getChannelData: channel index out of range");
         }
-        // thisValue is a plain copy: root it before the first allocation.
-        ev::Persistent self(thisValue);
-        std::string key = "_ch" + std::to_string(ch);
-        Value arr = ev::getProperty(self.get(), key);
         // The cached view, unless its buffer was detached (transferred):
         // then a fresh view is made from the host copy.
+        Value arr = audioBufferChannelView(thisValue, ch);
         if (isFloat32Array(arr)) return arr;
 
+        // The payload is native, so the handle pointer survives the
+        // allocation below (thisValue itself does not).
+        HostAudioBufferHandle* h = bufferHandleOf(thisValue);
         ev::Persistent newArr(ev::createTypedArray(ev::elements::Float32, buf->length));
         if (ch < static_cast<int>(buf->channels.size()) && !buf->channels[ch].empty()) {
             std::span<const uint8_t> bytes(reinterpret_cast<const uint8_t*>(buf->channels[ch].data()),
                                            buf->channels[ch].size() * sizeof(float));
             ev::fillTypedArray(newArr.get(), bytes);
         }
-        ev::setProperty(self.get(), key, newArr.get());
+        if (h->channelViews.size() < static_cast<size_t>(buf->numberOfChannels))
+            h->channelViews.resize(static_cast<size_t>(buf->numberOfChannels));
+        h->channelViews[ch] = newArr;
         return newArr.get();
     });
 
@@ -137,11 +145,9 @@ void decorateAudioBufferProto(ObjectBuilder& b) {
         }
 
         // A getChannelData() view is the channel's live storage (the script
-        // may have written into it); fold it into the host copy first. The
-        // read may allocate, so the destination's bytes are looked up after.
+        // may have written into it); fold it into the host copy first.
         {
-            ev::Persistent self(thisValue);
-            Value cached = ev::getProperty(self.get(), "_ch" + std::to_string(ch));
+            Value cached = audioBufferChannelView(thisValue, ch);
             ev::TypedArrayInfo cachedInfo =
                 isFloat32Array(cached) ? ev::typedArrayInfo(cached) : ev::TypedArrayInfo{};
             if (cachedInfo && ch < static_cast<int>(buf->channels.size())) {
@@ -190,12 +196,9 @@ void decorateAudioBufferProto(ObjectBuilder& b) {
                 }
                 std::memcpy(buf->channels[ch].data() + startInChannel, srcPtr, toCopy * sizeof(float));
 
-                // The read below may allocate: srcPtr is dead after it, so
-                // the cache is refreshed from the host copy just written, and
-                // thisValue is rooted for the write-back.
-                ev::Persistent self(thisValue);
-                std::string key = "_ch" + std::to_string(ch);
-                Value cached = ev::getProperty(self.get(), key);
+                // A getChannelData() view is refreshed from the host copy
+                // just written (the source may be that view itself).
+                Value cached = audioBufferChannelView(thisValue, ch);
                 if (ev::isTypedArray(cached)) {
                     ev::TypedArrayInfo cachedInfo =
                         isFloat32Array(cached) ? ev::typedArrayInfo(cached) : ev::TypedArrayInfo{};
@@ -210,8 +213,9 @@ void decorateAudioBufferProto(ObjectBuilder& b) {
                                         buf->channels[ch].data() + startInChannel,
                                         toWrite * sizeof(float));
                         }
-                    } else {
-                        ev::setProperty(self.get(), key, ev::undefined());
+                    } else if (HostAudioBufferHandle* h = bufferHandleOf(thisValue)) {
+                        // Detached: getChannelData makes a fresh view.
+                        h->channelViews[ch] = ev::Persistent();
                     }
                 }
             }
@@ -249,7 +253,8 @@ Value makeAudioBufferValue(int channels, int length, int sampleRate) {
 
     auto* h = new HostAudioBufferHandle();
     h->buffer = std::move(buffer);
-    return g_audioBufferClass.make(h, hostAudioBufferDtor);
+    // Deferred: the payload owns Persistents (channelViews).
+    return g_audioBufferClass.make(h, hostAudioBufferDtor, ev::Finalize::Deferred);
 }
 
 void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
@@ -349,8 +354,7 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
             std::vector<std::vector<float>> chData(channels);
             for (int c = 0; c < channels; ++c) {
                 chData[c].resize(frames, 0.0f);
-                std::string key = "_ch" + std::to_string(c);
-                Value arr = ev::getProperty(bufVal.get(), key);
+                Value arr = audioBufferChannelView(bufVal.get(), c);
                 if (isFloat32Array(arr)) {
                     ev::TypedArrayInfo info = ev::typedArrayInfo(arr);
                     if (info && info.data) {

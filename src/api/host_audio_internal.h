@@ -303,9 +303,18 @@ struct HostAudioBuffer {
 
 using BufferRef = std::shared_ptr<HostAudioBuffer>;
 
+// The JS AudioBuffer's own half. `channelViews[ch]` is the Float32Array
+// getChannelData(ch) handed out (undefined until then): the channel's live
+// storage, which the script may write into. It is kept here rather than on
+// the JS object, where a script could see, replace or delete it. No cycle
+// runs through it (a view never references its AudioBuffer), so rooting it
+// from the payload leaks nothing; the handle is made with a Deferred
+// finalizer, because a Persistent may only be released on a plain host
+// stack, never inside the sweep.
 struct HostAudioBufferHandle {
     uint32_t tag = kHostAudioBufferTag;
     BufferRef buffer;
+    std::vector<ev::Persistent> channelViews;
 };
 
 struct HostAudioBufferSourceNode {
@@ -501,6 +510,10 @@ HostAudioParam* hostAudioParamOf(Value v);
 ParamRef hostAudioParamRef(Value v);
 HostAudioBuffer* hostAudioBufferOf(Value v);
 BufferRef hostAudioBufferRef(Value v);
+// The Float32Array getChannelData(ch) returned for AudioBuffer `v`, or
+// undefined when there is none (never asked for, or `v` is not an
+// AudioBuffer). Allocates nothing.
+Value audioBufferChannelView(Value v, int ch);
 HostPeriodicWave* hostPeriodicWaveOf(Value v);
 
 template <typename T>

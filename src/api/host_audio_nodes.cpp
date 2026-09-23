@@ -285,7 +285,13 @@ void decorateAudioNodeProto(ObjectBuilder& b) {
                 if (HostAnalyserNode* analyser = analyserOf(a[0])) analyser->source = 1;
                 break;
             default:
-                if (HostAnalyserNode* analyser = analyserOf(a[0])) analyser->hasConnectedInput = true;
+                // Nothing for an analyser here. Sources play to the master
+                // bus whether connected or not, so an analyser fed by a live
+                // source (an oscillator, or any path from one) reads the
+                // engine's output mix, where that source is. Only a buffer
+                // source's start() switches it to its input tap, which that
+                // start fills (host_audio_buffer.cpp); flagging the tap here
+                // made an oscillator-fed analyser read an empty tap.
                 break;
             }
 

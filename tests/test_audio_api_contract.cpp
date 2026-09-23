@@ -508,6 +508,53 @@ static void test_wrong_receiver() {
     )JS"));
 }
 
+// An AnalyserNode fed by a live source (an oscillator, directly or through a
+// GainNode) and not connected onward shows that source in its frequency and
+// time-domain data.
+static void test_analyser_sees_live_source() {
+    runScript("AnalyserNode fed by an oscillator shows it", withPrelude(R"JS(
+        function peakHz(an) {
+            const fd = new Float32Array(an.frequencyBinCount);
+            an.getFloatFrequencyData(fd);
+            let pi = 0, pv = -Infinity;
+            for (let i = 0; i < fd.length; i++) if (fd[i] > pv) { pv = fd[i]; pi = i; }
+            return { hz: pi * (sr / 2) / an.frequencyBinCount, db: pv };
+        }
+        const an = ctx.createAnalyser();
+        an.fftSize = 1024;
+        an.smoothingTimeConstant = 0;              // one read, no averaging with the -100 dB start
+        const osc = ctx.createOscillator();
+        osc.frequency.value = 2000;
+        osc.connect(an);                           // analyser not connected to destination
+        osc.start();
+        ctx.renderBlock(8192);
+        const p = peakHz(an);
+        expect(p.db > -60, "analyser sees the oscillator: peak " + p.db + " dB");
+        near(p.hz, 2000, 100, "analyser peak frequency");
+        const td = new Float32Array(an.fftSize);
+        an.getFloatTimeDomainData(td);
+        expect(peak(td, 0, td.length) > 1e-2, "time-domain data carries the tone");
+        osc.stop();
+        ctx.renderBlock(4096);
+
+        // Through a GainNode.
+        const an2 = ctx.createAnalyser();
+        an2.smoothingTimeConstant = 0;
+        const g = ctx.createGain();
+        const osc2 = ctx.createOscillator();
+        osc2.frequency.value = 1000;
+        osc2.connect(g).connect(an2);
+        osc2.start();
+        ctx.renderBlock(8192);
+        const p2 = peakHz(an2);
+        expect(p2.db > -60, "analyser behind a GainNode sees the oscillator: " + p2.db + " dB");
+        near(p2.hz, 1000, 100, "analyser-behind-gain peak frequency");
+        osc2.stop();
+        ctx.renderBlock(4096);
+        return "SUCCESS";
+    )JS"));
+}
+
 int main() {
     std::cout << "Running broaudio API contract tests..." << std::endl;
     const char* stress = std::getenv("BRONZE_GC_STRESS");
@@ -528,6 +575,7 @@ int main() {
         test_start_stop_same_tick();
         test_buffer_source_stop_and_ended();
         test_buffer_source_binds_master_effects();
+        test_analyser_sees_live_source();
         installForger();
         test_wrong_receiver();
         broaudio::api::shutdownAudio();

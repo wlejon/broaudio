@@ -8,6 +8,7 @@
 #include "broaudio/synth/modulation.h"
 #include "broaudio/synth/oscillator.h"
 #include <atomic>
+#include <limits>
 #include <memory>
 
 namespace broaudio {
@@ -40,10 +41,36 @@ struct Voice {
     std::atomic<float> filterQ{1.0f};
     std::atomic<uint32_t> filterVersion{0};
 
-    // Start/stop triggers (main thread writes, audio thread reads & clears)
+    // Start/stop triggers (main thread writes, audio thread reads & clears).
+    // Each trigger is stamped from triggerSeq so the audio thread can order
+    // a start and a release that land in the same block: a release older
+    // than the start it meets is dropped (noteOff then noteOn retriggers),
+    // one newer than it still releases (start then stop in one tick ends
+    // the note). Use markStart / markRelease rather than the flags directly.
     std::atomic<bool> triggerStart{false};
     std::atomic<bool> triggerRelease{false};
     std::atomic<double> startTime{-1.0};
+    std::atomic<uint32_t> triggerSeq{0};
+    std::atomic<uint32_t> startSeq{0};
+    std::atomic<uint32_t> releaseSeq{0};
+    // Engine time the release takes effect at (sample-accurately, inside the
+    // block that spans it); 0 = at once.
+    std::atomic<double> releaseTime{0.0};
+    uint32_t appliedStartSeq = 0; // audio thread only: the start last applied
+    // Audio thread only: engine time the pending release lands at, or
+    // +infinity for none.
+    double pendingReleaseAt = std::numeric_limits<double>::infinity();
+
+    void markStart(double when) {
+        startTime.store(when, std::memory_order_relaxed);
+        startSeq.store(triggerSeq.fetch_add(1, std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+        triggerStart.store(true, std::memory_order_release);
+    }
+    void markRelease(double when = 0.0) {
+        releaseTime.store(when, std::memory_order_relaxed);
+        releaseSeq.store(triggerSeq.fetch_add(1, std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+        triggerRelease.store(true, std::memory_order_release);
+    }
 
     // When true, the audio callback will not auto-purge this voice after
     // its envelope finishes.  Used by VoiceAllocator to keep pooled voices

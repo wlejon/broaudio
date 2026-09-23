@@ -1538,10 +1538,7 @@ void Engine::setVoicePersistent(int id, bool persistent)
 
 void Engine::startVoice(int id, double when)
 {
-    if (auto* v = findVoice(id)) {
-        v->startTime.store(when, std::memory_order_relaxed);
-        v->triggerStart.store(true, std::memory_order_release);
-    }
+    if (auto* v = findVoice(id)) v->markStart(when);
 }
 
 void Engine::stopVoice(int id, double when)
@@ -1549,7 +1546,7 @@ void Engine::stopVoice(int id, double when)
     if (when > currentTime()) {
         scheduleNoteOff(id, when);
     } else if (auto* v = findVoice(id)) {
-        v->triggerRelease.store(true, std::memory_order_release);
+        v->markRelease();
     }
 }
 
@@ -2271,8 +2268,20 @@ void Engine::mixClipPlayback(ClipPlayback* pb, AudioClip* clip, float* targetBuf
     // reaches startSample, then begin mid-block at the exact frame. 0 (or any
     // past sample) starts immediately. Once started, later blocks have
     // startSample <= blockStart, so startFrame is 0 and playPos continues.
-    int startFrame = 0;
+    // Sample-accurate scheduled stop (stopPlaybackAt): mixing ends at
+    // stopSample and the playback finishes there. A stop at or before the
+    // start finishes it, silent, in the block that holds the stop.
+    const uint64_t blockEndS = blockStart + static_cast<uint64_t>(numFrames);
+    const uint64_t stopS = pb->stopSample.load(std::memory_order_relaxed);
     uint64_t startS = pb->startSample.load(std::memory_order_relaxed);
+    if (stopS < blockEndS && stopS <= std::max(blockStart, startS)) {
+        pb->playing.store(false, std::memory_order_relaxed);
+        pb->active.store(false, std::memory_order_relaxed);
+        return;
+    }
+    const int endFrame = stopS < blockEndS ? static_cast<int>(stopS - blockStart) : numFrames;
+
+    int startFrame = 0;
     if (startS > blockStart) {
         uint64_t off = startS - blockStart;
         if (off >= static_cast<uint64_t>(numFrames)) return;  // starts in a later block
@@ -2281,7 +2290,7 @@ void Engine::mixClipPlayback(ClipPlayback* pb, AudioClip* clip, float* targetBuf
 
     uint64_t pos = pb->playPos.load(std::memory_order_relaxed);
     uint64_t consumed = pb->consumedFixed;
-    for (int i = startFrame; i < numFrames; i++) {
+    for (int i = startFrame; i < endFrame; i++) {
         if (looping && pos >= loopEndF) pos = loopStartF + (pos - loopStartF) % loopLenF;
         int intPos = static_cast<int>(pos >> FRAC_BITS);
         if ((!looping && intPos >= len) || consumed >= budget) {
@@ -2337,6 +2346,10 @@ void Engine::mixClipPlayback(ClipPlayback* pb, AudioClip* clip, float* targetBuf
     }
     pb->playPos.store(pos, std::memory_order_relaxed);
     pb->consumedFixed = consumed;
+    if (endFrame < numFrames) {
+        pb->playing.store(false, std::memory_order_relaxed);
+        pb->active.store(false, std::memory_order_relaxed);
+    }
 }
 
 // Ring-read mix for a streaming playback. Caller has already set the gain/pan
@@ -2646,6 +2659,18 @@ void Engine::stopPlayback(int instanceId)
         }
     }
     playbacks_.store(std::move(newList));
+}
+
+void Engine::stopPlaybackAt(int instanceId, double when)
+{
+    const double s = when * static_cast<double>(sampleRate_);
+    const uint64_t now = samplesGenerated_.load(std::memory_order_relaxed);
+    if (!(s > static_cast<double>(now))) {
+        stopPlayback(instanceId);
+        return;
+    }
+    if (auto* pb = findPlayback(instanceId))
+        pb->stopSample.store(static_cast<uint64_t>(s + 0.5), std::memory_order_relaxed);
 }
 
 void Engine::setPlaybackGain(int instanceId, float gain)
@@ -3321,10 +3346,9 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
             for (auto& v : *currentVoices) {
                 if (v->id == ev.voiceId) {
                     if (ev.type == ScheduledEvent::Type::NoteOn) {
-                        v->startTime.store(ev.when, std::memory_order_relaxed);
-                        v->triggerStart.store(true, std::memory_order_release);
+                        v->markStart(ev.when);
                     } else {
-                        v->triggerRelease.store(true, std::memory_order_release);
+                        v->markRelease(ev.when);
                     }
                     break;
                 }
@@ -3345,11 +3369,13 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
     for (auto& voicePtr : *currentVoices) {
         Voice& voice = *voicePtr;
 
-        if (voice.triggerStart.load(std::memory_order_acquire)) {
-            voice.triggerStart.store(false, std::memory_order_relaxed);
-            // Clear any pending release so a rapid noteOff+noteOn doesn't
-            // immediately put the newly started voice into Release.
-            voice.triggerRelease.store(false, std::memory_order_relaxed);
+        if (voice.triggerStart.exchange(false, std::memory_order_acquire)) {
+            // A pending release older than this start (a rapid noteOff +
+            // noteOn) must not put the new note straight into Release; one
+            // issued after it (start + stop in the same tick) still applies,
+            // below. The stamps order them (Voice::markStart / markRelease).
+            voice.appliedStartSeq = voice.startSeq.load(std::memory_order_relaxed);
+            voice.pendingReleaseAt = std::numeric_limits<double>::infinity();
             if (voice.active && voice.started) {
                 // Retrigger: voice is still sounding. Keep phase continuous
                 // to avoid waveform discontinuity (click). Start attack from
@@ -3373,11 +3399,16 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
             }
         }
 
-        if (voice.triggerRelease.load(std::memory_order_acquire)) {
-            voice.triggerRelease.store(false, std::memory_order_relaxed);
-            if (voice.envStage == EnvStage::Attack || voice.envStage == EnvStage::Decay
-                || voice.envStage == EnvStage::Sustain) {
-                voice.envStage = EnvStage::Release;
+        if (voice.triggerRelease.exchange(false, std::memory_order_acquire)) {
+            const uint32_t rel = voice.releaseSeq.load(std::memory_order_relaxed);
+            const bool predatesStart =
+                static_cast<int32_t>(rel - voice.appliedStartSeq) < 0;
+            // The release lands at its own time inside the block (below),
+            // so a noteOff scheduled later than a noteOn in the same block
+            // still lets the note sound until then.
+            if (!predatesStart) {
+                voice.pendingReleaseAt = std::min(voice.pendingReleaseAt,
+                                                  voice.releaseTime.load(std::memory_order_relaxed));
             }
         }
 
@@ -3497,6 +3528,14 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
         for (int i = 0; i < numFrames; i++) {
             double t = baseTime + i * sampleDt;
             if (t < startTime) continue;
+
+            if (t >= voice.pendingReleaseAt) {
+                voice.pendingReleaseAt = std::numeric_limits<double>::infinity();
+                if (voice.envStage == EnvStage::Attack || voice.envStage == EnvStage::Decay
+                    || voice.envStage == EnvStage::Sustain) {
+                    voice.envStage = EnvStage::Release;
+                }
+            }
 
             switch (voice.envStage) {
                 case EnvStage::Attack:

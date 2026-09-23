@@ -77,6 +77,12 @@ struct ClipPlayback {
     // clips joins gaplessly on the audio clock instead of via main-thread timers.
     std::atomic<uint64_t> startSample{0};
 
+    // Sample-accurate scheduled stop: absolute engine sample index at which
+    // mixing ends and the playback finishes (Engine::stopPlaybackAt, Web
+    // Audio's stop(when)). UINT64_MAX = none. A stop at or before the
+    // scheduled start finishes the playback without sounding it.
+    std::atomic<uint64_t> stopSample{UINT64_MAX};
+
     // Loop points, in frames relative to the region start (Web Audio
     // loopStart / loopEnd). Used only while `looping`: the cursor plays up to
     // loopEnd and wraps to loopStart. A pair that does not describe a

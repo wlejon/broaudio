@@ -434,6 +434,14 @@ public:
 
     void stopPlayback(int instanceId);
 
+    // Stop a clip playback at engine time `when` (seconds), sample-accurately
+    // on the audio clock like ClipPlayOptions::when: the playback mixes up to
+    // that sample and then reports Finished. A `when` at or before now stops
+    // at once (stopPlayback). Calling again moves the stop. A stop at or
+    // before the scheduled start finishes the playback without sounding it.
+    // Streams are not affected by a scheduled stop; close them instead.
+    void stopPlaybackAt(int instanceId, double when);
+
     // --- Streaming PCM source (live voice / network audio) ---
     //
     // A persistent, spatializable playback fed PCM frame-by-frame instead of

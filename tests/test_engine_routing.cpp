@@ -334,6 +334,79 @@ TEST(schedule_note_on_off_produces_audio) {
     PASS();
 }
 
+static float latestPeak(Engine& e, int from, int to, int n) {
+    std::vector<float> out(n, 0.0f);
+    e.outputBuffer().readLatest(out.data(), n);
+    float p = 0.0f;
+    for (int i = from; i < to; ++i) p = std::max(p, std::fabs(out[i]));
+    return p;
+}
+
+TEST(start_then_stop_before_render_is_silent) {
+    Engine e; e.initHeadless();
+    int v = e.createVoice();
+    e.setWaveform(v, Waveform::Sine);
+    e.setGain(v, 1.0f);
+    e.setReleaseTime(v, 0.01f);
+    e.startVoice(v, e.currentTime());
+    e.stopVoice(v, e.currentTime());       // newer than the start: it ends the note
+    e.renderBlock(4096);
+    e.renderBlock(4096);
+    ASSERT_TRUE(latestPeak(e, 0, 4096, 4096) < 1e-4f);
+    PASS();
+}
+
+TEST(stop_then_start_before_render_retriggers) {
+    Engine e; e.initHeadless();
+    int v = e.createVoice();
+    e.setWaveform(v, Waveform::Sine);
+    e.setGain(v, 1.0f);
+    e.startVoice(v, e.currentTime());
+    e.renderBlock(1024);
+    e.stopVoice(v, e.currentTime());
+    e.startVoice(v, e.currentTime());      // older release is dropped
+    e.renderBlock(4096);
+    e.renderBlock(4096);
+    ASSERT_TRUE(latestPeak(e, 0, 4096, 4096) > 1e-2f);
+    PASS();
+}
+
+TEST(scheduled_note_off_lands_inside_the_block) {
+    Engine e; e.initHeadless();
+    int v = e.createVoice();
+    e.setWaveform(v, Waveform::Sine);
+    e.setGain(v, 1.0f);
+    e.setReleaseTime(v, 0.001f);
+    const int sr = e.sampleRate();
+    e.scheduleNoteOn(v, 0.0);
+    e.scheduleNoteOff(v, 0.05);             // same render block as the note-on
+    const int n = sr / 10;
+    e.renderBlock(n);
+    const int offFrame = sr / 20;
+    ASSERT_TRUE(latestPeak(e, 256, offFrame - 256, n) > 1e-2f);
+    ASSERT_TRUE(latestPeak(e, offFrame + 1024, n, n) < 1e-4f);
+    PASS();
+}
+
+TEST(stop_playback_at_is_sample_accurate) {
+    Engine e; e.initHeadless();
+    const int sr = e.sampleRate();
+    std::vector<float> tone(sr);
+    for (int i = 0; i < sr; ++i) tone[i] = 0.5f * std::sin(2.0f * 3.14159265f * 1000.0f * i / sr);
+    int clip = e.createClip(tone.data(), sr, 1);
+    int pb = e.playClip(clip, 1.0f, false);
+    const int stopFrame = sr / 20;
+    e.stopPlaybackAt(pb, e.currentTime() + 0.05);
+    ASSERT_TRUE(e.getPlaybackState(pb) != Engine::PlaybackState::Finished);
+    const int n = stopFrame + 2048;
+    e.renderBlock(n);
+    ASSERT_TRUE(latestPeak(e, 0, stopFrame - 256, n) > 0.05f);
+    ASSERT_TRUE(latestPeak(e, stopFrame + 256, n, n) < 1e-4f);
+    ASSERT_TRUE(e.getPlaybackState(pb) == Engine::PlaybackState::Finished ||
+                e.getPlaybackState(pb) == Engine::PlaybackState::Invalid);
+    PASS();
+}
+
 TEST(schedule_overflow_does_not_crash) {
     Engine e; e.initHeadless();
     int v = e.createVoice();

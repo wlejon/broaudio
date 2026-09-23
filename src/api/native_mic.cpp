@@ -80,6 +80,9 @@ void drainMicChunks() {
         start = w - kMicRing;
     }
     for (uint64_t i = start; i < w; ++i) {
+        // A chunk callback may have called bro.mic.stop() (or restarted
+        // with a new handler): stop delivering the old batch then.
+        if (!g_mic.active || !ev::isFunction(g_mic.onChunk.get())) return;
         int slot = static_cast<int>(i % kMicRing);
         int pk = g_mic.peakRingX10000[slot].load(std::memory_order_relaxed);
         int rms = g_mic.rmsRingX10000[slot].load(std::memory_order_relaxed);
@@ -131,12 +134,15 @@ void installMic() {
         bool agc = false;
         bool live = true;
         bool samples = false;
-        Value onChunkCb = ev::undefined();
+        // Held rooted: the option reads after it allocate.
+        ev::Persistent onChunkCb;
 
         broaudio::MicTapConfig cfg;
 
         if (!a.empty() && ev::isObject(a[0])) {
-            Value opt = a[0];
+            // Read every option off a[0] (rooted) itself; a local copy of it
+            // would be stale after the first getProperty.
+            const Value& opt = a[0];
 
             Value cf = ev::getProperty(opt, "chunkFrames");
             if (!ev::isUndefined(cf) && !ev::isObject(cf)) chunkFrames = static_cast<int>(ev::toDouble(cf));
@@ -154,7 +160,7 @@ void installMic() {
             if (ev::isBool(sampV)) samples = ev::toBool(sampV);
 
             Value cb = ev::getProperty(opt, "onChunk");
-            if (ev::isFunction(cb)) onChunkCb = cb;
+            if (ev::isFunction(cb)) onChunkCb.set(cb);
 
             Value tp = ev::getProperty(opt, "targetPeak");
             if (!ev::isUndefined(tp) && !ev::isObject(tp)) cfg.agcCfg.targetPeak = static_cast<float>(ev::toDouble(tp));
@@ -184,8 +190,8 @@ void installMic() {
 
         g_mic.chunkFrames = chunkFrames;
         g_mic.wantSamples = samples;
-        if (ev::isFunction(onChunkCb)) {
-            g_mic.onChunk.set(onChunkCb);
+        if (ev::isFunction(onChunkCb.get())) {
+            g_mic.onChunk.set(onChunkCb.get());
         }
         if (samples) {
             g_mic.sampleRing.assign(static_cast<size_t>(kMicRing) * static_cast<size_t>(chunkFrames), 0.0f);

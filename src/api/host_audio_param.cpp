@@ -366,6 +366,9 @@ void decorateAudioParamProto(ObjectBuilder& b) {
 
     b.def("setValueCurveAtTime", 3, [](Value self_, std::span<const Value> a) -> Value {
         HostAudioParam* p = hostAudioParamOf(self_);
+        // Reading a plain-array curve allocates; the receiver is returned
+        // afterwards, so it is rooted first.
+        ev::Persistent self(self_);
         if (p && !a.empty()) {
             std::vector<float> storage;
             const float* data = nullptr;
@@ -379,7 +382,7 @@ void decorateAudioParamProto(ObjectBuilder& b) {
             double t = e ? e->currentTime() : 0.0;
             syncAudioParamValue(p, p->evaluate(t));
         }
-        return self_;
+        return self.get();
     });
 
     b.def("cancelScheduledValues", 1, [](Value self_, std::span<const Value> a) -> Value {

@@ -7,8 +7,9 @@ void registerAudioContextClips(ObjectBuilder& b) {
         auto* e = getAudioEngine();
         if (!e || a.empty()) return ev::fromDouble(-1);
 
-        Value first = a[0];
-        if (auto* hostBuf = hostAudioBufferOf(first)) {
+        // a[0] is read from the rooted span each time: the per-channel
+        // getProperty below may move it.
+        if (auto* hostBuf = hostAudioBufferOf(a[0])) {
             int channels = hostBuf->numberOfChannels;
             int frames = hostBuf->length;
             if (frames <= 0 || channels <= 0) return ev::fromDouble(-1);
@@ -17,7 +18,7 @@ void registerAudioContextClips(ObjectBuilder& b) {
             for (int c = 0; c < channels; ++c) {
                 chData[c].resize(frames, 0.0f);
                 std::string key = "_ch" + std::to_string(c);
-                Value arr = ev::getProperty(first, key);
+                Value arr = ev::getProperty(a[0], key);
                 if (ev::isTypedArray(arr)) {
                     ev::TypedArrayInfo info = ev::typedArrayInfo(arr);
                     if (info && info.data) {
@@ -42,7 +43,7 @@ void registerAudioContextClips(ObjectBuilder& b) {
 
         const uint8_t* rawData = nullptr;
         size_t rawLen = 0, elemSize = 1;
-        if (!bufferBytes(first, &rawData, &rawLen, &elemSize) || rawLen == 0) {
+        if (!bufferBytes(a[0], &rawData, &rawLen, &elemSize) || rawLen == 0) {
             return ev::throwTypeError("createClip: expected AudioBuffer or Float32Array");
         }
 

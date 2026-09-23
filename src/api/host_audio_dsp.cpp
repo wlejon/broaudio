@@ -127,24 +127,20 @@ Value makeDynamicsCompressorNodeValue() {
     auto* comp = new HostDynamicsCompressorNode();
     comp->base.nodeType = AudioNodeType::DynamicsCompressor;
 
-    Value th = makeAudioParamValue(AudioParamTarget::CompressorThreshold, -1, -24.0f, -100.0f, 0.0f, -24.0f);
-    Value kn = makeAudioParamValue(AudioParamTarget::CompressorKnee, -1, 30.0f, 0.0f, 40.0f, 30.0f);
-    Value ra = makeAudioParamValue(AudioParamTarget::CompressorRatio, -1, 12.0f, 1.0f, 20.0f, 12.0f);
-    Value at = makeAudioParamValue(AudioParamTarget::CompressorAttack, -1, 0.003f, 0.0f, 1.0f, 0.003f);
-    Value re = makeAudioParamValue(AudioParamTarget::CompressorRelease, -1, 0.25f, 0.0f, 1.0f, 0.25f);
-
-    comp->thresholdParam = hostAudioParamOf(th);
-    comp->kneeParam = hostAudioParamOf(kn);
-    comp->ratioParam = hostAudioParamOf(ra);
-    comp->attackParam = hostAudioParamOf(at);
-    comp->releaseParam = hostAudioParamOf(re);
-
+    // Node first, then each param made and attached in turn: a param held
+    // in a local across the next allocation would be stale.
     ObjectBuilder b(g_dynamicsCompressorNodeClass.make(comp, hostDynamicsCompressorDtor));
-    b.set("threshold", th);
-    b.set("knee", kn);
-    b.set("ratio", ra);
-    b.set("attack", at);
-    b.set("release", re);
+    auto attach = [&b](const char* name, AudioParamTarget target, float init, float lo, float hi) {
+        Value param = makeAudioParamValue(target, -1, init, lo, hi, init);
+        HostAudioParam* p = hostAudioParamOf(param);
+        b.set(name, param);
+        return p;
+    };
+    comp->thresholdParam = attach("threshold", AudioParamTarget::CompressorThreshold, -24.0f, -100.0f, 0.0f);
+    comp->kneeParam = attach("knee", AudioParamTarget::CompressorKnee, 30.0f, 0.0f, 40.0f);
+    comp->ratioParam = attach("ratio", AudioParamTarget::CompressorRatio, 12.0f, 1.0f, 20.0f);
+    comp->attackParam = attach("attack", AudioParamTarget::CompressorAttack, 0.003f, 0.0f, 1.0f);
+    comp->releaseParam = attach("release", AudioParamTarget::CompressorRelease, 0.25f, 0.0f, 1.0f);
     return b.get();
 }
 
@@ -203,9 +199,9 @@ void decorateConvolverNodeProto(ObjectBuilder& b) {
                [](Value self_, std::span<const Value> a) {
                    HostConvolverNode* conv = convolverOf(self_);
                    if (!conv) return ev::undefined();
-                   Value bufVal = !a.empty() ? a[0] : ev::null();
-                   ev::setProperty(self_, "_buffer", bufVal);
-                   conv->buffer = hostAudioBufferOf(bufVal);
+                   // Unwrap before the write: setProperty moves the heap.
+                   conv->buffer = a.empty() ? nullptr : hostAudioBufferOf(a[0]);
+                   ev::setProperty(self_, "_buffer", a.empty() ? ev::null() : a[0]);
                    return ev::undefined();
                });
 

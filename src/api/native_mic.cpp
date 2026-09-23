@@ -301,11 +301,12 @@ void installMic() {
         if (a.empty()) return ev::undefined();
 
         std::vector<float> storage;
-        const float* samples = nullptr;
-        size_t count = 0;
-        if (!floatData(a[0], storage, &samples, &count) || !samples || count == 0) {
+        if (!readFloatArrayArg(a[0], FloatArrayArg::Float32OrPlain, "bro.mic.feed: samples", storage)) {
             return ev::undefined();
         }
+        if (storage.empty()) return ev::undefined();
+        const float* samples = storage.data();
+        size_t count = storage.size();
 
         int engRate = e->sampleRate();
         if (a.size() >= 2 && !ev::isUndefined(a[1]) && !ev::isObject(a[1])) {

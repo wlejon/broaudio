@@ -162,10 +162,11 @@ void registerAudioContextPlayback(ObjectBuilder& b) {
         auto* e = getAudioEngine();
         if (!e || a.size() < 2) return ev::fromDouble(0);
         int id = i32At(a, 0);
-        ev::TypedArrayInfo info = ev::typedArrayInfo(a[1]);
-        if (!info || !info.data) return ev::throwTypeError("Expected Float32Array samples");
-        int count = static_cast<int>(info.byteLength / sizeof(float));
-        return ev::fromDouble(e->pushStreamSamples(id, reinterpret_cast<const float*>(info.data), count));
+        std::vector<float> samples;
+        if (!readFloatArrayArg(a[1], FloatArrayArg::Float32Only, "pushStreamSamples: samples", samples)) {
+            return ev::undefined();
+        }
+        return ev::fromDouble(e->pushStreamSamples(id, samples.data(), static_cast<int>(samples.size())));
     });
 
     b.def("closeStream", 1, [](Value, std::span<const Value> a) {

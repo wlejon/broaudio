@@ -308,14 +308,14 @@ void decorateAudioParamProto(ObjectBuilder& b) {
         // afterwards, so it is rooted first.
         ev::Persistent self(self_);
         if (p && !a.empty()) {
-            std::vector<float> storage;
-            const float* data = nullptr;
-            size_t count = 0;
+            std::vector<float> curve;
             double startTime = a.size() >= 2 ? numAt(a, 1) : 0.0;
             double duration = a.size() >= 3 ? numAt(a, 2) : 0.0;
-            if (floatData(a[0], storage, &data, &count) && count > 0) {
-                p->addSetValueCurve(data, count, startTime, duration);
+            if (!readFloatArrayArg(a[0], FloatArrayArg::Float32OrPlain,
+                                   "AudioParam.setValueCurveAtTime: values", curve)) {
+                return ev::undefined();
             }
+            if (!curve.empty()) p->addSetValueCurve(curve.data(), curve.size(), startTime, duration);
             paramTimelineChanged(p);
         }
         return self.get();

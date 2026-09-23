@@ -611,23 +611,104 @@ inline bool plainArrayData(Value v, std::vector<T>& storage, Convert convert,
     return true;
 }
 
-// A Float32Array's elements (or a plain array's, converted) COPIED into
-// `storage`, which `*outData` then points at. A typed array's own bytes live
-// in the moving heap, so a pointer into them is stale after the next
-// allocating embed call; the copy is what lets a caller read more arguments
-// (getProperty on an options object) before it consumes the data.
-inline bool floatData(Value v, std::vector<float>& storage,
-                      const float** outData, size_t* outCount) {
-    if (auto info = ev::typedArrayInfo(v)) {
-        size_t n = info.byteLength / sizeof(float);
-        storage.resize(n);
-        if (n > 0) std::memcpy(storage.data(), info.data, n * sizeof(float));
-        *outData = storage.data();
-        *outCount = n;
+// ---------------------------------------------------------------------------
+// Typed-array arguments
+//
+// A parameter documented as a Float32Array takes a Float32Array and nothing
+// else: another element kind (an Int16Array, a Uint8Array) is a TypeError,
+// never its bytes reinterpreted as floats, and so is a view whose buffer has
+// been detached. Some parameters also take a plain array of numbers, or an
+// ArrayBuffer read as float32; each call site says which.
+//
+// Every checker below that fails has already raised the TypeError (pending
+// in the runtime): the caller returns ev::undefined() straight away and
+// makes no further embed call.
+// ---------------------------------------------------------------------------
+
+// A typed array or ArrayBuffer whose buffer has been detached.
+inline bool isDetachedBuffer(Value v) {
+    return (ev::isTypedArray(v) || ev::isArrayBuffer(v)) && ev::isDetachedArrayBuffer(v);
+}
+
+// A live (not detached) typed array of element kind `kind`.
+inline bool isTypedArrayOf(Value v, bronze::ElementKind kind) {
+    if (!ev::isTypedArray(v) || ev::isDetachedArrayBuffer(v)) return false;
+    ev::TypedArrayInfo info = ev::typedArrayInfo(v);
+    return info && info.elementKind == kind;
+}
+
+inline bool isFloat32Array(Value v) { return isTypedArrayOf(v, ev::elements::Float32); }
+
+// The TypeError the checkers raise: "<what> must be a Float32Array" plus
+// what else was acceptable, and why this value was not.
+inline void throwArrayTypeError(Value v, const char* what, const char* expected) {
+    std::string msg = std::string(what) + " must be " + expected;
+    if (isDetachedBuffer(v)) msg += " (its buffer is detached)";
+    else if (ev::isTypedArray(v)) msg += " (got a typed array of another element type)";
+    ev::throwTypeError(msg);
+}
+
+enum class FloatArrayArg : uint8_t {
+    Float32Only,     // Float32Array
+    Float32OrPlain,  // Float32Array or a plain array of numbers
+    Float32OrBuffer, // Float32Array or an ArrayBuffer read as float32
+};
+
+// The argument's floats COPIED into `out`. A typed array's bytes live in the
+// moving heap, so a pointer into them is stale after the next allocating
+// embed call; the copy is what lets a caller read more arguments (a property
+// of an options object) before it consumes the data. False with a TypeError
+// pending for anything `accept` does not allow.
+inline bool readFloatArrayArg(Value v, FloatArrayArg accept, const char* what,
+                              std::vector<float>& out) {
+    const char* expected = accept == FloatArrayArg::Float32OrPlain  ? "a Float32Array or an array of numbers"
+                         : accept == FloatArrayArg::Float32OrBuffer ? "a Float32Array or an ArrayBuffer"
+                                                                    : "a Float32Array";
+    if (isDetachedBuffer(v)) {
+        throwArrayTypeError(v, what, expected);
+        return false;
+    }
+    if (ev::isTypedArray(v)) {
+        ev::TypedArrayInfo info = ev::typedArrayInfo(v);
+        if (!info || info.elementKind != ev::elements::Float32) {
+            throwArrayTypeError(v, what, expected);
+            return false;
+        }
+        out.resize(info.byteLength / sizeof(float));
+        if (!out.empty()) std::memcpy(out.data(), info.data, out.size() * sizeof(float));
         return true;
     }
-    return plainArrayData<float>(
-        v, storage, [](double d) { return static_cast<float>(d); }, outData, outCount);
+    if (ev::isArrayBuffer(v)) {
+        ev::ArrayBufferInfo buf = ev::arrayBufferInfo(v);
+        if (accept != FloatArrayArg::Float32OrBuffer || !buf) {
+            throwArrayTypeError(v, what, expected);
+            return false;
+        }
+        out.resize(buf.byteLength / sizeof(float));
+        if (!out.empty()) std::memcpy(out.data(), buf.data, out.size() * sizeof(float));
+        return true;
+    }
+    if (accept == FloatArrayArg::Float32OrPlain && ev::isObject(v) && !ev::isFunction(v)) {
+        const float* data = nullptr;
+        size_t count = 0;
+        if (plainArrayData<float>(v, out, [](double d) { return static_cast<float>(d); }, &data, &count)) {
+            return true;
+        }
+    }
+    throwArrayTypeError(v, what, expected);
+    return false;
+}
+
+// An OUTPUT typed array of element kind `kind`, written in place: its info,
+// or a null info with a TypeError pending. The data pointer is valid only
+// until the next allocating embed call, so fetch it right before the write.
+inline ev::TypedArrayInfo outArrayArg(Value v, bronze::ElementKind kind, const char* what,
+                                      const char* expected) {
+    if (!isTypedArrayOf(v, kind)) {
+        throwArrayTypeError(v, what, expected);
+        return {};
+    }
+    return ev::typedArrayInfo(v);
 }
 
 // A view's or ArrayBuffer's bytes IN PLACE: the pointer is valid only until

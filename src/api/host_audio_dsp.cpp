@@ -157,12 +157,16 @@ void decorateWaveShaperNodeProto(ObjectBuilder& b) {
                [](Value self_, std::span<const Value> a) {
                    HostWaveShaperNode* ws = waveShaperOf(self_);
                    if (!ws || a.empty()) return ev::undefined();
-                   ws->curve.clear();
-                   const float* data = nullptr;
-                   size_t count = 0;
-                   if (floatData(a[0], ws->curve, &data, &count) && data && count > 0) {
-                       if (ws->curve.empty()) ws->curve.assign(data, data + count);
+                   // null / undefined clears the curve.
+                   if (ev::isNull(a[0]) || ev::isUndefined(a[0])) {
+                       ws->curve.clear();
+                       return ev::undefined();
                    }
+                   std::vector<float> curve;
+                   if (!readFloatArrayArg(a[0], FloatArrayArg::Float32OrPlain, "WaveShaperNode.curve", curve)) {
+                       return ev::undefined();
+                   }
+                   ws->curve = std::move(curve);
                    return ev::undefined();
                });
 

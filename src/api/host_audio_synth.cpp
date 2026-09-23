@@ -599,6 +599,10 @@ static void decorateMidiInputProto(ObjectBuilder& b) {
         auto* h = hostMidiInputOf(self);
         if (!h || !h->midi || a.empty()) return ev::fromBool(false);
         double when = hasArg(a, 1) ? numAt(a, 1) : -1.0;
+        if (isDetachedBuffer(a[0])) {
+            throwArrayTypeError(a[0], "MidiInput.injectMessage: bytes", "an array or typed array");
+            return ev::undefined();
+        }
         std::vector<uint8_t> bytes;
         ev::TypedArrayInfo info = ev::typedArrayInfo(a[0]);
         if (info && info.bytesPerElement == 1) {

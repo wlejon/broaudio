@@ -188,25 +188,17 @@ void decorateAudioContextProto(ObjectBuilder& b) {
             Value dn = ev::getProperty(a[2], "disableNormalization");
             if (ev::isBool(dn)) disableNorm = ev::toBool(dn);
         }
-        if (!ev::typedArrayInfo(a[0]) && !ev::arrayBufferInfo(a[0])) return ev::null();
-        if (!ev::typedArrayInfo(a[1]) && !ev::arrayBufferInfo(a[1])) return ev::null();
         std::vector<float> real, imag;
-        const float* rData = nullptr; size_t rCount = 0;
-        const float* iData = nullptr; size_t iCount = 0;
-        if (!floatData(a[0], real, &rData, &rCount)) {
-            const uint8_t* bytes = nullptr; size_t len = 0, elem = 1;
-            if (!bufferBytes(a[0], &bytes, &len, &elem)) return ev::null();
-            real.resize(len / sizeof(float));
-            if (!real.empty()) std::memcpy(real.data(), bytes, real.size() * sizeof(float));
+        if (!readFloatArrayArg(a[0], FloatArrayArg::Float32OrPlain, "createPeriodicWave: real", real) ||
+            !readFloatArrayArg(a[1], FloatArrayArg::Float32OrPlain, "createPeriodicWave: imag", imag)) {
+            return ev::undefined();
         }
-        if (!floatData(a[1], imag, &iData, &iCount)) {
-            const uint8_t* bytes = nullptr; size_t len = 0, elem = 1;
-            if (!bufferBytes(a[1], &bytes, &len, &elem)) return ev::null();
-            imag.resize(len / sizeof(float));
-            if (!imag.empty()) std::memcpy(imag.data(), bytes, imag.size() * sizeof(float));
-        }
-        int count = static_cast<int>(std::min(real.size(), imag.size()));
-        return makePeriodicWaveValue(real.data(), imag.data(), count, disableNorm);
+        // Web Audio requires equal lengths; the shorter half is zero-padded
+        // instead, as `new PeriodicWave` does.
+        size_t count = std::max(real.size(), imag.size());
+        real.resize(count, 0.0f);
+        imag.resize(count, 0.0f);
+        return makePeriodicWaveValue(real.data(), imag.data(), static_cast<int>(count), disableNorm);
     });
 
     b.def("createBiquadFilter", 0, [](Value, std::span<const Value>) {
@@ -430,13 +422,15 @@ void decorateAudioContextProto(ObjectBuilder& b) {
     b.def("saveWav", 4, [](Value, std::span<const Value> a) -> Value {
         if (a.size() < 4) return ev::fromBool(false);
         std::string path = resolveAudioWritePath(ev::toUtf8(a[0]));
-        ev::TypedArrayInfo info = ev::typedArrayInfo(a[1]);
-        if (!info || !info.data) return ev::throwTypeError("Expected Float32Array as second argument");
+        std::vector<float> samples;
+        if (!readFloatArrayArg(a[1], FloatArrayArg::Float32Only, "saveWav: samples", samples)) {
+            return ev::undefined();
+        }
         int channels = i32At(a, 2);
         int sampleRate = i32At(a, 3);
         if (channels <= 0 || sampleRate <= 0) return ev::fromBool(false);
-        int frames = static_cast<int>(info.byteLength / sizeof(float)) / channels;
-        return ev::fromBool(broaudio::saveWav(path.c_str(), reinterpret_cast<const float*>(info.data),
+        int frames = static_cast<int>(samples.size()) / channels;
+        return ev::fromBool(broaudio::saveWav(path.c_str(), samples.data(),
                                               frames, channels, sampleRate));
     });
 
@@ -820,17 +814,37 @@ void installAudioGlobals() {
     // 15. PeriodicWave
     g_periodicWaveClass.install("PeriodicWave", 0,
         [](Value, std::span<const Value> a) {
-            // floatData copies into the storage vectors, so the pointers
-            // survive the later reads (which may allocate).
+            // Two forms: Web Audio's `new PeriodicWave(ctx, {real, imag,
+            // disableNormalization})`, and the positional
+            // `new PeriodicWave(real, imag, {disableNormalization})`.
+            // The halves are copied out, so a later property read (which may
+            // allocate) cannot leave them stale. A missing half (or undefined
+            // / null) is empty; any other non-array is a TypeError.
             std::vector<float> rStorage, iStorage;
-            const float* rData = nullptr;
-            const float* iData = nullptr;
-            size_t rCount = 0, iCount = 0;
-            if (!a.empty()) floatData(a[0], rStorage, &rData, &rCount);
-            if (a.size() >= 2) floatData(a[1], iStorage, &iData, &iCount);
+            auto half = [](Value v, const char* what, std::vector<float>& out) {
+                if (ev::isUndefined(v) || ev::isNull(v)) return true;
+                return readFloatArrayArg(v, FloatArrayArg::Float32OrPlain, what, out);
+            };
+            ev::Persistent options;
+            if (!a.empty() && hostAudioContextOf(a[0])) {
+                if (a.size() >= 2 && ev::isObject(a[1])) {
+                    options.set(a[1]);
+                    ev::Persistent real(ev::getProperty(options.get(), "real"));
+                    if (!half(real.get(), "PeriodicWave: options.real", rStorage)) return ev::undefined();
+                    ev::Persistent imag(ev::getProperty(options.get(), "imag"));
+                    if (!half(imag.get(), "PeriodicWave: options.imag", iStorage)) return ev::undefined();
+                }
+            } else {
+                if (!half(a.empty() ? ev::undefined() : a[0], "PeriodicWave: real", rStorage) ||
+                    !half(a.size() >= 2 ? a[1] : ev::undefined(), "PeriodicWave: imag", iStorage)) {
+                    return ev::undefined();
+                }
+                if (a.size() >= 3 && ev::isObject(a[2])) options.set(a[2]);
+            }
+            const size_t rCount = rStorage.size(), iCount = iStorage.size();
             bool disableNorm = false;
-            if (a.size() >= 3 && ev::isObject(a[2])) {
-                Value dn = ev::getProperty(a[2], "disableNormalization");
+            if (ev::isObject(options.get())) {
+                Value dn = ev::getProperty(options.get(), "disableNormalization");
                 if (!ev::isUndefined(dn)) disableNorm = ev::toBool(dn);
             }
             // A shorter (or missing) half is zero-padded to the longer one;

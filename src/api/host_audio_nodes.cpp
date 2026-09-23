@@ -557,14 +557,26 @@ void decorateBiquadFilterNodeProto(ObjectBuilder& b) {
         if (detuneCents != 0.0) f0 *= std::pow(2.0, detuneCents / 1200.0);
 
         std::vector<float> freqStorage;
-        const float* freqs = nullptr;
-        size_t count = 0;
-        if (!floatData(a[0], freqStorage, &freqs, &count) || count == 0) return ev::undefined();
+        if (!readFloatArrayArg(a[0], FloatArrayArg::Float32OrPlain,
+                               "BiquadFilterNode.getFrequencyResponse: frequencyHz", freqStorage)) {
+            return ev::undefined();
+        }
+        const float* freqs = freqStorage.data();
+        const size_t count = freqStorage.size();
 
-        if (!ev::isTypedArray(a[1]) || !ev::isTypedArray(a[2])) return ev::undefined();
+        // The outputs are written in place: Float32Arrays only, never another
+        // element type written through as floats.
+        if (!outArrayArg(a[1], ev::elements::Float32,
+                         "BiquadFilterNode.getFrequencyResponse: magResponse", "a Float32Array")) {
+            return ev::undefined();
+        }
+        if (!outArrayArg(a[2], ev::elements::Float32,
+                         "BiquadFilterNode.getFrequencyResponse: phaseResponse", "a Float32Array")) {
+            return ev::undefined();
+        }
+        if (count == 0) return ev::undefined();
         ev::TypedArrayInfo magInfo = ev::typedArrayInfo(a[1]);
         ev::TypedArrayInfo phaseInfo = ev::typedArrayInfo(a[2]);
-        if (!magInfo || !phaseInfo || !magInfo.data || !phaseInfo.data) return ev::undefined();
 
         auto* eng = getAudioEngine();
         int sr = eng ? eng->sampleRate() : 44100;
@@ -829,9 +841,9 @@ void decorateAnalyserNodeProto(ObjectBuilder& b) {
     b.def("getFloatFrequencyData", 1, [](Value self_, std::span<const Value> a) -> Value {
         HostAnalyserNode* analyser = analyserOf(self_);
         if (!analyser) return ev::undefined();
-        if (a.empty() || !ev::isTypedArray(a[0])) return ev::undefined();
-        ev::TypedArrayInfo info = ev::typedArrayInfo(a[0]);
-        if (!info || !info.data) return ev::undefined();
+        ev::TypedArrayInfo info = outArrayArg(a.empty() ? ev::undefined() : a[0], ev::elements::Float32,
+                                              "AnalyserNode.getFloatFrequencyData: array", "a Float32Array");
+        if (!info) return ev::undefined();
 
         int n = analyser->fftSize;
         int halfN = n / 2;
@@ -867,9 +879,9 @@ void decorateAnalyserNodeProto(ObjectBuilder& b) {
     b.def("getByteFrequencyData", 1, [](Value self_, std::span<const Value> a) -> Value {
         HostAnalyserNode* analyser = analyserOf(self_);
         if (!analyser) return ev::undefined();
-        if (a.empty() || !ev::isTypedArray(a[0])) return ev::undefined();
-        ev::TypedArrayInfo info = ev::typedArrayInfo(a[0]);
-        if (!info || !info.data) return ev::undefined();
+        ev::TypedArrayInfo info = outArrayArg(a.empty() ? ev::undefined() : a[0], ev::elements::Uint8,
+                                              "AnalyserNode.getByteFrequencyData: array", "a Uint8Array");
+        if (!info) return ev::undefined();
 
         int n = analyser->fftSize;
         int halfN = n / 2;
@@ -911,9 +923,9 @@ void decorateAnalyserNodeProto(ObjectBuilder& b) {
     b.def("getFloatTimeDomainData", 1, [](Value self_, std::span<const Value> a) -> Value {
         HostAnalyserNode* analyser = analyserOf(self_);
         if (!analyser) return ev::undefined();
-        if (a.empty() || !ev::isTypedArray(a[0])) return ev::undefined();
-        ev::TypedArrayInfo info = ev::typedArrayInfo(a[0]);
-        if (!info || !info.data) return ev::undefined();
+        ev::TypedArrayInfo info = outArrayArg(a.empty() ? ev::undefined() : a[0], ev::elements::Float32,
+                                              "AnalyserNode.getFloatTimeDomainData: array", "a Float32Array");
+        if (!info) return ev::undefined();
 
         int n = analyser->fftSize;
         std::vector<float> real(n, 0.0f);
@@ -927,9 +939,9 @@ void decorateAnalyserNodeProto(ObjectBuilder& b) {
     b.def("getByteTimeDomainData", 1, [](Value self_, std::span<const Value> a) -> Value {
         HostAnalyserNode* analyser = analyserOf(self_);
         if (!analyser) return ev::undefined();
-        if (a.empty() || !ev::isTypedArray(a[0])) return ev::undefined();
-        ev::TypedArrayInfo info = ev::typedArrayInfo(a[0]);
-        if (!info || !info.data) return ev::undefined();
+        ev::TypedArrayInfo info = outArrayArg(a.empty() ? ev::undefined() : a[0], ev::elements::Uint8,
+                                              "AnalyserNode.getByteTimeDomainData: array", "a Uint8Array");
+        if (!info) return ev::undefined();
 
         int n = analyser->fftSize;
         std::vector<float> real(n, 0.0f);

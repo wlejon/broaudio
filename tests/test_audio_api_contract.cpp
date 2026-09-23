@@ -147,6 +147,95 @@ static void test_biquad_off_until_connected() {
     )JS"));
 }
 
+// A Float32Array parameter given another typed array, or one whose buffer was
+// detached, is a TypeError: the bytes are never reinterpreted as floats.
+// Parameters documented to also take a plain array of numbers still do.
+static void test_typed_array_args() {
+    runScript("Float32Array parameters reject other element types and detached buffers", withPrelude(R"JS(
+        function detached() {
+            const f = new Float32Array(8);
+            f.buffer.transfer();
+            return f;
+        }
+        const wrong = () => new Int16Array(8);
+        function rejects(label, call) {
+            expectThrows(() => call(wrong()), TypeError, label + " with an Int16Array");
+            expectThrows(() => call(detached()), TypeError, label + " with a detached Float32Array");
+        }
+
+        // Output arrays, written in place.
+        const an = ctx.createAnalyser();
+        rejects("getFloatTimeDomainData", (x) => an.getFloatTimeDomainData(x));
+        rejects("getFloatFrequencyData", (x) => an.getFloatFrequencyData(x));
+        expectThrows(() => an.getFloatTimeDomainData([0, 0]), TypeError, "getFloatTimeDomainData with a plain array");
+        expectThrows(() => an.getByteTimeDomainData(new Float32Array(8)), TypeError,
+                     "getByteTimeDomainData with a Float32Array");
+        expectThrows(() => an.getByteFrequencyData(new Int8Array(8)), TypeError,
+                     "getByteFrequencyData with an Int8Array");
+        an.getFloatTimeDomainData(new Float32Array(an.fftSize));
+        an.getByteFrequencyData(new Uint8Array(an.frequencyBinCount));
+
+        const bq = ctx.createBiquadFilter();
+        const hz = new Float32Array([100, 1000]);
+        rejects("getFrequencyResponse mag", (x) => bq.getFrequencyResponse(hz, x, new Float32Array(2)));
+        rejects("getFrequencyResponse phase", (x) => bq.getFrequencyResponse(hz, new Float32Array(2), x));
+        rejects("getFrequencyResponse frequencyHz", (x) => bq.getFrequencyResponse(x, new Float32Array(2), new Float32Array(2)));
+        const mag = new Float32Array(2), phase = new Float32Array(2);
+        bq.getFrequencyResponse([100, 1000], mag, phase);
+        expect(mag[0] > 0.5 && mag[1] < mag[0], "plain frequencyHz accepted: " + mag[0] + ", " + mag[1]);
+
+        const buf = ctx.createBuffer(1, 16, sr);
+        rejects("copyFromChannel", (x) => buf.copyFromChannel(x, 0));
+        rejects("copyToChannel", (x) => buf.copyToChannel(x, 0));
+        expectThrows(() => buf.copyToChannel([1, 2], 0), TypeError, "copyToChannel with a plain array");
+
+        // Inputs that also take a plain array of numbers.
+        rejects("createPeriodicWave real", (x) => ctx.createPeriodicWave(x, new Float32Array(8)));
+        rejects("createPeriodicWave imag", (x) => ctx.createPeriodicWave(new Float32Array(8), x));
+        ctx.createPeriodicWave([0, 1], [0, 0]);
+        ctx.createPeriodicWave(new Float32Array([0, 1, 0.5]), new Float32Array([0, 0]));
+        rejects("new PeriodicWave(ctx, {real})", (x) => new PeriodicWave(ctx, { real: x, imag: [0, 0] }));
+        rejects("new PeriodicWave(real, imag)", (x) => new PeriodicWave(x, [0, 0]));
+        const pw = new PeriodicWave(ctx, { real: [0, 1], imag: [0, 0], disableNormalization: true });
+        const osc = ctx.createOscillator();
+        osc.setPeriodicWave(pw);
+        osc.setPeriodicWave(new PeriodicWave(ctx, { imag: [0, 1] }));
+        osc.setPeriodicWave(new PeriodicWave([0, 1], [0, 0]));
+
+        const ws = ctx.createWaveShaper();
+        rejects("WaveShaper curve", (x) => { ws.curve = x; });
+        ws.curve = [-1, 0, 1];
+        ws.curve = null;
+
+        const g = ctx.createGain();
+        rejects("setValueCurveAtTime", (x) => g.gain.setValueCurveAtTime(x, ctx.currentTime, 0.1));
+        g.gain.setValueCurveAtTime([0, 1], ctx.currentTime, 0.1);
+
+        // Engine-level inputs.
+        rejects("createClip", (x) => ctx.createClip(x, 1));
+        expectThrows(() => ctx.createClip([0, 1], 1), TypeError, "createClip with a plain array");
+        rejects("createWavetableFromWaveform", (x) => ctx.createWavetableFromWaveform(x));
+        const stream = ctx.createStream(1, 1024);
+        rejects("pushStreamSamples", (x) => ctx.pushStreamSamples(stream, x));
+        ctx.closeStream(stream);
+        rejects("processEffectsOffline", (x) => ctx.processEffectsOffline(0, x));
+        rejects("saveWav", (x) => ctx.saveWav("never-written.wav", x, 1, sr));
+
+        const t0 = ctx.currentTime;
+        rejects("renderBlock out", (x) => ctx.renderBlock(128, x));
+        expect(ctx.currentTime === t0, "a rejected renderBlock does not advance the clock");
+        const out = new Float32Array(128);
+        expect(ctx.renderBlock(128, out) === out, "renderBlock fills a Float32Array out in place");
+        expect(ctx.renderBlock(128, null) instanceof Float32Array, "null out returns a fresh array");
+
+        const midi = ctx.createMidiInput();
+        const bytes = new Uint8Array([0x90, 60, 100]);
+        bytes.buffer.transfer();
+        expectThrows(() => midi.injectMessage(bytes), TypeError, "injectMessage with a detached Uint8Array");
+        return "SUCCESS";
+    )JS"));
+}
+
 int main() {
     std::cout << "Running broaudio API contract tests..." << std::endl;
     const char* stress = std::getenv("BRONZE_GC_STRESS");
@@ -162,6 +251,7 @@ int main() {
         broaudio::api::installAudio();
         test_compressor_units();
         test_biquad_off_until_connected();
+        test_typed_array_args();
         broaudio::api::shutdownAudio();
     }
     ev::destroyRealm(realm);

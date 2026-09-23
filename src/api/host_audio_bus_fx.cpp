@@ -167,12 +167,14 @@ void registerAudioContextBusFx(ObjectBuilder& b) {
         auto* e = getAudioEngine();
         if (!e || a.size() < 2) return ev::null();
         int busId = i32At(a, 0);
-        const uint8_t* rawData = nullptr;
-        size_t rawLen = 0;
-        size_t elemSize = 1;
-        if (!bufferBytes(a[1], &rawData, &rawLen, &elemSize) || rawLen == 0) return ev::null();
-        int count = static_cast<int>(rawLen / sizeof(float));
-        std::vector<float> res = e->processEffectsOffline(busId, reinterpret_cast<const float*>(rawData), count);
+        // Float32Array or an ArrayBuffer of float32; any other typed array
+        // (or a detached one) is a TypeError. Empty input is null.
+        std::vector<float> input;
+        if (!readFloatArrayArg(a[1], FloatArrayArg::Float32OrBuffer, "processEffectsOffline: samples", input)) {
+            return ev::undefined();
+        }
+        if (input.empty()) return ev::null();
+        std::vector<float> res = e->processEffectsOffline(busId, input.data(), static_cast<int>(input.size()));
         return makeFloat32Array(res);
     });
 

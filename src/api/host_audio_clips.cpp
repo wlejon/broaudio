@@ -19,7 +19,7 @@ void registerAudioContextClips(ObjectBuilder& b) {
                 chData[c].resize(frames, 0.0f);
                 std::string key = "_ch" + std::to_string(c);
                 Value arr = ev::getProperty(a[0], key);
-                if (ev::isTypedArray(arr)) {
+                if (isFloat32Array(arr)) {
                     ev::TypedArrayInfo info = ev::typedArrayInfo(arr);
                     if (info && info.data) {
                         size_t count = std::min(static_cast<size_t>(frames), static_cast<size_t>(info.elementCount));
@@ -41,16 +41,22 @@ void registerAudioContextClips(ObjectBuilder& b) {
             return ev::fromDouble(clipId);
         }
 
-        const uint8_t* rawData = nullptr;
-        size_t rawLen = 0, elemSize = 1;
-        if (!bufferBytes(a[0], &rawData, &rawLen, &elemSize) || rawLen == 0) {
+        // Interleaved float32 samples: a Float32Array, or an ArrayBuffer read
+        // as float32. Any other typed array is a TypeError, not bytes
+        // reinterpreted as floats.
+        std::vector<float> input;
+        if (!(ev::isTypedArray(a[0]) || ev::isArrayBuffer(a[0]))) {
             return ev::throwTypeError("createClip: expected AudioBuffer or Float32Array");
         }
+        if (!readFloatArrayArg(a[0], FloatArrayArg::Float32OrBuffer, "createClip: samples", input)) {
+            return ev::undefined();
+        }
+        if (input.empty()) return ev::throwTypeError("createClip: expected AudioBuffer or Float32Array");
 
-        int numSamples = static_cast<int>(rawLen / sizeof(float));
+        int numSamples = static_cast<int>(input.size());
         int channels = a.size() >= 2 ? i32At(a, 1) : 1;
         if (channels <= 0) channels = 1;
-        const float* samples = reinterpret_cast<const float*>(rawData);
+        const float* samples = input.data();
 
         // Optional 3rd arg: the PCM's source sample rate. When it differs
         // from the engine rate, resample so the clip plays at the right

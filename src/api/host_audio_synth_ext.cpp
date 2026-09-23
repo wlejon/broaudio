@@ -48,13 +48,15 @@ void registerAudioContextSynthExt(ObjectBuilder& b) {
     // built at the engine sample rate; the whole view is the cycle.
     b.def("createWavetableFromWaveform", 1, [](Value, std::span<const Value> a) -> Value {
         if (a.empty()) return ev::undefined();
-        ev::TypedArrayInfo info = ev::typedArrayInfo(a[0]);
-        if (!info || !info.data) return ev::throwTypeError("Expected Float32Array");
+        std::vector<float> cycle;
+        if (!readFloatArrayArg(a[0], FloatArrayArg::Float32Only,
+                               "createWavetableFromWaveform: oneCycle", cycle)) {
+            return ev::undefined();
+        }
         auto* e = getAudioEngine();
         int sr = e ? e->sampleRate() : 44100;
-        int count = static_cast<int>(info.byteLength / sizeof(float));
         auto bank = broaudio::WavetableBank::createFromWaveform(
-            reinterpret_cast<const float*>(info.data), count, sr);
+            cycle.data(), static_cast<int>(cycle.size()), sr);
         if (!bank) return ev::undefined();
         return ev::fromDouble(registerWavetable(bank));
     });
@@ -92,7 +94,8 @@ void registerAudioContextSynthExt(ObjectBuilder& b) {
     // renderBlock(numFrames, out?) -> Float32Array. Renders numFrames through
     // the full pipeline (no device) and returns the latest mono mixdown: a
     // fresh Float32Array(min(numFrames, analysis ring)) or, when `out` is a
-    // typed array, `out` itself filled in place up to its length. Headless
+    // Float32Array, `out` itself filled in place up to its length (any other
+    // non-null `out` is a TypeError). Headless
     // only — driving the pipeline from the main thread while a live device
     // callback runs would race.
     b.def("renderBlock", 2, [](Value, std::span<const Value> a) -> Value {
@@ -100,6 +103,14 @@ void registerAudioContextSynthExt(ObjectBuilder& b) {
         if (!e || a.empty()) return ev::undefined();
         int numFrames = i32At(a, 0);
         if (numFrames <= 0) return ev::undefined();
+
+        // `out`, when given (not undefined / null), must be a live
+        // Float32Array. Checked before rendering, so a bad argument throws
+        // without advancing the engine clock.
+        const bool haveOut = a.size() >= 2 && !ev::isUndefined(a[1]) && !ev::isNull(a[1]);
+        if (haveOut && !outArrayArg(a[1], ev::elements::Float32, "renderBlock: out", "a Float32Array")) {
+            return ev::undefined();
+        }
 
         // Render in 128-frame quanta (the Web Audio render quantum) and
         // evaluate param automation between them, so a ramp scheduled over
@@ -117,7 +128,7 @@ void registerAudioContextSynthExt(ObjectBuilder& b) {
 
         ev::Persistent result;
         bool filled = false;
-        if (a.size() >= 2 && ev::isObject(a[1])) {
+        if (haveOut) {
             ev::TypedArrayInfo info = ev::typedArrayInfo(a[1]);
             if (info && info.data) {
                 int rc = std::min(n, static_cast<int>(info.byteLength / sizeof(float)));

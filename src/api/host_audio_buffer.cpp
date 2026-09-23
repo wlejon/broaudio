@@ -107,7 +107,9 @@ void decorateAudioBufferProto(ObjectBuilder& b) {
         ev::Persistent self(thisValue);
         std::string key = "_ch" + std::to_string(ch);
         Value arr = ev::getProperty(self.get(), key);
-        if (ev::isTypedArray(arr)) return arr;
+        // The cached view, unless its buffer was detached (transferred):
+        // then a fresh view is made from the host copy.
+        if (isFloat32Array(arr)) return arr;
 
         ev::Persistent newArr(ev::createTypedArray(ev::elements::Float32, buf->length));
         if (ch < static_cast<int>(buf->channels.size()) && !buf->channels[ch].empty()) {
@@ -122,6 +124,10 @@ void decorateAudioBufferProto(ObjectBuilder& b) {
     b.def("copyFromChannel", 3, [](Value thisValue, std::span<const Value> a) -> Value {
         HostAudioBuffer* buf = hostAudioBufferOf(thisValue);
         if (!buf || a.size() < 2) return ev::undefined();
+        if (!isFloat32Array(a[0])) {
+            throwArrayTypeError(a[0], "AudioBuffer.copyFromChannel: destination", "a Float32Array");
+            return ev::undefined();
+        }
         int ch = i32At(a, 1);
         int startInChannel = a.size() >= 3 ? i32At(a, 2) : 0;
         if (ch < 0 || ch >= buf->numberOfChannels || startInChannel < 0 ||
@@ -135,7 +141,8 @@ void decorateAudioBufferProto(ObjectBuilder& b) {
         {
             ev::Persistent self(thisValue);
             Value cached = ev::getProperty(self.get(), "_ch" + std::to_string(ch));
-            ev::TypedArrayInfo cachedInfo = ev::typedArrayInfo(cached);
+            ev::TypedArrayInfo cachedInfo =
+                isFloat32Array(cached) ? ev::typedArrayInfo(cached) : ev::TypedArrayInfo{};
             if (cachedInfo && ch < static_cast<int>(buf->channels.size())) {
                 auto& chan = buf->channels[ch];
                 size_t n = std::min(chan.size(), static_cast<size_t>(cachedInfo.elementCount));
@@ -160,6 +167,10 @@ void decorateAudioBufferProto(ObjectBuilder& b) {
     b.def("copyToChannel", 3, [](Value thisValue, std::span<const Value> a) -> Value {
         HostAudioBuffer* buf = hostAudioBufferOf(thisValue);
         if (!buf || a.size() < 2) return ev::undefined();
+        if (!isFloat32Array(a[0])) {
+            throwArrayTypeError(a[0], "AudioBuffer.copyToChannel: source", "a Float32Array");
+            return ev::undefined();
+        }
         int ch = i32At(a, 1);
         int startInChannel = a.size() >= 3 ? i32At(a, 2) : 0;
         if (ch < 0 || ch >= buf->numberOfChannels || startInChannel < 0 ||
@@ -185,7 +196,8 @@ void decorateAudioBufferProto(ObjectBuilder& b) {
                 std::string key = "_ch" + std::to_string(ch);
                 Value cached = ev::getProperty(self.get(), key);
                 if (ev::isTypedArray(cached)) {
-                    ev::TypedArrayInfo cachedInfo = ev::typedArrayInfo(cached);
+                    ev::TypedArrayInfo cachedInfo =
+                        isFloat32Array(cached) ? ev::typedArrayInfo(cached) : ev::TypedArrayInfo{};
                     if (cachedInfo && cachedInfo.data) {
                         float* dstPtr = reinterpret_cast<float*>(cachedInfo.data);
                         size_t cachedLimit = cachedInfo.elementCount > static_cast<size_t>(startInChannel)
@@ -317,7 +329,7 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
                 chData[c].resize(frames, 0.0f);
                 std::string key = "_ch" + std::to_string(c);
                 Value arr = ev::getProperty(bufVal.get(), key);
-                if (ev::isTypedArray(arr)) {
+                if (isFloat32Array(arr)) {
                     ev::TypedArrayInfo info = ev::typedArrayInfo(arr);
                     if (info && info.data) {
                         size_t count = std::min(static_cast<size_t>(frames), static_cast<size_t>(info.elementCount));

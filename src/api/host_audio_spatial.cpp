@@ -173,7 +173,10 @@ std::vector<ev::Persistent> connectTargetsOf(Value nodeObj) {
     if (!ev::isObject(arr.get())) return out;
     Value lenV = ev::getProperty(arr.get(), "length");
     if (!ev::isNumber(lenV)) return out;
-    const uint32_t n = static_cast<uint32_t>(ev::toDouble(lenV));
+    // `_targets` is a script-visible property: a length no connect list
+    // reaches is a tampered one, read as empty rather than reserved.
+    const uint32_t n = saturateU32(ev::toDouble(lenV));
+    if (n > kMaxEdgeList) return out;
     out.reserve(n);
     for (uint32_t i = 0; i < n; ++i) out.emplace_back(ev::getElement(arr.get(), i));
     return out;

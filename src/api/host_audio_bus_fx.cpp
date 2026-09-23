@@ -147,8 +147,7 @@ void registerAudioContextBusFx(ObjectBuilder& b) {
         ev::Persistent arr(a[1]);
         Value lenV = ev::getProperty(arr.get(), "length");
         if (ev::isUndefined(lenV) || ev::isObject(lenV)) return ev::undefined();
-        double lenD = ev::toDouble(lenV);
-        int len = std::isnan(lenD) ? 0 : static_cast<int>(lenD);
+        int len = saturateI32(ev::toDouble(lenV));
         constexpr int kSlots = static_cast<int>(broaudio::EffectSlot::Count);
         if (len <= 0 || len > kSlots) return ev::undefined();
 

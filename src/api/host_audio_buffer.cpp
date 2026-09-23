@@ -4,6 +4,7 @@
 #include <broaudio/dsp/resampler.h>
 #include <broaudio/io/audio_file.h>
 #include <cstring>
+#include <new>
 
 namespace broaudio::api {
 
@@ -225,13 +226,29 @@ Value makeAudioBufferValue(int channels, int length, int sampleRate) {
     if (length < 0) length = 0;
     if (sampleRate <= 0) sampleRate = 44100;
 
-    auto* h = new HostAudioBufferHandle();
-    h->buffer = std::make_shared<HostAudioBuffer>();
-    h->buffer->numberOfChannels = channels;
-    h->buffer->length = length;
-    h->buffer->sampleRate = sampleRate;
-    h->buffer->channels.resize(channels, std::vector<float>(length, 0.0f));
+    // 2^28 samples (1 GiB of float) across all channels: past it the length
+    // is a RangeError rather than an allocation sized by a script's number.
+    constexpr int64_t kMaxBufferSamples = int64_t{1} << 28;
+    if (static_cast<int64_t>(channels) * length > kMaxBufferSamples) {
+        return ev::throwRangeError("AudioBuffer: " + std::to_string(channels) + " x " +
+                                   std::to_string(length) + " frames is over the " +
+                                   std::to_string(kMaxBufferSamples) + "-sample limit");
+    }
+    auto buffer = std::make_shared<HostAudioBuffer>();
+    buffer->numberOfChannels = channels;
+    buffer->length = length;
+    buffer->sampleRate = sampleRate;
+    // The length comes from script: a size that cannot be allocated is a
+    // RangeError, not a std::bad_alloc thrown out of the binding.
+    try {
+        buffer->channels.resize(channels, std::vector<float>(length, 0.0f));
+    } catch (const std::bad_alloc&) {
+        return ev::throwRangeError("AudioBuffer: cannot allocate " + std::to_string(channels) +
+                                   " x " + std::to_string(length) + " frames");
+    }
 
+    auto* h = new HostAudioBufferHandle();
+    h->buffer = std::move(buffer);
     return g_audioBufferClass.make(h, hostAudioBufferDtor);
 }
 

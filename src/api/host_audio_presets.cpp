@@ -37,7 +37,7 @@ bool objBool(const ev::Persistent& o, const char* k, bool def) {
     return present(v) ? ev::toBool(v) : def;
 }
 int objInt(const ev::Persistent& o, const char* k, int def) {
-    return static_cast<int>(objNum(o, k, def));
+    return saturateI32(objNum(o, k, def));
 }
 std::string objStr(const ev::Persistent& o, const char* k, const char* def) {
     Value v = ev::getProperty(o.get(), k);
@@ -54,7 +54,7 @@ uint32_t arrayLen(const ev::Persistent& arr) {
     Value l = ev::getProperty(arr.get(), "length");
     if (!present(l) || ev::isObject(l)) return 0;
     double d = ev::toDouble(l);
-    return (std::isnan(d) || d <= 0) ? 0 : static_cast<uint32_t>(d);
+    return saturateU32(d);
 }
 ev::Persistent arrayChild(const ev::Persistent& arr, uint32_t i) {
     Value v = ev::getElement(arr.get(), i);

@@ -42,7 +42,7 @@ void registerAudioContextPlayback(ObjectBuilder& b) {
 
     b.def("setPlaybackRegion", 3, [](Value, std::span<const Value> a) {
         auto* e = getAudioEngine();
-        if (e && a.size() >= 3) e->setPlaybackRegion(i32At(a, 0), static_cast<int>(numAt(a, 1)), static_cast<int>(numAt(a, 2)));
+        if (e && a.size() >= 3) e->setPlaybackRegion(i32At(a, 0), i32At(a, 1), i32At(a, 2));
         return ev::undefined();
     });
 
@@ -198,8 +198,8 @@ void registerAudioContextPlayback(ObjectBuilder& b) {
                 return true;
             };
             double d = 0.0;
-            if (numberOpt("ringFrames", d)) opts.ringFrames = static_cast<int>(d);
-            if (numberOpt("prebufferFrames", d)) opts.prebufferFrames = static_cast<int>(d);
+            if (numberOpt("ringFrames", d)) opts.ringFrames = saturateI32(d);
+            if (numberOpt("prebufferFrames", d)) opts.prebufferFrames = saturateI32(d);
             if (numberOpt("gain", d)) opts.gain = static_cast<float>(d);
             Value loop = ev::getProperty(opt.get(), "loop");
             if (!ev::isUndefined(loop)) opts.loop = ev::toBool(loop);

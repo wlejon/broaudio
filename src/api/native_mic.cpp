@@ -145,10 +145,10 @@ void installMic() {
             const Value& opt = a[0];
 
             Value cf = ev::getProperty(opt, "chunkFrames");
-            if (!ev::isUndefined(cf) && !ev::isObject(cf)) chunkFrames = static_cast<int>(ev::toDouble(cf));
+            if (!ev::isUndefined(cf) && !ev::isObject(cf)) chunkFrames = saturateI32(ev::toDouble(cf));
 
             Value tr = ev::getProperty(opt, "targetRate");
-            if (!ev::isUndefined(tr) && !ev::isObject(tr)) targetRate = static_cast<int>(ev::toDouble(tr));
+            if (!ev::isUndefined(tr) && !ev::isObject(tr)) targetRate = saturateI32(ev::toDouble(tr));
 
             Value agcV = ev::getProperty(opt, "agc");
             if (ev::isBool(agcV)) agc = ev::toBool(agcV);
@@ -177,6 +177,15 @@ void installMic() {
 
         if (chunkFrames < 0 || targetRate < 0) {
             return ev::throwError("bro.mic.start: chunkFrames and targetRate must be >= 0");
+        }
+        // The sample ring holds kMicRing chunks; an absurd chunk size would
+        // size an allocation that throws out of the binding.
+        constexpr int kMaxChunkFrames = 1 << 20;
+        constexpr int kMaxTargetRate = 768000;
+        if (chunkFrames > kMaxChunkFrames || targetRate > kMaxTargetRate) {
+            return ev::throwRangeError("bro.mic.start: chunkFrames must be <= " +
+                                       std::to_string(kMaxChunkFrames) +
+                                       " and targetRate <= " + std::to_string(kMaxTargetRate));
         }
         if (samples && chunkFrames <= 0) {
             return ev::throwError("bro.mic.start: opts.samples requires chunkFrames > 0");

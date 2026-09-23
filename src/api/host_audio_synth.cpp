@@ -618,7 +618,7 @@ static void decorateMidiInputProto(ObjectBuilder& b) {
             }
             bytes.reserve(count);
             for (size_t i = 0; i < count; ++i) {
-                bytes.push_back(static_cast<uint8_t>(static_cast<int>(data[i]) & 0xFF));
+                bytes.push_back(static_cast<uint8_t>(saturateI32(data[i]) & 0xFF));
             }
         }
         return ev::fromBool(h->midi->injectMessage(bytes.data(), bytes.size(), when));

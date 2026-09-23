@@ -129,7 +129,7 @@ static void appendConnectTarget(const ev::Persistent& self, const ev::Persistent
         ev::setProperty(self.get(), "_targets", arr.get());
     }
     Value lenV = ev::getProperty(arr.get(), "length");
-    const uint32_t n = ev::isNumber(lenV) ? static_cast<uint32_t>(ev::toDouble(lenV)) : 0;
+    const uint32_t n = ev::isNumber(lenV) ? saturateU32(ev::toDouble(lenV)) : 0;
     ev::setElement(arr.get(), n, target.get());
 }
 
@@ -153,7 +153,10 @@ static void readListenerEntries(const ev::Persistent& self, const std::string& t
     ev::Persistent arr(ev::getProperty(map.get(), type));
     if (!ev::isObject(arr.get())) return;
     Value lenV = ev::getProperty(arr.get(), "length");
-    const uint32_t n = ev::isNumber(lenV) ? static_cast<uint32_t>(ev::toDouble(lenV)) : 0;
+    // The array is a script-visible property; a length no listener list
+    // reaches is a tampered one, read as empty rather than walked.
+    uint32_t n = ev::isNumber(lenV) ? saturateU32(ev::toDouble(lenV)) : 0;
+    if (n > kMaxEdgeList) n = 0;
     for (uint32_t i = 0; i < n; ++i) out.emplace_back(ev::getElement(arr.get(), i));
 }
 

@@ -732,11 +732,11 @@ void installAudioGlobals() {
                 // Read the options off a[0] (rooted) each time: a getProperty
                 // may move the object.
                 Value lenV = ev::getProperty(a[0], "length");
-                if (!ev::isUndefined(lenV) && !ev::isObject(lenV)) length = static_cast<int>(ev::toDouble(lenV));
+                if (!ev::isUndefined(lenV) && !ev::isObject(lenV)) length = saturateI32(ev::toDouble(lenV));
                 Value chV = ev::getProperty(a[0], "numberOfChannels");
-                if (!ev::isUndefined(chV) && !ev::isObject(chV)) channels = static_cast<int>(ev::toDouble(chV));
+                if (!ev::isUndefined(chV) && !ev::isObject(chV)) channels = saturateI32(ev::toDouble(chV));
                 Value srV = ev::getProperty(a[0], "sampleRate");
-                if (!ev::isUndefined(srV) && !ev::isObject(srV)) sampleRate = static_cast<int>(ev::toDouble(srV));
+                if (!ev::isUndefined(srV) && !ev::isObject(srV)) sampleRate = saturateI32(ev::toDouble(srV));
             }
             if (length <= 0) return ev::throwTypeError("AudioBuffer: length must be positive");
             return makeAudioBufferValue(channels, length, sampleRate);

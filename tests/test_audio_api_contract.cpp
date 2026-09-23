@@ -245,6 +245,16 @@ static void test_validation_and_defaults() {
         expect(conv.buffer === null, "ConvolverNode.buffer starts null, got " + conv.buffer);
         expectThrows(() => { src.buffer = {}; }, TypeError, "buffer = {} on a buffer source");
         expectThrows(() => { conv.buffer = new Float32Array(4); }, TypeError, "buffer = Float32Array on a convolver");
+        // Sizes from script: saturated and capped, never an undefined
+        // conversion or an allocation that throws out of the binding.
+        expectThrows(() => new AudioBuffer({ length: 1e10 }), RangeError, "new AudioBuffer length 1e10");
+        expectThrows(() => new AudioBuffer({ length: Infinity }), RangeError, "new AudioBuffer length Infinity");
+        expectThrows(() => new AudioBuffer({ length: NaN }), TypeError, "new AudioBuffer length NaN");
+        expectThrows(() => new AudioBuffer({ length: 1 << 24, numberOfChannels: 1e9 }), RangeError,
+                     "new AudioBuffer: 32 channels x 2^24 frames is over the limit");
+        expectThrows(() => ctx.createBuffer(2, 2e9, sr), RangeError, "createBuffer 2e9 frames");
+        expect(new AudioBuffer({ length: 8, numberOfChannels: 1e9 }).numberOfChannels === 32,
+               "numberOfChannels 1e9 clamps to 32");
         const b = ctx.createBuffer(1, 64, sr);
         src.buffer = b;
         expect(src.buffer === b, "buffer reads back");

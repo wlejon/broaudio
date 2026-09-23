@@ -566,12 +566,35 @@ inline double numAt(std::span<const Value> args, size_t i) {
     return std::isnan(d) ? 0.0 : d;
 }
 
+// A JS number truncated to int32, saturating: NaN is 0 and +-Infinity or
+// anything past the range lands on the nearest end. A plain static_cast of an
+// out-of-range double is undefined behaviour (MSVC yields INT_MIN, so 1e10
+// "frames" became a negative count).
+inline int32_t saturateI32(double d) {
+    if (std::isnan(d)) return 0;
+    if (d <= static_cast<double>(INT32_MIN)) return INT32_MIN;
+    if (d >= static_cast<double>(INT32_MAX)) return INT32_MAX;
+    return static_cast<int32_t>(d);
+}
+
+// The same for uint32: negatives are 0.
+inline uint32_t saturateU32(double d) {
+    if (std::isnan(d) || d <= 0) return 0;
+    if (d >= static_cast<double>(UINT32_MAX)) return UINT32_MAX;
+    return static_cast<uint32_t>(d);
+}
+
+// Longest `_targets` / `_listeners` edge array a node's bookkeeping reads.
+// Those arrays are ordinary properties a script can overwrite; a longer one
+// is treated as empty instead of sizing a walk or an allocation.
+constexpr uint32_t kMaxEdgeList = 1u << 20;
+
 inline int32_t i32At(std::span<const Value> args, size_t i) {
-    return static_cast<int32_t>(static_cast<int64_t>(numAt(args, i)));
+    return saturateI32(numAt(args, i));
 }
 
 inline uint32_t u32At(std::span<const Value> args, size_t i) {
-    return static_cast<uint32_t>(static_cast<int64_t>(numAt(args, i)));
+    return saturateU32(numAt(args, i));
 }
 
 inline bool boolAt(std::span<const Value> args, size_t i) {
@@ -641,7 +664,12 @@ inline bool plainArrayData(Value v, std::vector<T>& storage, Convert convert,
     ev::Persistent root(v);
     Value lenV = ev::getProperty(root.get(), "length");
     if (ev::isUndefined(lenV) || ev::isObject(lenV)) return false;
-    uint32_t n = static_cast<uint32_t>(ev::toDouble(lenV));
+    // A plain array's length is at most 2^32 - 1, but an array-like's is
+    // whatever it says; past this the copy is refused rather than sized to
+    // an allocation that throws out of the binding.
+    constexpr uint32_t kMaxPlainArray = 1u << 26;
+    uint32_t n = saturateU32(ev::toDouble(lenV));
+    if (n > kMaxPlainArray) return false;
     storage.resize(n);
     for (uint32_t i = 0; i < n; ++i) {
         Value e = ev::getElement(root.get(), i);

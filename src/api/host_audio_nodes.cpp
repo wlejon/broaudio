@@ -383,6 +383,20 @@ Value makePeriodicWaveValue(const float* real, const float* imag, int count, boo
     return g_periodicWaveClass.make(pw, hostPeriodicWaveDtor);
 }
 
+// A DelayNode / DynamicsCompressorNode on a started path drives the master
+// bus's delay / compressor: point its params there, so later value sets and
+// automation reach it (host_audio_live.cpp applyDirectTarget).
+static void bindToMasterBus(HostDelayNode* dn) {
+    if (dn->delayTimeParam) dn->delayTimeParam->targetId = Engine::MASTER_BUS_ID;
+}
+
+static void bindToMasterBus(HostDynamicsCompressorNode* comp) {
+    for (const ParamRef* p : {&comp->thresholdParam, &comp->kneeParam, &comp->ratioParam,
+                              &comp->attackParam, &comp->releaseParam}) {
+        if (*p) (*p)->targetId = Engine::MASTER_BUS_ID;
+    }
+}
+
 void decorateOscillatorNodeProto(ObjectBuilder& b) {
     // connect(gain) is handled by the shared AudioNode.connect (see
     // decorateAudioNodeProto); start() reads the remembered gain.value.
@@ -418,6 +432,8 @@ void decorateOscillatorNodeProto(ObjectBuilder& b) {
         // `osc` is host memory and does not move; the node object is read
         // through a Persistent because the walk below allocates.
         ev::Persistent self(self_);
+        LiveSource& live = *osc->live;
+        live.pathGains.clear();
 
         std::vector<ev::Persistent> queue;
         std::vector<HostAudioNode*> visited;
@@ -429,22 +445,20 @@ void decorateOscillatorNodeProto(ObjectBuilder& b) {
             if (!cur || std::find(visited.begin(), visited.end(), cur) != visited.end()) continue;
             visited.push_back(cur);
 
+            // Gain, pan and position are live: the path's params go on the
+            // voice's LiveSource, which recomputes them whenever one changes
+            // and on every tick (host_audio_live.cpp).
             if (cur->nodeType == AudioNodeType::Gain) {
                 auto* gn = reinterpret_cast<HostGainNode*>(cur);
-                if (gn->gainParam) {
-                    eng->setGain(osc->voiceId, gn->gainParam->evaluate(when));
-                }
+                if (gn->gainParam) live.pathGains.push_back(gn->gainParam);
             } else if (cur->nodeType == AudioNodeType::StereoPanner) {
                 auto* sp = reinterpret_cast<HostStereoPannerNode*>(cur);
-                float panVal = sp->panParam ? sp->panParam->evaluate(when) : sp->pan;
-                eng->setVoicePan(osc->voiceId, panVal);
+                if (sp->panParam) live.pathPan = sp->panParam;
             } else if (cur->nodeType == AudioNodeType::Panner) {
                 auto* pn = reinterpret_cast<HostPannerNode*>(cur);
-                float px = pn->posX;
-                float py = pn->posY;
-                float pz = pn->posZ;
+                for (int i = 0; i < 3; ++i) live.position[i] = pn->positionParams[i];
+                live.posWritten = false;
                 eng->setVoiceSpatialEnabled(osc->voiceId, true);
-                eng->setVoiceSpatialPosition(osc->voiceId, px, py, pz);
                 eng->setVoiceSpatialRefDistance(osc->voiceId, pn->refDistance);
                 eng->setVoiceSpatialMaxDistance(osc->voiceId, pn->maxDistance);
                 eng->setVoiceSpatialRolloff(osc->voiceId, pn->rolloffFactor);
@@ -455,8 +469,10 @@ void decorateOscillatorNodeProto(ObjectBuilder& b) {
                 float dt = dn->delayTimeParam ? dn->delayTimeParam->evaluate(when) : 0.0f;
                 eng->setDelayTime(dt);
                 eng->setDelayMix(1.0f);
+                bindToMasterBus(dn);
             } else if (cur->nodeType == AudioNodeType::DynamicsCompressor) {
                 auto* comp = reinterpret_cast<HostDynamicsCompressorNode*>(cur);
+                bindToMasterBus(comp);
                 eng->setBusCompressorEnabled(Engine::MASTER_BUS_ID, true);
                 float th = comp->thresholdParam ? comp->thresholdParam->evaluate(when) : -24.0f;
                 float ra = comp->ratioParam ? comp->ratioParam->evaluate(when) : 12.0f;
@@ -478,6 +494,7 @@ void decorateOscillatorNodeProto(ObjectBuilder& b) {
             pushConnectedTargets(curObj.get(), queue, when);
         }
 
+        refreshLiveParams(eng->currentTime());
         eng->startVoice(osc->voiceId, when);
         return ev::undefined();
     });
@@ -531,6 +548,18 @@ Value makeOscillatorNodeValue() {
     osc->panParam = makeAudioParam(AudioParamTarget::VoicePan, voiceId, 0.0f, -1.0f, 1.0f, 0.0f);
     osc->gainParam = makeAudioParam(AudioParamTarget::Gain, voiceId, 1.0f, 0.0f, 10.0f, 1.0f);
 
+    // The voice's frequency, gain and pan are functions of these params (and,
+    // once started, of the params on its path): live from creation, so a set
+    // before start() reaches the voice as one after it does.
+    osc->live = std::make_shared<LiveSource>();
+    osc->live->kind = LiveSource::Kind::Voice;
+    osc->live->id = voiceId;
+    osc->live->pitch = osc->frequencyParam;
+    osc->live->detune = osc->detuneParam;
+    osc->live->ownGain = osc->gainParam;
+    osc->live->ownPan = osc->panParam;
+    registerLiveSource(osc->live);
+
     ObjectBuilder b(g_oscillatorNodeClass.make(osc, hostOscillatorDtor));
     b.set("frequency", makeAudioParamValue(osc->frequencyParam));
     b.set("detune", makeAudioParamValue(osc->detuneParam));
@@ -571,10 +600,13 @@ void decorateBiquadFilterNodeProto(ObjectBuilder& b) {
         HostBiquadFilterNode* filter = filterOf(self_);
         if (!filter || a.size() < 3) return ev::undefined();
 
-        double f0 = filter->frequencyParam->value;
-        double Q = filter->qParam->value;
-        double gainDb = filter->gainParam->value;
-        double detuneCents = filter->detuneParam->value;
+        // The params' values now, automation included -- what the slot runs.
+        auto* now = getAudioEngine();
+        const double t = now ? now->currentTime() : 0.0;
+        double f0 = filter->frequencyParam->evaluate(t);
+        double Q = filter->qParam->evaluate(t);
+        double gainDb = filter->gainParam->evaluate(t);
+        double detuneCents = filter->detuneParam->evaluate(t);
         // computedFrequency = frequency * 2^(detune / 1200) (Web Audio).
         if (detuneCents != 0.0) f0 *= std::pow(2.0, detuneCents / 1200.0);
 
@@ -713,9 +745,18 @@ Value makeBiquadFilterNodeValue() {
     }
 
     filter->frequencyParam = makeAudioParam(AudioParamTarget::FilterFrequency, filter->slot, 350.0f, 0.0f, 24000.0f, 350.0f);
-    filter->detuneParam = makeAudioParam(AudioParamTarget::Generic, -1, 0.0f, -153600.0f, 153600.0f, 0.0f);
+    filter->detuneParam = makeAudioParam(AudioParamTarget::FilterDetune, filter->slot, 0.0f, -153600.0f, 153600.0f, 0.0f);
     filter->qParam = makeAudioParam(AudioParamTarget::FilterQ, filter->slot, 1.0f, 0.0001f, 1000.0f, 1.0f);
     filter->gainParam = makeAudioParam(AudioParamTarget::FilterGain, filter->slot, 0.0f, -40.0f, 40.0f, 0.0f);
+
+    // The slot's cutoff is the computed frequency, frequency * 2^(detune /
+    // 1200), recomputed whenever either param moves (host_audio_live.cpp).
+    filter->live = std::make_shared<LiveFilter>();
+    filter->live->slot = filter->slot;
+    filter->live->frequency = filter->frequencyParam;
+    filter->live->detune = filter->detuneParam;
+    filter->live->lastFrequency = 350.0f;
+    registerLiveFilter(filter->live);
 
     ObjectBuilder b(g_biquadFilterNodeClass.make(filter, hostBiquadFilterDtor));
     b.set("frequency", makeAudioParamValue(filter->frequencyParam));

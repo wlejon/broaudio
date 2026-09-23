@@ -17,13 +17,41 @@ void hostAudioBufferDtor(void* p) {
 void hostAudioBufferSourceDtor(void* p) {
     auto* src = static_cast<HostAudioBufferSourceNode*>(p);
     if (src) {
-        auto* e = getAudioEngine();
+        // Runs in the sweep: never create the default engine from here.
+        auto* e = existingAudioEngine();
         if (e) {
             if (src->playbackId >= 0) e->stopPlayback(src->playbackId);
             if (src->clipId >= 0) e->deleteClip(src->clipId);
         }
         delete src;
     }
+}
+
+// The node's loop window in clip frames, Web Audio's rules: a window with
+// loopStart >= 0, loopEnd > 0 and loopStart < loopEnd loops
+// [loopStart, min(loopEnd, duration)); any other loops the whole buffer
+// (0, 0 -- the engine's "whole region").
+static void loopFrames(const HostAudioBufferSourceNode& src, int frames, int* startF, int* endF) {
+    *startF = 0;
+    *endF = 0;
+    const double sr = src.playSampleRate;
+    if (sr <= 0.0 || !(src.loopStart >= 0.0) || !(src.loopEnd > 0.0) || !(src.loopStart < src.loopEnd)) {
+        return;
+    }
+    const double s = std::min(src.loopStart * sr, static_cast<double>(frames));
+    const double en = std::min(src.loopEnd * sr, static_cast<double>(frames));
+    if (!(s < en)) return;
+    *startF = static_cast<int>(std::lround(s));
+    *endF = static_cast<int>(std::lround(en));
+}
+
+// Push a moved loop window to the playing instance.
+static void updateLiveLoop(const HostAudioBufferSourceNode& src) {
+    auto* e = existingAudioEngine();
+    if (!e || src.playbackId < 0 || !src.buffer) return;
+    int s = 0, en = 0;
+    loopFrames(src, src.buffer->length, &s, &en);
+    e->setPlaybackLoopPoints(src.playbackId, s, en);
 }
 
 static HostAudioBufferHandle* bufferHandleOf(Value v) {
@@ -236,6 +264,7 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
                    HostAudioBufferSourceNode* src = bufSrcOf(self_);
                    if (!src) return ev::undefined();
                    src->loopStart = numAt(a, 0);
+                   updateLiveLoop(*src);
                    return ev::undefined();
                });
 
@@ -249,6 +278,7 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
                    HostAudioBufferSourceNode* src = bufSrcOf(self_);
                    if (!src) return ev::undefined();
                    src->loopEnd = numAt(a, 0);
+                   updateLiveLoop(*src);
                    return ev::undefined();
                });
 
@@ -258,6 +288,20 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
         auto* e = getAudioEngine();
         if (!e) return ev::undefined();
         if (src->started) return ev::throwError("AudioBufferSourceNode cannot be started more than once");
+
+        // start(when = 0, offset = 0, duration): seconds, as Web Audio
+        // defines them -- `when` on the context clock (past = now), `offset`
+        // into the buffer, `duration` of buffer content to play (loops
+        // included) before the source ends.
+        const double when = hasArg(a, 0) ? numAt(a, 0) : 0.0;
+        const double offset = hasArg(a, 1) ? numAt(a, 1) : 0.0;
+        const bool hasDuration = hasArg(a, 2);
+        const double duration = hasDuration ? numAt(a, 2) : 0.0;
+        if (!(when >= 0.0)) return ev::throwRangeError("start: when must be a non-negative number");
+        if (!(offset >= 0.0)) return ev::throwRangeError("start: offset must be a non-negative number");
+        if (hasDuration && !(duration >= 0.0)) {
+            return ev::throwRangeError("start: duration must be a non-negative number");
+        }
         src->started = true;
 
         // Every getProperty below may allocate: the node and its buffer are
@@ -291,10 +335,14 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
                 }
             }
 
-            // Traverse downstream connected nodes to apply DSP processing (filters, delays, convolvers, waveshaper, gain, analyser) and spatial/pan settings
-            float netGain = 1.0f;
-            bool hasPan = false;
-            float panVal = 0.0f;
+            // Traverse downstream connected nodes. Filters, delays,
+            // convolvers, the waveshaper and compressor are rendered into the
+            // clip here; gain, stereo pan and panner position stay live on
+            // the playback's LiveSource (host_audio_live.cpp).
+            auto live = std::make_shared<LiveSource>();
+            live->kind = LiveSource::Kind::Playback;
+            live->pitch = src->playbackRateParam;
+            live->detune = src->detuneParam;
             bool hasSpatial = false;
             HostPannerNode* pannerNode = nullptr;
 
@@ -314,9 +362,7 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
 
                 if (cur->nodeType == AudioNodeType::Gain) {
                     auto* gn = reinterpret_cast<HostGainNode*>(cur);
-                    if (gn->gainParam) {
-                        netGain *= gn->gainParam->evaluate(curTime);
-                    }
+                    if (gn->gainParam) live->pathGains.push_back(gn->gainParam);
                 } else if (cur->nodeType == AudioNodeType::BiquadFilter) {
                     auto* bf = reinterpret_cast<HostBiquadFilterNode*>(cur);
                     broaudio::BiquadFilter bq;
@@ -411,15 +457,11 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
                     }
                 } else if (cur->nodeType == AudioNodeType::StereoPanner) {
                     auto* sp = reinterpret_cast<HostStereoPannerNode*>(cur);
-                    hasPan = true;
-                    if (sp->panParam) {
-                        panVal = sp->panParam->evaluate(curTime);
-                    } else {
-                        panVal = sp->pan;
-                    }
+                    if (sp->panParam) live->pathPan = sp->panParam;
                 } else if (cur->nodeType == AudioNodeType::Panner) {
                     hasSpatial = true;
                     pannerNode = reinterpret_cast<HostPannerNode*>(cur);
+                    for (int i = 0; i < 3; ++i) live->position[i] = pannerNode->positionParams[i];
                 } else if (cur->nodeType == AudioNodeType::DynamicsCompressor) {
                     auto* comp = reinterpret_cast<HostDynamicsCompressorNode*>(cur);
                     processDynamicsCompressor(comp, interleaved.data(), frames, channels, sr, curTime);
@@ -430,45 +472,45 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
 
             src->clipId = e->createClip(interleaved.data(), frames * channels, channels);
 
-            double when = numAt(a, 0);
-            if (when > 0.0) {
-                src->playbackId = e->playClipAt(src->clipId, when, netGain, src->loop);
-            } else {
-                src->playbackId = e->playClip(src->clipId, netGain, src->loop);
-            }
+            // The clip holds the buffer's frames at the buffer's own rate:
+            // the engine steps through it at rateScale per output frame on
+            // top of the computed playbackRate * 2^(detune / 1200).
+            const int bufSR = hostBuf->sampleRate > 0 ? hostBuf->sampleRate : sr;
+            src->playSampleRate = bufSR;
+            live->rateScale = static_cast<float>(bufSR) / static_cast<float>(sr);
+            const float pitch = live->pitch->evaluate(curTime) *
+                                std::pow(2.0f, live->detune->evaluate(curTime) / 1200.0f);
+
+            float gain = 1.0f;
+            for (const auto& g : live->pathGains) gain *= g->evaluate(curTime);
+
+            broaudio::Engine::ClipPlayOptions opts;
+            opts.gain = gain;
+            opts.loop = src->loop;
+            opts.rate = pitch * live->rateScale;
+            live->lastGain = opts.gain;
+            live->lastPitch = opts.rate;
+            opts.when = when;
+            opts.offsetFrames = std::min(offset * bufSR, static_cast<double>(frames));
+            loopFrames(*src, frames, &opts.loopStartFrame, &opts.loopEndFrame);
+            if (hasDuration) opts.durationFrames = duration * bufSR;
+            src->playbackId = e->playClip(src->clipId, opts);
 
             if (src->playbackId >= 0) {
-                if (hasPan) {
-                    e->setPlaybackPan(src->playbackId, panVal);
-                }
                 if (hasSpatial && pannerNode) {
-                    float px = pannerNode->posX;
-                    float py = pannerNode->posY;
-                    float pz = pannerNode->posZ;
                     e->setPlaybackSpatialEnabled(src->playbackId, true);
-                    e->setPlaybackSpatialPosition(src->playbackId, px, py, pz);
                     e->setPlaybackSpatialRefDistance(src->playbackId, pannerNode->refDistance);
                     e->setPlaybackSpatialMaxDistance(src->playbackId, pannerNode->maxDistance);
                     e->setPlaybackSpatialRolloff(src->playbackId, pannerNode->rolloffFactor);
                     e->setPlaybackSpatialDistanceModel(src->playbackId, parseDistanceModel(pannerNode->distanceModel));
                 }
-
-                // Computed playback rate = playbackRate * 2^(detune / 1200),
-                // as Web Audio defines it.
-                float r = src->playbackRateParam->evaluate(curTime);
-                // Bind the param to the playing instance so a later
-                // `src.playbackRate.value = x` reaches the engine.
-                src->playbackRateParam->targetId = src->playbackId;
-                float cents = src->detuneParam->evaluate(curTime);
-                if (cents != 0.0f) r *= std::pow(2.0f, cents / 1200.0f);
-                if (r != 1.0f) {
-                    e->setPlaybackRate(src->playbackId, r);
-                }
-
-                double offset = numAt(a, 1);
-                if (offset > 0.0) {
-                    e->seekPlayback(src->playbackId, offset);
-                }
+                live->id = src->playbackId;
+                src->live = live;
+                registerLiveSource(live);
+                // Web Audio keeps a playing source alive; the hold also fires
+                // `onended` once the playback finishes or is stopped.
+                holdPlayingSource(live, self.get());
+                refreshLiveParams(curTime);
             }
         }
         return ev::undefined();
@@ -480,8 +522,9 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
         auto* e = getAudioEngine();
         if (e && src->playbackId >= 0) {
             e->stopPlayback(src->playbackId);
+            // The playing hold sees the playback gone on the next tick and
+            // fires `onended`, as Web Audio does for stop().
             src->playbackId = -1;
-            src->playbackRateParam->targetId = -1;
         }
         src->stopped = true;
         return ev::undefined();

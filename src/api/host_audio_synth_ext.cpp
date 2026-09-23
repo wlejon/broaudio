@@ -101,23 +101,41 @@ void registerAudioContextSynthExt(ObjectBuilder& b) {
         int numFrames = i32At(a, 0);
         if (numFrames <= 0) return ev::undefined();
 
-        e->renderBlock(numFrames);
+        // Render in 128-frame quanta (the Web Audio render quantum) and
+        // evaluate param automation between them, so a ramp scheduled over
+        // this block moves within it rather than jumping at its end.
+        constexpr int kQuantum = 128;
+        for (int done = 0; done < numFrames;) {
+            const int step = std::min(kQuantum, numFrames - done);
+            refreshLiveParams(e->currentTime());
+            e->renderBlock(step);
+            done += step;
+        }
 
         int cap = e->outputBuffer().capacity();
         int n = std::min(numFrames, cap);
 
+        ev::Persistent result;
+        bool filled = false;
         if (a.size() >= 2 && ev::isObject(a[1])) {
             ev::TypedArrayInfo info = ev::typedArrayInfo(a[1]);
             if (info && info.data) {
                 int rc = std::min(n, static_cast<int>(info.byteLength / sizeof(float)));
                 if (rc > 0) e->outputBuffer().readLatest(reinterpret_cast<float*>(info.data), rc);
-                return a[1];
+                result.set(a[1]);
+                filled = true;
             }
         }
+        if (!filled) {
+            std::vector<float> out(static_cast<size_t>(n), 0.0f);
+            e->outputBuffer().readLatest(out.data(), n);
+            result.set(makeFloat32Array(out));
+        }
 
-        std::vector<float> out(static_cast<size_t>(n), 0.0f);
-        e->outputBuffer().readLatest(out.data(), n);
-        return makeFloat32Array(out);
+        // Automation at the block's end, and `onended` for the buffer
+        // sources that finished in it (runs JS, so the result is rooted).
+        tickLiveParams();
+        return result.get();
     });
 }
 

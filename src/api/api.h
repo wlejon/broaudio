@@ -22,7 +22,10 @@ void drainMicChunks();
 
 /// Settle background work the JS API started on worker threads — today
 /// `createClipFromFileAsync`, which decodes and resamples off the JS thread
-/// and resolves its promise here. Joins the finished jobs and resolves or
+/// and resolves its promise here. Also the control-rate tick of AudioParam
+/// automation: scheduled ramps and curves are evaluated here and written to
+/// the sources already playing, and a finished AudioBufferSourceNode's
+/// `onended` handler runs here. Joins the finished jobs and resolves or
 /// rejects their promises on the calling (JS) thread; never blocks on work
 /// still running. drainMicChunks() calls it, so a host that already pumps
 /// the mic once per frame gets it for free; a host that does not calls this

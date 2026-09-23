@@ -94,6 +94,7 @@ enum class AudioParamTarget : uint8_t {
     FilterGain,
     PlaybackRate,
     PlaybackDetune,
+    FilterDetune,
     DelayTime,
     Pan,
     PannerPositionX,
@@ -164,6 +165,75 @@ struct HostAudioParamHandle {
     ParamRef param;
 };
 
+// ---------------------------------------------------------------------------
+// Live params (host_audio_live.cpp)
+//
+// Engine state that is a function of AudioParams -- a voice's frequency is
+// frequency * 2^(detune/1200), its gain the product of its own gain and every
+// GainNode on its path, a filter slot's cutoff frequency * 2^(detune/1200) --
+// is recomputed from the params whenever one changes and on every tick, so
+// value sets and scheduled automation reach sources that are already
+// playing. Automation is evaluated at control rate: once per host tick
+// (tickAsyncJobs) and once per 128-frame render quantum inside
+// ctx.renderBlock; the engine's parameter smoothers interpolate between.
+// ---------------------------------------------------------------------------
+
+// A playing (or, for an oscillator, playable) source and the params that
+// shape it. Built by start()'s graph walk; the path fields describe the
+// nodes downstream of the source (gains multiply, the stereo pan and panner
+// position apply). Holds no JS values.
+struct LiveSource {
+    enum class Kind : uint8_t { Voice, Playback };
+    Kind kind = Kind::Voice;
+    int id = -1;             // engine voice id / playback id
+    ParamRef pitch;          // oscillator frequency / buffer playbackRate
+    ParamRef detune;         // cents on top of pitch
+    float rateScale = 1.0f;  // playback: buffer sample rate / engine rate
+    ParamRef ownGain;        // oscillator's own gain param
+    ParamRef ownPan;         // oscillator's own pan param
+    std::vector<ParamRef> pathGains;
+    ParamRef pathPan;        // a StereoPannerNode's pan on the path
+    ParamRef position[3];    // a PannerNode's position on the path
+    bool ended = false;
+    // Last values written, so a refresh that changes nothing writes nothing.
+    float lastGain = -1.0f, lastPitch = -1.0f, lastPan = -2.0f;
+    float lastPos[3] = {0.0f, 0.0f, 0.0f};
+    bool posWritten = false;
+};
+
+// A BiquadFilterNode's slot: cutoff = frequency * 2^(detune/1200).
+struct LiveFilter {
+    int slot = -1;
+    ParamRef frequency;
+    ParamRef detune;
+    float lastFrequency = -1.0f;
+};
+
+// Registration. The registry keeps weak references (the node owns its
+// LiveSource / LiveFilter) except for playing buffer sources, below.
+void registerLiveSource(const std::shared_ptr<LiveSource>& src);
+void registerLiveFilter(const std::shared_ptr<LiveFilter>& filter);
+// A param got a timeline: evaluate it every tick until the timeline empties.
+void noteAutomatedParam(const ParamRef& param);
+// A param's timeline was edited: note it for per-tick evaluation and apply
+// its value at the current time. Leaves `param->value` (the value the
+// timeline's first ramp starts from) alone.
+void paramTimelineChanged(const ParamRef& param);
+// A buffer source that started playing: the registry holds it (and roots its
+// JS node, as Web Audio keeps a playing source alive) until its playback ends
+// or is stopped, then calls the node's `onended` on the next tick.
+void holdPlayingSource(const std::shared_ptr<LiveSource>& src, Value node);
+// Recompute and write every live source, filter and automated param at
+// engine time `t`. Never runs JS.
+void refreshLiveParams(double t);
+// refreshLiveParams(now), then dispatch `onended` for finished sources
+// (runs JS). What the host tick and renderBlock call.
+void tickLiveParams();
+// Drop the playing holds without running JS (shutdownAudio).
+void shutdownLiveParams();
+// The engine if one exists, without creating the default one.
+broaudio::Engine* existingAudioEngine();
+
 struct HostGainNode {
     HostAudioNode base;
     ParamRef gainParam;
@@ -179,6 +249,7 @@ struct HostOscillatorNode {
     ParamRef detuneParam;
     ParamRef gainParam;
     ParamRef panParam;
+    std::shared_ptr<LiveSource> live;  // registered at creation: the voice exists from then
 };
 
 struct HostPeriodicWave {
@@ -197,6 +268,7 @@ struct HostBiquadFilterNode {
     ParamRef detuneParam;
     ParamRef qParam;
     ParamRef gainParam;
+    std::shared_ptr<LiveFilter> live;
 };
 
 struct HostAnalyserNode {
@@ -240,8 +312,10 @@ struct HostAudioBufferSourceNode {
     double loopEnd = 0.0;
     int clipId = -1;
     int playbackId = -1;
+    int playSampleRate = 0;  // the started buffer's rate: loop points are converted with it
     bool started = false;
     bool stopped = false;
+    std::shared_ptr<LiveSource> live;  // set by start()
 };
 
 struct HostPannerNode {

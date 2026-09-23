@@ -18,6 +18,10 @@ broaudio::Engine* getAudioEngine() {
     return s_defaultEngine.get();
 }
 
+broaudio::Engine* existingAudioEngine() {
+    return s_customEngine ? s_customEngine : s_defaultEngine.get();
+}
+
 void setAudioEngine(broaudio::Engine* engine) {
     s_customEngine = engine;
 }
@@ -26,6 +30,7 @@ void shutdownAudio() {
     // Background clip loads hold the engine pointer: join them before the
     // engine they decode into goes away.
     shutdownAsyncJobs();
+    shutdownLiveParams();
     if (s_defaultEngine) {
         s_defaultEngine->shutdown();
         s_defaultEngine.reset();

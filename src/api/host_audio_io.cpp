@@ -127,6 +127,9 @@ Value launchClipLoad(const std::string& resolvedPath) {
 }
 
 void tickAsyncJobs() {
+    // Scheduled param automation reaches playing sources, and finished
+    // buffer sources get their `onended` (host_audio_live.cpp).
+    tickLiveParams();
     auto& v = jobs();
     if (v.empty()) return;
     // Take the finished jobs out first: settling allocates and may run user

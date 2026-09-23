@@ -153,19 +153,39 @@ if(TARGET broaudio_api)
                 $<TARGET_FILE_DIR:broaudio_test_api_gc>
         )
     endif()
+
+    # Live params: value sets and automation reaching playing sources, the
+    # biquad's detune, buffer-source loop points / duration / onended, and
+    # isClipPlaying.
+    add_executable(broaudio_test_api_live test_audio_api_live.cpp)
+    target_link_libraries(broaudio_test_api_live PRIVATE broaudio_api bronze_runtime_shared)
+    if(WIN32)
+        add_custom_command(TARGET broaudio_test_api_live POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:bronze_runtime_shared>
+                $<TARGET_FILE_DIR:broaudio_test_api_live>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_LINKER_FILE:bronze_runtime_shared>
+                $<TARGET_FILE_DIR:broaudio_test_api_live>
+        )
+    endif()
+
     if(BRASS_HOST_BACKEND)
-        add_test(NAME broaudio_test_api_gc COMMAND broaudio_test_api_gc)
-        if(WIN32)
-            set_tests_properties(broaudio_test_api_gc PROPERTIES
-                ENVIRONMENT "PATH=$<TARGET_FILE_DIR:bronze_runtime_shared>;$<TARGET_FILE_DIR:broaudio_test_api_gc>;$ENV{PATH}")
-        endif()
+        foreach(plain_test broaudio_test_api_gc broaudio_test_api_live)
+            add_test(NAME ${plain_test} COMMAND ${plain_test})
+            if(WIN32)
+                set_tests_properties(${plain_test} PROPERTIES
+                    ENVIRONMENT "PATH=$<TARGET_FILE_DIR:bronze_runtime_shared>;$<TARGET_FILE_DIR:${plain_test}>;$ENV{PATH}")
+            endif()
+        endforeach()
 
         # Every binding test again under bronze's GC stress oracle: a
         # collection on every allocation, from-space poisoned afterwards, so a
         # Value held across an allocating embed call crashes or reads garbage
         # here instead of passing by luck.
         foreach(api_test broaudio_test_api broaudio_test_api_drift
-                         broaudio_test_destination broaudio_test_api_gc)
+                         broaudio_test_destination broaudio_test_api_gc
+                         broaudio_test_api_live)
             add_test(NAME ${api_test}_gcstress COMMAND ${api_test})
             if(WIN32)
                 set_tests_properties(${api_test}_gcstress PROPERTIES

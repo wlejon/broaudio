@@ -27,69 +27,8 @@ ParamRef hostAudioParamRef(Value v) {
     return h ? h->param : nullptr;
 }
 
-void syncAudioParamValue(HostAudioParam* p, float val) {
-    p->value = std::clamp(val, p->minValue, p->maxValue);
-    auto* e = getAudioEngine();
-    if (!e || p->targetId < 0) return;
-    switch (p->target) {
-        case AudioParamTarget::VoiceFrequency:
-            e->setFrequency(p->targetId, p->value);
-            break;
-        case AudioParamTarget::VoicePan:
-        case AudioParamTarget::Pan:
-            e->setVoicePan(p->targetId, p->value);
-            break;
-        case AudioParamTarget::FilterFrequency:
-            e->setFilterFrequency(p->targetId, p->value);
-            break;
-        case AudioParamTarget::FilterQ:
-            e->setFilterQ(p->targetId, p->value);
-            break;
-        case AudioParamTarget::FilterGain:
-            e->setFilterGain(p->targetId, p->value);
-            break;
-        case AudioParamTarget::PlaybackRate:
-            e->setPlaybackRate(p->targetId, p->value);
-            break;
-        case AudioParamTarget::DelayTime:
-            e->setDelayTime(p->value);
-            break;
-        case AudioParamTarget::Gain:
-            e->setGain(p->targetId, p->value);
-            break;
-        case AudioParamTarget::VoiceAttack:
-            e->setAttackTime(p->targetId, p->value);
-            break;
-        case AudioParamTarget::VoiceDecay:
-            e->setDecayTime(p->targetId, p->value);
-            break;
-        case AudioParamTarget::VoiceSustain:
-            e->setSustainLevel(p->targetId, p->value);
-            break;
-        case AudioParamTarget::VoiceRelease:
-            e->setReleaseTime(p->targetId, p->value);
-            break;
-        case AudioParamTarget::VoicePitchBend:
-            e->setVoicePitchBend(p->targetId, p->value);
-            break;
-        case AudioParamTarget::VoiceDetune:
-        case AudioParamTarget::PlaybackDetune:
-        case AudioParamTarget::PannerPositionX:
-        case AudioParamTarget::PannerPositionY:
-        case AudioParamTarget::PannerPositionZ:
-        case AudioParamTarget::PannerOrientationX:
-        case AudioParamTarget::PannerOrientationY:
-        case AudioParamTarget::PannerOrientationZ:
-        case AudioParamTarget::CompressorThreshold:
-        case AudioParamTarget::CompressorKnee:
-        case AudioParamTarget::CompressorRatio:
-        case AudioParamTarget::CompressorAttack:
-        case AudioParamTarget::CompressorRelease:
-        case AudioParamTarget::Generic:
-        default:
-            break;
-    }
-}
+// syncAudioParamValue lives in host_audio_live.cpp with the rest of the
+// param -> engine plumbing.
 
 float HostAudioParam::evaluate(double t) const {
     if (timeline.empty()) {
@@ -287,95 +226,84 @@ void HostAudioParam::cancelAndHoldAtTime(double cancelTime) {
 void decorateAudioParamProto(ObjectBuilder& b) {
     b.accessor("value",
                [](Value self_, std::span<const Value>) {
-                   HostAudioParam* p = hostAudioParamOf(self_);
+                   ParamRef p = hostAudioParamRef(self_);
                    if (!p) return ev::undefined();
+                   if (p->timeline.empty()) return ev::fromDouble(p->value);
                    auto* e = getAudioEngine();
                    double t = e ? e->currentTime() : 0.0;
-                   if (!p->timeline.empty()) {
-                       float evaluated = p->evaluate(t);
-                       syncAudioParamValue(p, evaluated);
-                   }
-                   return ev::fromDouble(p->value);
+                   return ev::fromDouble(p->evaluate(t));
                },
                [](Value self_, std::span<const Value> a) {
-                   HostAudioParam* p = hostAudioParamOf(self_);
+                   ParamRef p = hostAudioParamRef(self_);
                    if (!p) return ev::undefined();
                    float v = static_cast<float>(numAt(a, 0));
                    p->timeline.clear();
-                   syncAudioParamValue(p, v);
+                   syncAudioParamValue(p.get(), v);
                    return ev::undefined();
                });
 
     b.accessor("defaultValue", [](Value self_, std::span<const Value>) {
-        HostAudioParam* p = hostAudioParamOf(self_);
+        ParamRef p = hostAudioParamRef(self_);
         return ev::fromDouble(p ? p->defaultValue : 1.0);
     }, nullptr);
 
     b.accessor("minValue", [](Value self_, std::span<const Value>) {
-        HostAudioParam* p = hostAudioParamOf(self_);
+        ParamRef p = hostAudioParamRef(self_);
         return ev::fromDouble(p ? p->minValue : -3.4e38f);
     }, nullptr);
 
     b.accessor("maxValue", [](Value self_, std::span<const Value>) {
-        HostAudioParam* p = hostAudioParamOf(self_);
+        ParamRef p = hostAudioParamRef(self_);
         return ev::fromDouble(p ? p->maxValue : 3.4e38f);
     }, nullptr);
 
     b.def("setValueAtTime", 2, [](Value self_, std::span<const Value> a) -> Value {
-        HostAudioParam* p = hostAudioParamOf(self_);
+        ParamRef p = hostAudioParamRef(self_);
         if (p && !a.empty()) {
             float val = static_cast<float>(numAt(a, 0));
             double time = a.size() >= 2 ? numAt(a, 1) : 0.0;
             p->addSetValue(val, time);
-            auto* e = getAudioEngine();
-            double t = e ? e->currentTime() : 0.0;
-            syncAudioParamValue(p, p->evaluate(t));
+            paramTimelineChanged(p);
         }
         return self_;
     });
 
     b.def("linearRampToValueAtTime", 2, [](Value self_, std::span<const Value> a) -> Value {
-        HostAudioParam* p = hostAudioParamOf(self_);
+        ParamRef p = hostAudioParamRef(self_);
         if (p && !a.empty()) {
             float val = static_cast<float>(numAt(a, 0));
             double time = a.size() >= 2 ? numAt(a, 1) : 0.0;
             p->addLinearRamp(val, time);
-            auto* e = getAudioEngine();
-            double t = e ? e->currentTime() : 0.0;
-            syncAudioParamValue(p, p->evaluate(t));
+            paramTimelineChanged(p);
         }
         return self_;
     });
 
     b.def("exponentialRampToValueAtTime", 2, [](Value self_, std::span<const Value> a) -> Value {
-        HostAudioParam* p = hostAudioParamOf(self_);
+        ParamRef p = hostAudioParamRef(self_);
         if (p && !a.empty()) {
             float val = static_cast<float>(numAt(a, 0));
             double time = a.size() >= 2 ? numAt(a, 1) : 0.0;
             p->addExponentialRamp(val, time);
-            auto* e = getAudioEngine();
-            double t = e ? e->currentTime() : 0.0;
-            syncAudioParamValue(p, p->evaluate(t));
+            paramTimelineChanged(p);
         }
         return self_;
     });
 
     b.def("setTargetAtTime", 3, [](Value self_, std::span<const Value> a) -> Value {
-        HostAudioParam* p = hostAudioParamOf(self_);
+        ParamRef p = hostAudioParamRef(self_);
         if (p && !a.empty()) {
             float target = static_cast<float>(numAt(a, 0));
             double startTime = a.size() >= 2 ? numAt(a, 1) : 0.0;
             float timeConstant = a.size() >= 3 ? static_cast<float>(numAt(a, 2)) : 0.0f;
             p->addSetTarget(target, startTime, timeConstant);
-            auto* e = getAudioEngine();
-            double t = e ? e->currentTime() : 0.0;
-            syncAudioParamValue(p, p->evaluate(t));
+            paramTimelineChanged(p);
         }
         return self_;
     });
 
     b.def("setValueCurveAtTime", 3, [](Value self_, std::span<const Value> a) -> Value {
-        HostAudioParam* p = hostAudioParamOf(self_);
+        ParamRef p = hostAudioParamRef(self_);
         // Reading a plain-array curve allocates; the receiver is returned
         // afterwards, so it is rooted first.
         ev::Persistent self(self_);
@@ -388,37 +316,31 @@ void decorateAudioParamProto(ObjectBuilder& b) {
             if (floatData(a[0], storage, &data, &count) && count > 0) {
                 p->addSetValueCurve(data, count, startTime, duration);
             }
-            auto* e = getAudioEngine();
-            double t = e ? e->currentTime() : 0.0;
-            syncAudioParamValue(p, p->evaluate(t));
+            paramTimelineChanged(p);
         }
         return self.get();
     });
 
     b.def("cancelScheduledValues", 1, [](Value self_, std::span<const Value> a) -> Value {
-        HostAudioParam* p = hostAudioParamOf(self_);
+        ParamRef p = hostAudioParamRef(self_);
         if (p && !a.empty()) {
             p->cancelScheduledValues(numAt(a, 0));
-            auto* e = getAudioEngine();
-            double t = e ? e->currentTime() : 0.0;
-            syncAudioParamValue(p, p->evaluate(t));
+            paramTimelineChanged(p);
         }
         return self_;
     });
 
     b.def("cancelAndHoldAtTime", 1, [](Value self_, std::span<const Value> a) -> Value {
-        HostAudioParam* p = hostAudioParamOf(self_);
+        ParamRef p = hostAudioParamRef(self_);
         if (p && !a.empty()) {
             p->cancelAndHoldAtTime(numAt(a, 0));
-            auto* e = getAudioEngine();
-            double t = e ? e->currentTime() : 0.0;
-            syncAudioParamValue(p, p->evaluate(t));
+            paramTimelineChanged(p);
         }
         return self_;
     });
 
     b.def("getValueAtTime", 1, [](Value self_, std::span<const Value> a) -> Value {
-        HostAudioParam* p = hostAudioParamOf(self_);
+        ParamRef p = hostAudioParamRef(self_);
         if (!p) return ev::undefined();
         double t = a.empty() ? 0.0 : numAt(a, 0);
         return ev::fromDouble(p->evaluate(t));

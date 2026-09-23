@@ -107,7 +107,9 @@ void applyDirectTarget(broaudio::Engine& e, const HostAudioParam& p, float v) {
         case AudioParamTarget::VoiceSustain:        e.setSustainLevel(p.targetId, v); break;
         case AudioParamTarget::VoiceRelease:        e.setReleaseTime(p.targetId, v); break;
         case AudioParamTarget::VoicePitchBend:      e.setVoicePitchBend(p.targetId, v); break;
-        case AudioParamTarget::CompressorThreshold: e.setBusCompressorThreshold(p.targetId, v); break;
+        case AudioParamTarget::CompressorThreshold:
+            e.setBusCompressorThreshold(p.targetId, compressorThresholdLinear(v));
+            break;
         case AudioParamTarget::CompressorRatio:     e.setBusCompressorRatio(p.targetId, v); break;
         case AudioParamTarget::CompressorAttack:    e.setBusCompressorAttack(p.targetId, v * 1000.0f); break;
         case AudioParamTarget::CompressorRelease:   e.setBusCompressorRelease(p.targetId, v * 1000.0f); break;

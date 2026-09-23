@@ -209,6 +209,12 @@ struct LiveFilter {
     float lastFrequency = -1.0f;
 };
 
+// DynamicsCompressorNode.threshold is in dB, as Web Audio defines it; the
+// engine's bus compressor takes its threshold as a linear amplitude (0..1).
+inline float compressorThresholdLinear(float thresholdDb) {
+    return std::pow(10.0f, thresholdDb / 20.0f);
+}
+
 // Registration. The registry keeps weak references (the node owns its
 // LiveSource / LiveFilter) except for playing buffer sources, below.
 void registerLiveSource(const std::shared_ptr<LiveSource>& src);

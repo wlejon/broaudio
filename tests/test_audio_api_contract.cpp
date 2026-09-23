@@ -99,10 +99,50 @@ static void test_compressor_units() {
         near(ctx.getBusCompressorThreshold(0), Math.pow(10, -6 / 20), 1e-4, "threshold automation");
         comp.release.value = 0.5;
         near(ctx.getBusCompressorRelease(0), 500, 1e-3, "live release in ms");
+        ctx.renderBlock(1024);
         osc.stop();
         comp.disconnect();
         expect(!ctx.getBusCompressorEnabled(0), "disconnect disables it");
         ctx.renderBlock(1024);
+        return "SUCCESS";
+    )JS"));
+}
+
+// A BiquadFilterNode owns a master filter slot, but creating one must not
+// change the sound: the slot runs only while the node is connected.
+static void test_biquad_off_until_connected() {
+    runScript("BiquadFilterNode filters only while connected", withPrelude(R"JS(
+        function enabledSlots() {
+            let n = 0;
+            for (let s = 0; s < 4; s++) if (ctx.getBusFilterEnabled(0, s)) n++;
+            return n;
+        }
+        function level() {
+            ctx.renderBlock(4096);
+            return peak(ctx.renderBlock(4096), 0, 4096);
+        }
+        const osc = ctx.createOscillator();
+        osc.frequency.value = 5000;
+        osc.connect(ctx.destination);
+        osc.start();
+        const open = level();
+        expect(open > 1e-3, "5 kHz tone audible: " + open);
+
+        const before = enabledSlots();
+        const f = ctx.createBiquadFilter();       // lowpass 350 Hz
+        expect(enabledSlots() === before, "creating the node leaves its slot off");
+        near(level() / open, 1, 0.1, "creating a lowpass leaves a 5 kHz tone alone");
+
+        f.connect(ctx.destination);
+        expect(enabledSlots() === before + 1, "connect() switches the slot on");
+        const cut = level();
+        expect(cut < open * 0.25, "connected, the lowpass cuts 5 kHz: " + cut + " vs " + open);
+
+        f.disconnect();
+        expect(enabledSlots() === before, "disconnect() switches it off again");
+        near(level() / open, 1, 0.1, "disconnected, the tone is back");
+        osc.stop();
+        ctx.renderBlock(4096);
         return "SUCCESS";
     )JS"));
 }
@@ -121,6 +161,7 @@ int main() {
         ev::RealmScope scope(realm);
         broaudio::api::installAudio();
         test_compressor_units();
+        test_biquad_off_until_connected();
         broaudio::api::shutdownAudio();
     }
     ev::destroyRealm(realm);

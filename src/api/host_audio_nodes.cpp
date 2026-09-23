@@ -683,7 +683,10 @@ Value makeBiquadFilterNodeValue() {
             delete filter;
             return ev::throwError("No filter slots available");
         }
-        eng->setFilterEnabled(filter->slot, true);
+        // Allocated but off: creating a node does not change the sound. The
+        // slot filters the master mix while the node is connected
+        // (AudioNode.connect / disconnect toggle it).
+        eng->setFilterEnabled(filter->slot, false);
         eng->setFilterType(filter->slot, broaudio::BiquadFilter::Type::Lowpass);
         eng->setFilterFrequency(filter->slot, 350.0f);
         eng->setFilterQ(filter->slot, 1.0f);

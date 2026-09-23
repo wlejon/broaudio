@@ -2365,6 +2365,13 @@ void Engine::mixStreamPlayback(ClipPlayback* pb, AudioClip* clip, float* targetB
     const int ch = clip->channels;
     if (cap <= 0) return;
 
+    // A disk-stream seek the worker has not applied yet: what the ring holds
+    // is pre-seek audio the caller already seeked away from. Hold the cursor
+    // and stay silent (not starvation) until the fence below is published.
+    if (clip->streamSeekApplied.load(std::memory_order_acquire) !=
+        clip->streamSeekRequested.load(std::memory_order_relaxed))
+        return;
+
     uint64_t wf = clip->writeFrames.load(std::memory_order_acquire);
     uint64_t rf = pb->playPos.load(std::memory_order_relaxed);
     // Seek fence: a disk-stream seek publishes the writeFrames value at the

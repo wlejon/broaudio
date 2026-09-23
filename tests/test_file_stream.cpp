@@ -3,10 +3,11 @@
 // (prebuffer release, refill, underrun accounting, loop rewind, teardown).
 //
 // Pacing note: the decode worker is a real thread with a 50 ms wake cadence,
-// while renderBlock() consumes at virtual speed. Tests real-sleep between
-// render batches (or poll stats with a deadline) so the worker gets wall time
-// to top the ring up — except the underrun test, which deliberately drains
-// the ring faster than the worker can refill.
+// while renderBlock() consumes at virtual speed. Tests that must not starve
+// the ring feed the mixer only what the worker has already buffered (see
+// renderFed), so they hold however slowly the worker is scheduled — a
+// wall-clock pace starved it under `ctest -j8`. The underrun test drains the
+// ring faster than the worker can refill on purpose.
 
 #include "test_harness.h"
 #include "vorbis_fixtures.h"
@@ -53,9 +54,11 @@ static float rmsRange(const std::vector<float>& v, size_t begin, size_t end)
     return static_cast<float>(std::sqrt(acc / (end - begin)));
 }
 
-// Poll `pred` with real sleeps until it holds or ~5 s elapse.
+// Poll `pred` with real sleeps until it holds or the deadline passes. The
+// deadline only bounds a failing run, so it is generous: a loaded machine
+// may take seconds to schedule the worker.
 template <typename F>
-static bool waitFor(F pred, int timeoutMs = 5000)
+static bool waitFor(F pred, int timeoutMs = 20000)
 {
     auto deadline = std::chrono::steady_clock::now()
                     + std::chrono::milliseconds(timeoutMs);
@@ -66,31 +69,34 @@ static bool waitFor(F pred, int timeoutMs = 5000)
     return true;
 }
 
-// Render `frames` of audio in 512-frame blocks, pacing the drain to ~4x
-// realtime so the 50 ms decode worker always refills the ring before the mixer
-// can empty it. What matters for "no underrun" is the drain RATE, not the sleep
-// granularity: consuming well under a ring's worth (the smallest here is 0.5 s)
-// between two worker wakes holds on any OS timer — a coarser timer only sleeps
-// longer, which is strictly safer. The old code slept a flat 8 ms per 4096
-// frames (~11.6x realtime), which drained the 0.5 s ring faster than the worker
-// woke and starved it wherever sleep_for was honored precisely (e.g. Linux).
-// (The engine mixer itself never sleeps — this pacing lives only in the test.)
-static void renderPaced(Engine& e, int frames)
+// Render `frames` of audio for stream `id` without ever starving it: each
+// block is at most what the ring already holds, and once the ring is empty
+// the next block waits until the worker refills it or the stream has ended
+// (after which rendering on is silence the mixer does not count). A
+// wall-clock pace (the old ~4x realtime) held only while the OS scheduled the
+// worker within a ring's worth of drain, which a loaded machine does not
+// promise. Returns false if the worker made no progress before the deadline.
+static bool renderFed(Engine& e, int id, int frames)
 {
-    const int sr = e.sampleRate();
-    int rendered = 0, sinceSleep = 0;
+    if (!waitFor([&] { return e.isPlaybackPlaying(id); })) return false;
+    int rendered = 0;
     while (rendered < frames) {
-        int n = std::min(512, frames - rendered);
+        const int want = std::min(512, frames - rendered);
+        int n = 0;
+        if (!waitFor([&] {
+                StreamStats st = e.getStreamStats(id);
+                if (st.bufferedFrames > 0) {
+                    n = static_cast<int>(std::min<uint64_t>(st.bufferedFrames, want));
+                    return true;
+                }
+                if (st.finished) { n = want; return true; }
+                return false;
+            }))
+            return false;
         e.renderBlock(n);
         rendered += n;
-        sinceSleep += n;
-        if (sinceSleep >= 4096) {
-            // Sleep a quarter of the batch's real duration → ~4x realtime.
-            std::this_thread::sleep_for(
-                std::chrono::milliseconds(sinceSleep * 1000 / (sr * 4)));
-            sinceSleep = 0;
-        }
     }
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -191,7 +197,7 @@ TEST(file_stream_plays_through_mixer_with_refills) {
     ASSERT_TRUE(waitFor([&] { return e.getStreamStats(id).bufferedFrames >= static_cast<uint64_t>(sr / 4); }));
 
     e.startRecording();
-    renderPaced(e, sr * 3 + sr / 2);  // render past the end of the file
+    ASSERT_TRUE(renderFed(e, id, sr * 3 + sr / 2));  // render past the end of the file
     e.stopRecording();
     auto rec = e.getRecordBuffer();
 
@@ -228,7 +234,9 @@ TEST(file_stream_underrun_counts_and_recovers) {
     std::string err;
     int id = e.createStreamFromFile(WAV_PATH, opts, &err);
     ASSERT_TRUE(id >= 0);
-    ASSERT_TRUE(waitFor([&] { return e.getStreamStats(id).bufferedFrames > 0; }));
+    // Playing, not just buffered: until the worker releases playback the
+    // mixer reads nothing, so there would be nothing to starve.
+    ASSERT_TRUE(waitFor([&] { return e.isPlaybackPlaying(id); }));
 
     e.renderBlock(sr);  // 1 s of virtual audio, no real time for the worker
     StreamStats st = e.getStreamStats(id);
@@ -239,7 +247,7 @@ TEST(file_stream_underrun_counts_and_recovers) {
     uint64_t playedBefore = st.playedFrames;
     ASSERT_TRUE(waitFor([&] { return e.getStreamStats(id).bufferedFrames >= static_cast<uint64_t>(sr / 20); }));
     e.startRecording();
-    renderPaced(e, sr / 2);
+    ASSERT_TRUE(renderFed(e, id, sr / 2));
     e.stopRecording();
     auto rec = e.getRecordBuffer();
     StreamStats st2 = e.getStreamStats(id);
@@ -269,7 +277,7 @@ TEST(file_stream_small_ring_tops_up_after_partial_drain) {
     std::string err;
     int id = e.createStreamFromFile(WAV_PATH, opts, &err);
     ASSERT_TRUE(id >= 0);
-    ASSERT_TRUE(waitFor([&] { return e.getStreamStats(id).bufferedFrames > 0; }));
+    ASSERT_TRUE(waitFor([&] { return e.isPlaybackPlaying(id); }));
 
     // Drain by assorted partial amounts, from both sides of the old dead zone.
     // Whatever the level lands on, the worker must keep the ring at least half
@@ -302,10 +310,8 @@ TEST(file_stream_loops_seamlessly) {
     std::string err;
     int id = e.createStreamFromFile(WAV_PATH, opts, &err);
     ASSERT_TRUE(id >= 0);
-    ASSERT_TRUE(waitFor([&] { return e.getStreamStats(id).bufferedFrames > 0; }));
-
     e.startRecording();
-    renderPaced(e, sr * 3 / 2);
+    ASSERT_TRUE(renderFed(e, id, sr * 3 / 2));
     e.stopRecording();
     auto rec = e.getRecordBuffer();
 
@@ -337,10 +343,8 @@ TEST(file_stream_resamples_vorbis) {
     std::string err;
     int id = e.createStreamFromFile(OGG_PATH, &err);
     ASSERT_TRUE(id >= 0);
-    ASSERT_TRUE(waitFor([&] { return e.getStreamStats(id).bufferedFrames > 0; }));
-
     e.startRecording();
-    renderPaced(e, sr);  // file is 0.5 s — render 1 s
+    ASSERT_TRUE(renderFed(e, id, sr));  // file is 0.5 s — render 1 s
     e.stopRecording();
     auto rec = e.getRecordBuffer();
 

@@ -45,6 +45,16 @@ struct AudioClip {
     // a torn read only skews a diagnostic position query for one block.
     std::atomic<uint64_t> streamFlushFrames{0};
     std::atomic<int64_t>  streamPosBaseFrames{0};
+    // A seek is asynchronous: between Engine::seekPlayback returning and the
+    // worker publishing the fence, the ring still holds pre-seek audio, and a
+    // mixer that kept reading would play (and advance past) audio the caller
+    // just seeked away from. streamSeekRequested counts seekPlayback calls
+    // (bumped after the target is stored); the worker stores into
+    // streamSeekApplied the request count it has honored, after the fence.
+    // While they differ the mixer holds its cursor and emits silence — not
+    // counted as underrun. Both stay 0 for live PCM streams.
+    std::atomic<uint64_t> streamSeekRequested{0};
+    std::atomic<uint64_t> streamSeekApplied{0};
 
     int numFrames() const { return channels > 0 ? static_cast<int>(samples.size()) / channels : 0; }
 };

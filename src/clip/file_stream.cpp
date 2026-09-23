@@ -64,6 +64,9 @@ void FileStreamRunner::join()
 void FileStreamRunner::requestSeek(double seconds)
 {
     seekSeconds_.store(seconds < 0.0 ? 0.0 : seconds, std::memory_order_release);
+    // After the target: a worker that sees this count also sees a target at
+    // least this new (see AudioClip::streamSeekRequested).
+    clip_->streamSeekRequested.fetch_add(1, std::memory_order_acq_rel);
     {
         // Same lock-then-notify as requestStop: a worker between its check
         // and the cv wait must not miss the wake and add a full interval of
@@ -119,8 +122,15 @@ void FileStreamRunner::worker()
     while (!stop_.load(std::memory_order_acquire)) {
         // Apply a pending seek before decoding (also breaks the fill loop
         // below so a seek during a long ring top-up applies promptly).
+        // The request count is read BEFORE the target, so every request it
+        // covers has its target visible to the exchange (or a newer one).
+        const uint64_t seekGen =
+            clip_->streamSeekRequested.load(std::memory_order_acquire);
         double sk = seekSeconds_.exchange(-1.0, std::memory_order_acq_rel);
         if (sk >= 0.0) performSeek(sk);
+        // Unmute the mixer only once the fence is published (performSeek's
+        // release store precedes this one).
+        clip_->streamSeekApplied.store(seekGen, std::memory_order_release);
 
         // Top the ring up until it's full, the file is done, we're told to
         // stop, or a new seek arrives.
@@ -140,7 +150,9 @@ void FileStreamRunner::worker()
         std::unique_lock<std::mutex> lk(mutex_);
         cv_.wait_for(lk, kWakeInterval, [this] {
             return stop_.load(std::memory_order_acquire) ||
-                   seekSeconds_.load(std::memory_order_acquire) >= 0.0;
+                   seekSeconds_.load(std::memory_order_acquire) >= 0.0 ||
+                   clip_->streamSeekRequested.load(std::memory_order_acquire) !=
+                       clip_->streamSeekApplied.load(std::memory_order_relaxed);
         });
     }
 }

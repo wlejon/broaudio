@@ -118,9 +118,13 @@ void registerAudioContextClips(ObjectBuilder& b) {
         return ev::undefined();
     });
 
+    // True while the playback is producing audio: started, its `when`
+    // reached, not paused, not finished or stopped. Answered from the
+    // playback's own state (Engine::getPlaybackState), so a playback at
+    // position 0 counts and a finished one parked at its end does not.
     b.def("isClipPlaying", 1, [](Value, std::span<const Value> a) {
         auto* e = getAudioEngine();
-        return ev::fromBool(e && !a.empty() ? (e->getPlaybackPosition(i32At(a, 0)) > 0.0f) : false);
+        return ev::fromBool(e && !a.empty() && e->isPlaybackPlaying(i32At(a, 0)));
     });
 
     b.def("setClipGain", 2, [](Value, std::span<const Value> a) {

@@ -133,8 +133,12 @@ struct ParamTimelineEvent {
     std::vector<float> curve;
 };
 
+// An AudioParam's state. Shared ownership: the JS AudioParam object's handle
+// holds one reference and every node (or live source) that reads the param
+// holds another, so a node never reads a param the collector has freed — a
+// script can delete or overwrite `node.gain` without leaving the node
+// pointing at nothing.
 struct HostAudioParam {
-    uint32_t tag = kHostAudioParamTag;
     AudioParamTarget target = AudioParamTarget::Generic;
     int targetId = -1;
     float value = 1.0f;
@@ -154,9 +158,17 @@ struct HostAudioParam {
     void cancelAndHoldAtTime(double cancelTime);
 };
 
+using ParamRef = std::shared_ptr<HostAudioParam>;
+
+// What an AudioParam JS object's handle carries.
+struct HostAudioParamHandle {
+    uint32_t tag = kHostAudioParamTag;
+    ParamRef param;
+};
+
 struct HostGainNode {
     HostAudioNode base;
-    HostAudioParam* gainParam = nullptr;
+    ParamRef gainParam;
 };
 
 struct HostOscillatorNode {
@@ -165,6 +177,10 @@ struct HostOscillatorNode {
     std::string type = "sine";
     bool started = false;
     bool stopped = false;
+    ParamRef frequencyParam;
+    ParamRef detuneParam;
+    ParamRef gainParam;
+    ParamRef panParam;
 };
 
 struct HostPeriodicWave {
@@ -179,6 +195,10 @@ struct HostBiquadFilterNode {
     HostAudioNode base;
     int slot = -1;
     std::string type = "lowpass";
+    ParamRef frequencyParam;
+    ParamRef detuneParam;
+    ParamRef qParam;
+    ParamRef gainParam;
 };
 
 struct HostAnalyserNode {
@@ -196,17 +216,27 @@ struct HostAnalyserNode {
     bool hasConnectedInput = false;
 };
 
+// An AudioBuffer's host copy. Shared like HostAudioParam: the JS object's
+// handle and any node the buffer is assigned to each hold a reference.
 struct HostAudioBuffer {
-    uint32_t tag = kHostAudioBufferTag;
     int numberOfChannels = 1;
     int length = 0;
     int sampleRate = 44100;
     std::vector<std::vector<float>> channels;
 };
 
+using BufferRef = std::shared_ptr<HostAudioBuffer>;
+
+struct HostAudioBufferHandle {
+    uint32_t tag = kHostAudioBufferTag;
+    BufferRef buffer;
+};
+
 struct HostAudioBufferSourceNode {
     HostAudioNode base;
-    HostAudioBuffer* buffer = nullptr;
+    BufferRef buffer;
+    ParamRef playbackRateParam;
+    ParamRef detuneParam;
     bool loop = false;
     double loopStart = 0.0;
     double loopEnd = 0.0;
@@ -228,27 +258,29 @@ struct HostPannerNode {
     float coneOuterGain = 0.0f;
     float posX = 0.0f, posY = 0.0f, posZ = 0.0f;
     float orientX = 1.0f, orientY = 0.0f, orientZ = 0.0f;
+    ParamRef positionParams[3];     // positionX / Y / Z
+    ParamRef orientationParams[3];  // orientationX / Y / Z
 };
 
 struct HostStereoPannerNode {
     HostAudioNode base;
-    HostAudioParam* panParam = nullptr;
+    ParamRef panParam;
     float pan = 0.0f;
 };
 
 struct HostDelayNode {
     HostAudioNode base;
-    HostAudioParam* delayTimeParam = nullptr;
+    ParamRef delayTimeParam;
     double maxDelayTime = 1.0;
 };
 
 struct HostDynamicsCompressorNode {
     HostAudioNode base;
-    HostAudioParam* thresholdParam = nullptr;
-    HostAudioParam* kneeParam = nullptr;
-    HostAudioParam* ratioParam = nullptr;
-    HostAudioParam* attackParam = nullptr;
-    HostAudioParam* releaseParam = nullptr;
+    ParamRef thresholdParam;
+    ParamRef kneeParam;
+    ParamRef ratioParam;
+    ParamRef attackParam;
+    ParamRef releaseParam;
     float reduction = 0.0f;
     float envelope = 0.0f;
 };
@@ -261,7 +293,7 @@ struct HostWaveShaperNode {
 
 struct HostConvolverNode {
     HostAudioNode base;
-    HostAudioBuffer* buffer = nullptr;
+    BufferRef buffer;
     bool normalize = true;
 };
 
@@ -373,7 +405,9 @@ void hostMediaStreamAudioSourceNodeDtor(void* p);
 HostAudioContext* hostAudioContextOf(Value v);
 HostAudioNode* hostAudioNodeOf(Value v);
 HostAudioParam* hostAudioParamOf(Value v);
+ParamRef hostAudioParamRef(Value v);
 HostAudioBuffer* hostAudioBufferOf(Value v);
+BufferRef hostAudioBufferRef(Value v);
 HostPeriodicWave* hostPeriodicWaveOf(Value v);
 
 template <typename T>
@@ -561,6 +595,11 @@ inline Value makeUint8Array(const uint8_t* data, size_t count) {
 // ---------------------------------------------------------------------------
 
 void syncAudioParamValue(HostAudioParam* p, float val);
+// A param's state alone (no JS object yet); a node keeps the ref and hands
+// makeAudioParamValue(ref) to the property it exposes the param under.
+ParamRef makeAudioParam(AudioParamTarget target, int targetId,
+                        float initialVal, float minVal, float maxVal, float defaultVal);
+Value makeAudioParamValue(const ParamRef& param);
 Value makeAudioParamValue(AudioParamTarget target, int targetId,
                           float initialVal, float minVal, float maxVal, float defaultVal);
 

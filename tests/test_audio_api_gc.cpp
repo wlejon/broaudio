@@ -234,6 +234,85 @@ static void test_sequencer() {
     )JS"));
 }
 
+// A full collection with nothing of the script's on the stack: drain the
+// microtask checkpoint first so WeakRef targets kept alive for the current
+// job are released, then collect and run deferred finalizers.
+static void collectNow() {
+    ev::drainMicrotasks();
+    ev::collectGarbage();
+    ev::drainFinalizers();
+    ev::collectGarbage();
+}
+
+static void test_param_ownership() {
+    // A node reads its params' state directly (start(), getFrequencyResponse,
+    // the live-param refresh). The JS AudioParam objects are ordinary
+    // properties a script can overwrite; once one is unreachable and
+    // collected, the node must still own the state it reads.
+    runScript("params outlive their JS objects: setup", withPrelude(R"JS(
+        const g = ctx.createGain();
+        g.gain.value = 0.25;
+        const f = ctx.createBiquadFilter();
+        f.frequency.value = 500;
+        f.detune.value = 1200;
+        const src = ctx.createBufferSource();
+        src.playbackRate.value = 2;
+        const buf = ctx.createBuffer(1, 256, ctx.sampleRate);
+        buf.getChannelData(0).fill(0.5);
+        src.buffer = buf;
+        const conv = ctx.createConvolver();
+        conv.buffer = ctx.createBuffer(1, 32, ctx.sampleRate);
+        g.gain = null;
+        f.frequency = null;
+        f.detune = null;
+        src.playbackRate = null;
+        globalThis.__owned = { g, f, src, conv };
+        return "SUCCESS";
+    )JS"));
+    collectNow();
+    runScript("params outlive their JS objects: use", withPrelude(R"JS(
+        // Reuse the freed memory with other values: a dangling read would
+        // now see 7 instead of the node's own 0.25 / 500 Hz.
+        const junk = [];
+        for (let i = 0; i < 2000; i++) { const p = ctx.createGain().gain; p.value = 7; junk.push(p); }
+        const { g, f, src } = globalThis.__owned;
+
+        const osc = ctx.createOscillator();
+        osc.connect(g).connect(ctx.destination);
+        osc.start();
+        const voice = osc.voiceId;
+        expect(voice >= 0, "oscillator voice");
+        const out = ctx.renderBlock(4096);
+        let peak = 0;
+        for (let i = 2048; i < out.length; i++) peak = Math.max(peak, Math.abs(out[i]));
+        osc.stop();
+        ctx.renderBlock(4096);
+
+        const ref = ctx.createOscillator();
+        const g2 = ctx.createGain();
+        g2.gain.value = 0.25;
+        ref.connect(g2).connect(ctx.destination);
+        ref.start();
+        const out2 = ctx.renderBlock(4096);
+        let refPeak = 0;
+        for (let i = 2048; i < out2.length; i++) refPeak = Math.max(refPeak, Math.abs(out2[i]));
+        ref.stop();
+        ctx.renderBlock(4096);
+        near(peak, refPeak, refPeak * 0.05 + 1e-4, "orphaned gain param still 0.25");
+
+        // 500 Hz detuned an octave is a 1 kHz lowpass: |H| = Q = 1 at the
+        // cutoff, about (1k/5k)^2 two octaves above it.
+        const mag = new Float32Array(2), phase = new Float32Array(2);
+        f.getFrequencyResponse(new Float32Array([1000, 5000]), mag, phase);
+        expect(mag[0] > 0.9 && mag[0] < 1.1 && mag[1] > 0.02 && mag[1] < 0.1,
+               "orphaned filter params: " + mag[0] + " / " + mag[1]);
+
+        src.connect(ctx.destination);
+        src.start();
+        return "SUCCESS";
+    )JS"));
+}
+
 static void test_midi() {
     runScript("MidiInput.injectMessage through processEvents", withPrelude(R"JS(
         const midi = ctx.createMidiInput();
@@ -315,6 +394,7 @@ int main() {
         test_buffers();
         test_decode();
         test_nodes();
+        test_param_ownership();
         test_sequencer();
         test_midi();
         test_mic_and_media();

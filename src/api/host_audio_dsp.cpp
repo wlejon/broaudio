@@ -48,10 +48,10 @@ Value makeDelayNodeValue(double maxDelayTime) {
     delay->base.nodeType = AudioNodeType::Delay;
     delay->maxDelayTime = maxDelayTime;
 
+    delay->delayTimeParam = makeAudioParam(AudioParamTarget::DelayTime, -1, 0.0f, 0.0f,
+                                           static_cast<float>(maxDelayTime), 0.0f);
     ObjectBuilder b(g_delayNodeClass.make(delay, hostDelayDtor));
-    Value dt = makeAudioParamValue(AudioParamTarget::DelayTime, -1, 0.0f, 0.0f, static_cast<float>(maxDelayTime), 0.0f);
-    delay->delayTimeParam = hostAudioParamOf(dt);
-    b.set("delayTime", dt);
+    b.set("delayTime", makeAudioParamValue(delay->delayTimeParam));
     return b.get();
 }
 
@@ -127,13 +127,12 @@ Value makeDynamicsCompressorNodeValue() {
     auto* comp = new HostDynamicsCompressorNode();
     comp->base.nodeType = AudioNodeType::DynamicsCompressor;
 
-    // Node first, then each param made and attached in turn: a param held
-    // in a local across the next allocation would be stale.
+    // The node keeps its own reference to each param's state; the JS
+    // AudioParam objects are made and attached one at a time.
     ObjectBuilder b(g_dynamicsCompressorNodeClass.make(comp, hostDynamicsCompressorDtor));
     auto attach = [&b](const char* name, AudioParamTarget target, float init, float lo, float hi) {
-        Value param = makeAudioParamValue(target, -1, init, lo, hi, init);
-        HostAudioParam* p = hostAudioParamOf(param);
-        b.set(name, param);
+        ParamRef p = makeAudioParam(target, -1, init, lo, hi, init);
+        b.set(name, makeAudioParamValue(p));
         return p;
     };
     comp->thresholdParam = attach("threshold", AudioParamTarget::CompressorThreshold, -24.0f, -100.0f, 0.0f);
@@ -200,7 +199,7 @@ void decorateConvolverNodeProto(ObjectBuilder& b) {
                    HostConvolverNode* conv = convolverOf(self_);
                    if (!conv) return ev::undefined();
                    // Unwrap before the write: setProperty moves the heap.
-                   conv->buffer = a.empty() ? nullptr : hostAudioBufferOf(a[0]);
+                   conv->buffer = a.empty() ? nullptr : hostAudioBufferRef(a[0]);
                    ev::setProperty(self_, "_buffer", a.empty() ? ev::null() : a[0]);
                    return ev::undefined();
                });

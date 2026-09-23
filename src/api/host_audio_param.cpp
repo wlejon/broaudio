@@ -7,14 +7,24 @@ namespace broaudio::api {
 HostClass g_audioParamClass;
 
 void hostAudioParamDtor(void* p) {
-    delete static_cast<HostAudioParam*>(p);
+    delete static_cast<HostAudioParamHandle*>(p);
+}
+
+static HostAudioParamHandle* paramHandleOf(Value v) {
+    if (!ev::isObject(v)) return nullptr;
+    auto* h = static_cast<HostAudioParamHandle*>(ev::handleData(v));
+    if (!h || h->tag != kHostAudioParamTag) return nullptr;
+    return h;
 }
 
 HostAudioParam* hostAudioParamOf(Value v) {
-    if (!ev::isObject(v)) return nullptr;
-    auto* p = static_cast<HostAudioParam*>(ev::handleData(v));
-    if (!p || p->tag != kHostAudioParamTag) return nullptr;
-    return p;
+    HostAudioParamHandle* h = paramHandleOf(v);
+    return h ? h->param.get() : nullptr;
+}
+
+ParamRef hostAudioParamRef(Value v) {
+    HostAudioParamHandle* h = paramHandleOf(v);
+    return h ? h->param : nullptr;
 }
 
 void syncAudioParamValue(HostAudioParam* p, float val) {
@@ -415,16 +425,27 @@ void decorateAudioParamProto(ObjectBuilder& b) {
     });
 }
 
-Value makeAudioParamValue(AudioParamTarget target, int targetId,
-                          float initialVal, float minVal, float maxVal, float defaultVal) {
-    auto* param = new HostAudioParam();
+ParamRef makeAudioParam(AudioParamTarget target, int targetId,
+                        float initialVal, float minVal, float maxVal, float defaultVal) {
+    auto param = std::make_shared<HostAudioParam>();
     param->target = target;
     param->targetId = targetId;
     param->value = initialVal;
     param->defaultValue = defaultVal;
     param->minValue = minVal;
     param->maxValue = maxVal;
-    return g_audioParamClass.make(param, hostAudioParamDtor);
+    return param;
+}
+
+Value makeAudioParamValue(const ParamRef& param) {
+    auto* h = new HostAudioParamHandle();
+    h->param = param;
+    return g_audioParamClass.make(h, hostAudioParamDtor);
+}
+
+Value makeAudioParamValue(AudioParamTarget target, int targetId,
+                          float initialVal, float minVal, float maxVal, float defaultVal) {
+    return makeAudioParamValue(makeAudioParam(target, targetId, initialVal, minVal, maxVal, defaultVal));
 }
 
 } // namespace broaudio::api

@@ -319,11 +319,9 @@ void decorateAudioNodeProto(ObjectBuilder& b) {
 Value makeGainNodeValue() {
     auto* gain = new HostGainNode();
     gain->base.nodeType = AudioNodeType::Gain;
-    // The param is rooted across the node's own allocation.
-    ev::Persistent gainParam(makeAudioParamValue(AudioParamTarget::Gain, -1, 1.0f, -3.4e38f, 3.4e38f, 1.0f));
-    gain->gainParam = hostAudioParamOf(gainParam.get());
+    gain->gainParam = makeAudioParam(AudioParamTarget::Gain, -1, 1.0f, -3.4e38f, 3.4e38f, 1.0f);
     ObjectBuilder b(g_gainNodeClass.make(gain, hostGainDtor));
-    b.set("gain", gainParam.get());
+    b.set("gain", makeAudioParamValue(gain->gainParam));
     return b.get();
 }
 
@@ -514,19 +512,24 @@ Value makeOscillatorNodeValue() {
         eng->setFrequency(osc->voiceId, 440.0f);
     }
 
-    ObjectBuilder b(g_oscillatorNodeClass.make(osc, hostOscillatorDtor));
     int voiceId = osc->voiceId;
-    b.set("frequency", makeAudioParamValue(AudioParamTarget::VoiceFrequency, voiceId, 440.0f, 0.0f, 24000.0f, 440.0f));
-    b.set("detune", makeAudioParamValue(AudioParamTarget::VoiceDetune, voiceId, 0.0f, -153600.0f, 153600.0f, 0.0f));
+    osc->frequencyParam = makeAudioParam(AudioParamTarget::VoiceFrequency, voiceId, 440.0f, 0.0f, 24000.0f, 440.0f);
+    osc->detuneParam = makeAudioParam(AudioParamTarget::VoiceDetune, voiceId, 0.0f, -153600.0f, 153600.0f, 0.0f);
+    osc->panParam = makeAudioParam(AudioParamTarget::VoicePan, voiceId, 0.0f, -1.0f, 1.0f, 0.0f);
+    osc->gainParam = makeAudioParam(AudioParamTarget::Gain, voiceId, 1.0f, 0.0f, 10.0f, 1.0f);
+
+    ObjectBuilder b(g_oscillatorNodeClass.make(osc, hostOscillatorDtor));
+    b.set("frequency", makeAudioParamValue(osc->frequencyParam));
+    b.set("detune", makeAudioParamValue(osc->detuneParam));
     // Beyond Web Audio: the oscillator is a synth voice, so its envelope,
     // pan, pitch bend and gain are params too (audio-api.js).
-    b.set("pan", makeAudioParamValue(AudioParamTarget::VoicePan, voiceId, 0.0f, -1.0f, 1.0f, 0.0f));
+    b.set("pan", makeAudioParamValue(osc->panParam));
     b.set("attack", makeAudioParamValue(AudioParamTarget::VoiceAttack, voiceId, 0.01f, 0.0f, 60.0f, 0.01f));
     b.set("decay", makeAudioParamValue(AudioParamTarget::VoiceDecay, voiceId, 0.1f, 0.0f, 60.0f, 0.1f));
     b.set("sustain", makeAudioParamValue(AudioParamTarget::VoiceSustain, voiceId, 1.0f, 0.0f, 1.0f, 1.0f));
     b.set("release", makeAudioParamValue(AudioParamTarget::VoiceRelease, voiceId, 0.04f, 0.0f, 60.0f, 0.04f));
     b.set("pitchBend", makeAudioParamValue(AudioParamTarget::VoicePitchBend, voiceId, 0.0f, -24.0f, 24.0f, 0.0f));
-    b.set("gain", makeAudioParamValue(AudioParamTarget::Gain, voiceId, 1.0f, 0.0f, 10.0f, 1.0f));
+    b.set("gain", makeAudioParamValue(osc->gainParam));
     return b.get();
 }
 
@@ -555,19 +558,10 @@ void decorateBiquadFilterNodeProto(ObjectBuilder& b) {
         HostBiquadFilterNode* filter = filterOf(self_);
         if (!filter || a.size() < 3) return ev::undefined();
 
-        // The param reads allocate, so they come first (off a rooted self);
-        // the typed arrays' bytes are looked up only after the last of them.
-        double f0 = 350.0;
-        double Q = 1.0;
-        double gainDb = 0.0;
-        double detuneCents = 0.0;
-        {
-            ev::Persistent self(self_);
-            if (auto* p = hostAudioParamOf(ev::getProperty(self.get(), "frequency"))) f0 = p->value;
-            if (auto* p = hostAudioParamOf(ev::getProperty(self.get(), "Q"))) Q = p->value;
-            if (auto* p = hostAudioParamOf(ev::getProperty(self.get(), "gain"))) gainDb = p->value;
-            if (auto* p = hostAudioParamOf(ev::getProperty(self.get(), "detune"))) detuneCents = p->value;
-        }
+        double f0 = filter->frequencyParam->value;
+        double Q = filter->qParam->value;
+        double gainDb = filter->gainParam->value;
+        double detuneCents = filter->detuneParam->value;
         // computedFrequency = frequency * 2^(detune / 1200) (Web Audio).
         if (detuneCents != 0.0) f0 *= std::pow(2.0, detuneCents / 1200.0);
 
@@ -705,11 +699,16 @@ Value makeBiquadFilterNodeValue() {
         eng->setFilterGain(filter->slot, 0.0f);
     }
 
+    filter->frequencyParam = makeAudioParam(AudioParamTarget::FilterFrequency, filter->slot, 350.0f, 0.0f, 24000.0f, 350.0f);
+    filter->detuneParam = makeAudioParam(AudioParamTarget::Generic, -1, 0.0f, -153600.0f, 153600.0f, 0.0f);
+    filter->qParam = makeAudioParam(AudioParamTarget::FilterQ, filter->slot, 1.0f, 0.0001f, 1000.0f, 1.0f);
+    filter->gainParam = makeAudioParam(AudioParamTarget::FilterGain, filter->slot, 0.0f, -40.0f, 40.0f, 0.0f);
+
     ObjectBuilder b(g_biquadFilterNodeClass.make(filter, hostBiquadFilterDtor));
-    b.set("frequency", makeAudioParamValue(AudioParamTarget::FilterFrequency, filter->slot, 350.0f, 0.0f, 24000.0f, 350.0f));
-    b.set("detune", makeAudioParamValue(AudioParamTarget::Generic, -1, 0.0f, -153600.0f, 153600.0f, 0.0f));
-    b.set("Q", makeAudioParamValue(AudioParamTarget::FilterQ, filter->slot, 1.0f, 0.0001f, 1000.0f, 1.0f));
-    b.set("gain", makeAudioParamValue(AudioParamTarget::FilterGain, filter->slot, 0.0f, -40.0f, 40.0f, 0.0f));
+    b.set("frequency", makeAudioParamValue(filter->frequencyParam));
+    b.set("detune", makeAudioParamValue(filter->detuneParam));
+    b.set("Q", makeAudioParamValue(filter->qParam));
+    b.set("gain", makeAudioParamValue(filter->gainParam));
     return b.get();
 }
 

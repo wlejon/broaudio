@@ -11,7 +11,7 @@ HostClass g_audioBufferClass;
 HostClass g_audioBufferSourceNodeClass;
 
 void hostAudioBufferDtor(void* p) {
-    delete static_cast<HostAudioBuffer*>(p);
+    delete static_cast<HostAudioBufferHandle*>(p);
 }
 
 void hostAudioBufferSourceDtor(void* p) {
@@ -26,11 +26,21 @@ void hostAudioBufferSourceDtor(void* p) {
     }
 }
 
-HostAudioBuffer* hostAudioBufferOf(Value v) {
+static HostAudioBufferHandle* bufferHandleOf(Value v) {
     if (!ev::isObject(v)) return nullptr;
-    auto* p = static_cast<HostAudioBuffer*>(ev::handleData(v));
-    if (!p || p->tag != kHostAudioBufferTag) return nullptr;
-    return p;
+    auto* h = static_cast<HostAudioBufferHandle*>(ev::handleData(v));
+    if (!h || h->tag != kHostAudioBufferTag) return nullptr;
+    return h;
+}
+
+HostAudioBuffer* hostAudioBufferOf(Value v) {
+    HostAudioBufferHandle* h = bufferHandleOf(v);
+    return h ? h->buffer.get() : nullptr;
+}
+
+BufferRef hostAudioBufferRef(Value v) {
+    HostAudioBufferHandle* h = bufferHandleOf(v);
+    return h ? h->buffer : nullptr;
 }
 
 void decorateAudioBufferProto(ObjectBuilder& b) {
@@ -175,13 +185,14 @@ Value makeAudioBufferValue(int channels, int length, int sampleRate) {
     if (length < 0) length = 0;
     if (sampleRate <= 0) sampleRate = 44100;
 
-    auto* buf = new HostAudioBuffer();
-    buf->numberOfChannels = channels;
-    buf->length = length;
-    buf->sampleRate = sampleRate;
-    buf->channels.resize(channels, std::vector<float>(length, 0.0f));
+    auto* h = new HostAudioBufferHandle();
+    h->buffer = std::make_shared<HostAudioBuffer>();
+    h->buffer->numberOfChannels = channels;
+    h->buffer->length = length;
+    h->buffer->sampleRate = sampleRate;
+    h->buffer->channels.resize(channels, std::vector<float>(length, 0.0f));
 
-    return g_audioBufferClass.make(buf, hostAudioBufferDtor);
+    return g_audioBufferClass.make(h, hostAudioBufferDtor);
 }
 
 void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
@@ -193,7 +204,7 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
                    HostAudioBufferSourceNode* src = bufSrcOf(self_);
                    if (!src) return ev::undefined();
                    // Unwrap before the write: setProperty moves the heap.
-                   src->buffer = a.empty() ? nullptr : hostAudioBufferOf(a[0]);
+                   src->buffer = a.empty() ? nullptr : hostAudioBufferRef(a[0]);
                    ev::setProperty(self_, "_buffer", a.empty() ? ev::null() : a[0]);
                    return ev::undefined();
                });
@@ -443,17 +454,12 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
 
                 // Computed playback rate = playbackRate * 2^(detune / 1200),
                 // as Web Audio defines it.
-                float r = 1.0f;
-                if (auto* rateParam = hostAudioParamOf(ev::getProperty(self.get(), "playbackRate"))) {
-                    r = rateParam->evaluate(curTime);
-                    // Bind the param to the playing instance so a later
-                    // `src.playbackRate.value = x` reaches the engine.
-                    rateParam->targetId = src->playbackId;
-                }
-                if (auto* detuneParam = hostAudioParamOf(ev::getProperty(self.get(), "detune"))) {
-                    float cents = detuneParam->evaluate(curTime);
-                    if (cents != 0.0f) r *= std::pow(2.0f, cents / 1200.0f);
-                }
+                float r = src->playbackRateParam->evaluate(curTime);
+                // Bind the param to the playing instance so a later
+                // `src.playbackRate.value = x` reaches the engine.
+                src->playbackRateParam->targetId = src->playbackId;
+                float cents = src->detuneParam->evaluate(curTime);
+                if (cents != 0.0f) r *= std::pow(2.0f, cents / 1200.0f);
                 if (r != 1.0f) {
                     e->setPlaybackRate(src->playbackId, r);
                 }
@@ -474,9 +480,7 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
         if (e && src->playbackId >= 0) {
             e->stopPlayback(src->playbackId);
             src->playbackId = -1;
-            if (auto* rateParam = hostAudioParamOf(ev::getProperty(self_, "playbackRate"))) {
-                rateParam->targetId = -1;
-            }
+            src->playbackRateParam->targetId = -1;
         }
         src->stopped = true;
         return ev::undefined();
@@ -487,9 +491,12 @@ Value makeAudioBufferSourceNodeValue() {
     auto* src = new HostAudioBufferSourceNode();
     src->base.nodeType = AudioNodeType::BufferSource;
 
+    src->playbackRateParam = makeAudioParam(AudioParamTarget::PlaybackRate, -1, 1.0f, 0.0f, 1024.0f, 1.0f);
+    src->detuneParam = makeAudioParam(AudioParamTarget::PlaybackDetune, -1, 0.0f, -153600.0f, 153600.0f, 0.0f);
+
     ObjectBuilder b(g_audioBufferSourceNodeClass.make(src, hostAudioBufferSourceDtor));
-    b.set("playbackRate", makeAudioParamValue(AudioParamTarget::PlaybackRate, -1, 1.0f, 0.0f, 1024.0f, 1.0f));
-    b.set("detune", makeAudioParamValue(AudioParamTarget::PlaybackDetune, -1, 0.0f, -153600.0f, 153600.0f, 0.0f));
+    b.set("playbackRate", makeAudioParamValue(src->playbackRateParam));
+    b.set("detune", makeAudioParamValue(src->detuneParam));
     return b.get();
 }
 

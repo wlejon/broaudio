@@ -73,16 +73,14 @@ enum class AudioNodeType : uint8_t {
     Generic,
 };
 
+// A node's native half. It holds no JS values: what a node references in JS
+// (its connect() targets, callbacks) lives as properties on its own JS
+// object, where the collector traces it, so a cycle through a node (a
+// feedback loop, a callback closing over the node) is collectable. See
+// connectTargetsOf.
 struct HostAudioNode {
     uint32_t tag = kHostAudioNodeTag;
     AudioNodeType nodeType = AudioNodeType::Generic;
-    std::vector<ev::Persistent> connectedTargets;
-
-    ~HostAudioNode() {
-        for (auto& t : connectedTargets) {
-            t.set(ev::undefined());
-        }
-    }
 };
 
 enum class AudioParamTarget : uint8_t {
@@ -325,10 +323,13 @@ struct HostMidiInput {
 struct HostSequence {
     uint32_t tag = kHostSequenceTag;
     std::unique_ptr<broaudio::Sequence> seq;
-    // One per automation lane, in lane order. Each lane's closure holds its
-    // own reference, so removing a lane (which shifts the indices of the
-    // ones after it) never re-points a later lane at the wrong callback.
-    std::vector<std::shared_ptr<ev::Persistent>> automationCallbacks;
+    // One stable key per automation lane, in lane order. A lane's JS
+    // callback lives on the sequence object as `_laneCbs["k<key>"]` (traced,
+    // so a callback closing over its sequence is collectable), and the
+    // lane's C++ closure captures only the key -- removing a lane shifts the
+    // indices of the ones after it but never re-points them.
+    std::vector<int> laneKeys;
+    int nextLaneKey = 0;
 };
 
 struct HostMediaStream {
@@ -640,10 +641,13 @@ Value makeStereoPannerNodeValue();
 // ramp) is what a source started through the panner is placed at. Reads
 // properties, so it may allocate.
 void syncPannerFromParams(Value pannerObj, double when);
-// Queue the nodes in `targets` for a start()-time graph walk, syncing any
-// PannerNode among them from its params first (may allocate).
-void pushConnectedTargets(const std::vector<ev::Persistent>& targets,
-                          std::vector<HostAudioNode*>& queue, double when);
+// A node's connect() targets, in connection order. They live on the node's
+// JS object as the `_targets` array (a traced edge, not a host root); this
+// reads them back rooted. Allocates.
+std::vector<ev::Persistent> connectTargetsOf(Value nodeObj);
+// Queue the audio nodes `nodeObj` is connected to for a start()-time graph
+// walk, syncing any PannerNode among them from its params first. Allocates.
+void pushConnectedTargets(Value nodeObj, std::vector<ev::Persistent>& queue, double when);
 
 // DSP creators & decorators (host_audio_dsp.cpp)
 void decorateDelayNodeProto(ObjectBuilder& b);
@@ -691,6 +695,8 @@ void registerAudioContextPresets(ObjectBuilder& b);
 // Sequence automation lanes/points beyond addAutomationLane
 // (host_audio_sequence_ext.cpp); called from decorateSequenceProto.
 void decorateSequenceAutomation(ObjectBuilder& b);
+// The property name a lane's callback has in the sequence's `_laneCbs`.
+inline std::string sequenceLaneKey(int key) { return "k" + std::to_string(key); }
 
 // ---------------------------------------------------------------------------
 // File paths and background work (host_audio_io.cpp)

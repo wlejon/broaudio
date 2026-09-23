@@ -300,15 +300,16 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
 
             double curTime = e->currentTime();
             int sr = e->sampleRate();
-            std::vector<HostAudioNode*> queue;
+            std::vector<ev::Persistent> queue;
             std::vector<HostAudioNode*> visited;
-            pushConnectedTargets(src->base.connectedTargets, queue, curTime);
+            pushConnectedTargets(self.get(), queue, curTime);
 
             while (!queue.empty()) {
-                HostAudioNode* cur = queue.back();
+                ev::Persistent curObj = std::move(queue.back());
                 queue.pop_back();
+                HostAudioNode* cur = hostAudioNodeOf(curObj.get());
 
-                if (std::find(visited.begin(), visited.end(), cur) != visited.end()) continue;
+                if (!cur || std::find(visited.begin(), visited.end(), cur) != visited.end()) continue;
                 visited.push_back(cur);
 
                 if (cur->nodeType == AudioNodeType::Gain) {
@@ -424,7 +425,7 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
                     processDynamicsCompressor(comp, interleaved.data(), frames, channels, sr, curTime);
                 }
 
-                pushConnectedTargets(cur->connectedTargets, queue, curTime);
+                pushConnectedTargets(curObj.get(), queue, curTime);
             }
 
             src->clipId = e->createClip(interleaved.data(), frames * channels, channels);

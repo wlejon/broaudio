@@ -175,11 +175,7 @@ void hostMidiInputDtor(void* p) {
 }
 
 void hostSequenceDtor(void* p) {
-    auto* h = static_cast<HostSequence*>(p);
-    for (auto& cb : h->automationCallbacks) {
-        if (cb) cb->set(ev::undefined());
-    }
-    delete h;
+    delete static_cast<HostSequence*>(p);
 }
 
 void hostMediaStreamDtor(void* p) {
@@ -262,6 +258,22 @@ public:
 private:
     HostVoiceAllocator* va_ = nullptr;
 };
+
+// The sequence whose update() is running on this thread. Automation lanes
+// only fire from inside Sequence::update, so a lane's C++ closure finds its
+// JS callback through this -- `_laneCbs["k<key>"]` on the sequence object --
+// instead of holding it as a host root.
+thread_local const ev::Persistent* t_updatingSequence = nullptr;
+
+void callLaneCallback(int key, float val) {
+    if (!t_updatingSequence) return;
+    ev::Persistent cbs(ev::getProperty(t_updatingSequence->get(), "_laneCbs"));
+    if (!ev::isObject(cbs.get())) return;
+    ev::Persistent cb(ev::getProperty(cbs.get(), sequenceLaneKey(key)));
+    if (!ev::isFunction(cb.get())) return;
+    const Value arg = ev::fromDouble(val);
+    ev::call(cb.get(), ev::undefined(), std::span<const Value>(&arg, 1));
+}
 
 // MidiRawEvent.type: the lowercase label the QuickJS binding (and
 // audio-api.js) use, not the enum's number.
@@ -823,10 +835,15 @@ static void decorateSequenceProto(ObjectBuilder& b) {
         if (h && h->seq) {
             double when = !a.empty() ? numAt(a, 0) : (getAudioEngine() ? getAudioEngine()->currentTime() : 0.0);
             // The notes this update fires go through the allocator: run its
-            // voice-setup callback for them.
-            ev::Persistent allocatorObj(ev::getProperty(self, "_allocator"));
+            // voice-setup callback for them. Lanes find their callbacks on
+            // this sequence object.
+            ev::Persistent seqObj(self);
+            ev::Persistent allocatorObj(ev::getProperty(seqObj.get(), "_allocator"));
             ScopedVoiceSetup setup(allocatorObj.get());
+            const ev::Persistent* prev = t_updatingSequence;
+            t_updatingSequence = &seqObj;
             h->seq->update(when);
+            t_updatingSequence = prev;
         }
         return ev::undefined();
     });
@@ -834,14 +851,17 @@ static void decorateSequenceProto(ObjectBuilder& b) {
     b.def("addAutomationLane", 1, [](Value self, std::span<const Value> a) {
         auto* h = hostSequenceOf(self);
         if (!h || !h->seq || a.empty() || !ev::isFunction(a[0])) return ev::fromDouble(-1);
+        ev::Persistent seqObj(self);
         int laneIdx = h->seq->automationLaneCount();
-        auto cb = std::make_shared<ev::Persistent>(a[0]);
-        h->automationCallbacks.push_back(cb);
-        h->seq->addAutomationLane([cb](float val) {
-            if (!ev::isFunction(cb->get())) return;
-            const Value arg = ev::fromDouble(val);
-            ev::call(cb->get(), ev::undefined(), std::span<const Value>(&arg, 1));
-        });
+        int key = h->nextLaneKey++;
+        ev::Persistent cbs(ev::getProperty(seqObj.get(), "_laneCbs"));
+        if (!ev::isObject(cbs.get())) {
+            cbs.set(ev::createObject());
+            ev::setProperty(seqObj.get(), "_laneCbs", cbs.get());
+        }
+        ev::setProperty(cbs.get(), sequenceLaneKey(key), a[0]);
+        h->laneKeys.push_back(key);
+        h->seq->addAutomationLane([key](float val) { callLaneCallback(key, val); });
         return ev::fromDouble(laneIdx);
     });
 

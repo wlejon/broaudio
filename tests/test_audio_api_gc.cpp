@@ -313,6 +313,61 @@ static void test_param_ownership() {
     )JS"));
 }
 
+static void test_cycles_collect() {
+    // Edges the binding keeps for a node -- connect() targets, automation
+    // lane callbacks -- must be edges the collector can see. Held as host
+    // roots, a cycle through them (a feedback loop, a callback closing over
+    // its own sequence) would keep the whole graph alive forever.
+    runScript("reference cycles through nodes: build", withPrelude(R"JS(
+        const a = ctx.createGain(), d = ctx.createDelay(), f = ctx.createBiquadFilter();
+        a.connect(d); d.connect(f); f.connect(a);          // feedback loop
+        a.connect(ctx.destination);
+        globalThis.__loop = new WeakRef(a);
+
+        const seq = ctx.createSequence(ctx.createVoiceAllocator(2));
+        seq.addAutomationLane((v) => { seq.lastValue = v; });  // closes over seq
+        globalThis.__seq = new WeakRef(seq);
+
+        // A connected pair that stays reachable must keep its edge.
+        const keepA = ctx.createGain(), keepB = ctx.createGain();
+        keepA.connect(keepB);
+        globalThis.__kept = keepA;
+        globalThis.__keptTarget = new WeakRef(keepB);
+        return "SUCCESS";
+    )JS"));
+    collectNow();
+    runScript("reference cycles through nodes: collected", withPrelude(R"JS(
+        expect(globalThis.__loop.deref() === undefined, "feedback loop of nodes was collected");
+        expect(globalThis.__seq.deref() === undefined, "sequence with a self-referencing lane was collected");
+        expect(globalThis.__keptTarget.deref() !== undefined, "a reachable node keeps its connect() target alive");
+
+        // And the kept edge still drives the graph walk: gain through it.
+        const g = globalThis.__keptTarget.deref();
+        g.gain.value = 0.5;
+        const osc = ctx.createOscillator();
+        osc.connect(globalThis.__kept);
+        globalThis.__kept.gain.value = 0.5;
+        osc.start();
+        ctx.renderBlock(1024);
+        osc.stop();
+        osc.disconnect();
+
+        // disconnect(target) drops exactly that edge.
+        const other = ctx.createGain();
+        globalThis.__kept.connect(other);
+        globalThis.__kept.disconnect(g);
+        globalThis.__other = new WeakRef(other);
+        return "SUCCESS";
+    )JS"));
+    collectNow();
+    runScript("reference cycles through nodes: disconnect releases", withPrelude(R"JS(
+        expect(globalThis.__keptTarget.deref() === undefined, "a disconnected target is collectable");
+        expect(globalThis.__other.deref() !== undefined, "the other edge survived disconnect(target)");
+        globalThis.__kept = undefined;
+        return "SUCCESS";
+    )JS"));
+}
+
 static void test_midi() {
     runScript("MidiInput.injectMessage through processEvents", withPrelude(R"JS(
         const midi = ctx.createMidiInput();
@@ -395,6 +450,7 @@ int main() {
         test_decode();
         test_nodes();
         test_param_ownership();
+        test_cycles_collect();
         test_sequencer();
         test_midi();
         test_mic_and_media();

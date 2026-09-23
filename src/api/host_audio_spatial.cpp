@@ -166,13 +166,25 @@ void syncPannerFromParams(Value pannerObj, double when) {
     p->orientZ = p->orientationParams[2]->evaluate(when);
 }
 
-void pushConnectedTargets(const std::vector<ev::Persistent>& targets,
-                          std::vector<HostAudioNode*>& queue, double when) {
-    for (const auto& t : targets) {
+std::vector<ev::Persistent> connectTargetsOf(Value nodeObj) {
+    std::vector<ev::Persistent> out;
+    if (!ev::isObject(nodeObj)) return out;
+    ev::Persistent arr(ev::getProperty(nodeObj, "_targets"));
+    if (!ev::isObject(arr.get())) return out;
+    Value lenV = ev::getProperty(arr.get(), "length");
+    if (!ev::isNumber(lenV)) return out;
+    const uint32_t n = static_cast<uint32_t>(ev::toDouble(lenV));
+    out.reserve(n);
+    for (uint32_t i = 0; i < n; ++i) out.emplace_back(ev::getElement(arr.get(), i));
+    return out;
+}
+
+void pushConnectedTargets(Value nodeObj, std::vector<ev::Persistent>& queue, double when) {
+    for (auto& t : connectTargetsOf(nodeObj)) {
         HostAudioNode* n = hostAudioNodeOf(t.get());
         if (!n) continue;
         if (n->nodeType == AudioNodeType::Panner) syncPannerFromParams(t.get(), when);
-        queue.push_back(n);
+        queue.push_back(std::move(t));
     }
 }
 

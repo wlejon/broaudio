@@ -119,33 +119,54 @@ HostPeriodicWave* hostPeriodicWaveOf(Value v) {
     return p;
 }
 
+// Append `target` to the node's `_targets` array (created on first use).
+static void appendConnectTarget(const ev::Persistent& self, const ev::Persistent& target) {
+    ev::Persistent arr(ev::getProperty(self.get(), "_targets"));
+    if (!ev::isObject(arr.get())) {
+        arr.set(ev::makeArray(0));
+        ev::setProperty(self.get(), "_targets", arr.get());
+    }
+    Value lenV = ev::getProperty(arr.get(), "length");
+    const uint32_t n = ev::isNumber(lenV) ? static_cast<uint32_t>(ev::toDouble(lenV)) : 0;
+    ev::setElement(arr.get(), n, target.get());
+}
+
+static bool sameNode(Value a, Value b) {
+    if (ev::toBits(a) == ev::toBits(b)) return true;
+    void* da = ev::handleData(a);
+    return da != nullptr && da == ev::handleData(b);
+}
+
 // connect/disconnect live once on AudioNode.prototype (the class check pins
-// that); broaudio tracks connectedTargets on every AudioNode for graph
-// traversal (e.g. GainNode volume and PannerNode spatialization), and dispatches
-// on the node kind for connections that mean something to the engine:
-// oscillator -> gain remembers the GainNode so start() reads gain.value,
-// biquad connect/disconnect enables/disables its filter slot, and the mic
-// source connecting to an analyser points the analyser at the mic ring.
+// that). Every AudioNode records its connect() targets in its own `_targets`
+// array -- a property, so the collector sees the edge and a feedback loop of
+// otherwise-unreferenced nodes is collectable -- for the start()-time graph
+// walk (GainNode volume, PannerNode spatialization, ...). connect also
+// dispatches on the node kind for connections that mean something to the
+// engine: biquad connect/disconnect enables/disables its filter slot, and
+// the mic source connecting to an analyser points the analyser at the mic
+// ring.
 void decorateAudioNodeProto(ObjectBuilder& b) {
     b.def("connect", 3, [](Value self_, std::span<const Value> a) -> Value {
         if (a.empty()) return ev::throwTypeError("AudioNode.connect: destination argument required");
-        HostAudioNode* node = hostAudioNodeOf(self_);
+        ev::Persistent self(self_);
+        HostAudioNode* node = hostAudioNodeOf(self.get());
         if (node) {
-            node->connectedTargets.emplace_back(a[0]);
+            appendConnectTarget(self, ev::Persistent(a[0]));
             switch (node->nodeType) {
             case AudioNodeType::Oscillator:
                 if (nodeOfKind<HostGainNode>(a[0], AudioNodeType::Gain)) {
-                    ev::setProperty(self_, "_connectedGain", a[0]);
+                    ev::setProperty(self.get(), "_connectedGain", a[0]);
                 }
                 break;
             case AudioNodeType::BiquadFilter:
-                if (HostBiquadFilterNode* filter = filterOf(self_)) {
+                if (HostBiquadFilterNode* filter = filterOf(self.get())) {
                     auto* eng = getAudioEngine();
                     if (eng && filter->slot >= 0) eng->setFilterEnabled(filter->slot, true);
                 }
                 break;
             case AudioNodeType::Delay:
-                if (HostDelayNode* delay = delayOf(self_)) {
+                if (HostDelayNode* delay = delayOf(self.get())) {
                     auto* eng = getAudioEngine();
                     if (eng) {
                         eng->setDelayEnabled(true);
@@ -156,7 +177,7 @@ void decorateAudioNodeProto(ObjectBuilder& b) {
                 }
                 break;
             case AudioNodeType::DynamicsCompressor:
-                if (HostDynamicsCompressorNode* comp = compressorOf(self_)) {
+                if (HostDynamicsCompressorNode* comp = compressorOf(self.get())) {
                     auto* eng = getAudioEngine();
                     if (eng) {
                         eng->setBusCompressorEnabled(Engine::MASTER_BUS_ID, true);
@@ -172,7 +193,7 @@ void decorateAudioNodeProto(ObjectBuilder& b) {
                 }
                 break;
             case AudioNodeType::WaveShaper:
-                if (HostWaveShaperNode* ws = waveShaperOf(self_)) {
+                if (HostWaveShaperNode* ws = waveShaperOf(self.get())) {
                     auto* eng = getAudioEngine();
                     if (eng) {
                         eng->setBusDistortionEnabled(Engine::MASTER_BUS_ID, true);
@@ -182,7 +203,7 @@ void decorateAudioNodeProto(ObjectBuilder& b) {
                 }
                 break;
             case AudioNodeType::Convolver:
-                if (HostConvolverNode* conv = convolverOf(self_)) {
+                if (HostConvolverNode* conv = convolverOf(self.get())) {
                     auto* eng = getAudioEngine();
                     if (eng) {
                         eng->setBusReverbEnabled(Engine::MASTER_BUS_ID, true);
@@ -236,29 +257,27 @@ void decorateAudioNodeProto(ObjectBuilder& b) {
     });
 
     b.def("disconnect", 1, [](Value self_, std::span<const Value> a) -> Value {
-        HostAudioNode* node = hostAudioNodeOf(self_);
+        ev::Persistent self(self_);
+        HostAudioNode* node = hostAudioNodeOf(self.get());
         if (node) {
-            if (a.empty() || ev::isUndefined(a[0])) {
-                for (auto& t : node->connectedTargets) {
+            const bool all = a.empty() || ev::isUndefined(a[0]);
+            std::vector<ev::Persistent> kept;
+            for (auto& t : connectTargetsOf(self.get())) {
+                if (all || sameNode(t.get(), a[0])) {
                     if (HostAnalyserNode* an = analyserOf(t.get())) an->hasConnectedInput = false;
-                    t.set(ev::undefined());
-                }
-                node->connectedTargets.clear();
-            } else {
-                for (auto it = node->connectedTargets.begin(); it != node->connectedTargets.end();) {
-                    if (it->get() == a[0] || ev::handleData(it->get()) == ev::handleData(a[0])) {
-                        if (HostAnalyserNode* an = analyserOf(it->get())) an->hasConnectedInput = false;
-                        it->set(ev::undefined());
-                        it = node->connectedTargets.erase(it);
-                    } else {
-                        ++it;
-                    }
+                } else {
+                    kept.push_back(std::move(t));
                 }
             }
+            ev::Persistent arr(ev::makeArray(0));
+            for (size_t i = 0; i < kept.size(); ++i) {
+                arr.set(ev::setElement(arr.get(), static_cast<uint32_t>(i), kept[i].get()));
+            }
+            ev::setProperty(self.get(), "_targets", arr.get());
             if (node->nodeType == AudioNodeType::Oscillator) {
-                ev::setProperty(self_, "_connectedGain", ev::undefined());
+                ev::setProperty(self.get(), "_connectedGain", ev::undefined());
             } else if (node->nodeType == AudioNodeType::BiquadFilter) {
-                if (HostBiquadFilterNode* filter = filterOf(self_)) {
+                if (HostBiquadFilterNode* filter = filterOf(self.get())) {
                     auto* eng = getAudioEngine();
                     if (eng && filter->slot >= 0) eng->setFilterEnabled(filter->slot, false);
                 }
@@ -396,24 +415,18 @@ void decorateOscillatorNodeProto(ObjectBuilder& b) {
         auto* eng = getAudioEngine();
         if (!eng || osc->voiceId < 0) return ev::undefined();
         double when = hasArg(a, 0) ? numAt(a, 0) : eng->currentTime();
-        Value connGain = ev::getProperty(self_, "_connectedGain");
-        if (ev::isObject(connGain)) {
-            Value gainParam = ev::getProperty(connGain, "gain");
-            if (ev::isObject(gainParam)) {
-                Value v = ev::getProperty(gainParam, "value");
-                if (ev::isNumber(v)) eng->setGain(osc->voiceId, static_cast<float>(ev::toDouble(v)));
-            }
-            // `osc` is host memory and does not move; self_ is stale from
-            // here on and is not read again.
-        }
+        // `osc` is host memory and does not move; the node object is read
+        // through a Persistent because the walk below allocates.
+        ev::Persistent self(self_);
 
-        std::vector<HostAudioNode*> queue;
+        std::vector<ev::Persistent> queue;
         std::vector<HostAudioNode*> visited;
-        pushConnectedTargets(osc->base.connectedTargets, queue, when);
+        pushConnectedTargets(self.get(), queue, when);
         while (!queue.empty()) {
-            HostAudioNode* cur = queue.back();
+            ev::Persistent curObj = std::move(queue.back());
             queue.pop_back();
-            if (std::find(visited.begin(), visited.end(), cur) != visited.end()) continue;
+            HostAudioNode* cur = hostAudioNodeOf(curObj.get());
+            if (!cur || std::find(visited.begin(), visited.end(), cur) != visited.end()) continue;
             visited.push_back(cur);
 
             if (cur->nodeType == AudioNodeType::Gain) {
@@ -462,7 +475,7 @@ void decorateOscillatorNodeProto(ObjectBuilder& b) {
                 eng->setBusReverbMix(Engine::MASTER_BUS_ID, 1.0f);
             }
 
-            pushConnectedTargets(cur->connectedTargets, queue, when);
+            pushConnectedTargets(curObj.get(), queue, when);
         }
 
         eng->startVoice(osc->voiceId, when);

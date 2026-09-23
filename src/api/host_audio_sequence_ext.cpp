@@ -36,8 +36,11 @@ void decorateSequenceAutomation(ObjectBuilder& b) {
         if (!a.empty() && laneInRange(h, i32At(a, 0))) {
             int idx = i32At(a, 0);
             h->seq->removeAutomationLane(idx);
-            if (idx < static_cast<int>(h->automationCallbacks.size())) {
-                h->automationCallbacks.erase(h->automationCallbacks.begin() + idx);
+            if (idx < static_cast<int>(h->laneKeys.size())) {
+                int key = h->laneKeys[static_cast<size_t>(idx)];
+                h->laneKeys.erase(h->laneKeys.begin() + idx);
+                Value cbs = ev::getProperty(self, "_laneCbs");
+                if (ev::isObject(cbs)) ev::deleteProperty(cbs, sequenceLaneKey(key));
             }
         }
         return ev::undefined();
@@ -47,7 +50,8 @@ void decorateSequenceAutomation(ObjectBuilder& b) {
         auto* h = hostSequenceOf(self);
         if (h && h->seq) {
             h->seq->clearAutomationLanes();
-            h->automationCallbacks.clear();
+            h->laneKeys.clear();
+            ev::deleteProperty(self, "_laneCbs");
         }
         return ev::undefined();
     });

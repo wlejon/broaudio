@@ -260,8 +260,8 @@ static void test_validation_and_defaults() {
         osc.connect(g.gain);
         g.connect(ctx.destination);
         expectThrows(() => osc.start(-1), RangeError, "start(-1)");
-        expectThrows(() => osc.stop(-1), RangeError, "stop(-1)");
         osc.start();                                   // the rejected start did not count
+        expectThrows(() => osc.stop(-1), RangeError, "stop(-1)");
         ctx.renderBlock(256);
         osc.stop();
         ctx.renderBlock(256);
@@ -320,7 +320,23 @@ static void test_buffer_source_stop_and_ended() {
             for (let i = 0; i < d.length; i++) d[i] = 0.5 * Math.sin(2 * Math.PI * 1000 * i / sr);
             return b;
         }
-        expectThrows(() => ctx.createBufferSource().stop(-1), RangeError, "stop(-1)");
+        // stop() before start() is Web Audio's InvalidStateError (a
+        // DOMException where the realm has one, else an Error of that name),
+        // checked before the argument.
+        function expectInvalidState(fn, what) {
+            let err = null;
+            try { fn(); } catch (e) { err = e; }
+            expect(err !== null, what + ": did not throw");
+            expect(err.name === "InvalidStateError", what + ": threw " + err);
+            if (typeof DOMException === "function") expect(err instanceof DOMException, what + ": not a DOMException");
+        }
+        expectInvalidState(() => ctx.createBufferSource().stop(), "unstarted buffer source stop()");
+        expectInvalidState(() => ctx.createBufferSource().stop(-1), "unstarted buffer source stop(-1)");
+        expectInvalidState(() => ctx.createOscillator().stop(), "unstarted oscillator stop()");
+        const started = ctx.createBufferSource();
+        started.start();                           // no buffer: started all the same
+        expectThrows(() => started.stop(-1), RangeError, "stop(-1)");
+        started.stop();
 
         // Scheduled stop 0.1 s in: sound up to that frame, silence after.
         const src = ctx.createBufferSource();

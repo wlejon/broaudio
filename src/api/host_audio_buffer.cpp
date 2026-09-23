@@ -546,6 +546,9 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
     b.def("stop", 1, [](Value self_, std::span<const Value> a) -> Value {
         HostAudioBufferSourceNode* src = bufSrcOf(self_);
         if (!src) return ev::undefined();
+        if (!src->started) {
+            return throwInvalidStateError("AudioBufferSourceNode.stop: the node has not been started");
+        }
         const double when = hasArg(a, 0) ? numAt(a, 0) : 0.0;
         if (!(when >= 0.0)) return ev::throwRangeError("stop: when must be a non-negative number");
         auto* e = getAudioEngine();

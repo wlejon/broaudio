@@ -578,6 +578,9 @@ void decorateOscillatorNodeProto(ObjectBuilder& b) {
     b.def("stop", 1, [](Value self_, std::span<const Value> a) -> Value {
         HostOscillatorNode* osc = oscOf(self_);
         if (!osc) return ev::undefined();
+        if (!osc->started) {
+            return throwInvalidStateError("OscillatorNode.stop: the node has not been started");
+        }
         if (hasArg(a, 0) && !(numAt(a, 0) >= 0.0)) {
             return ev::throwRangeError("OscillatorNode.stop: when must be a non-negative number");
         }

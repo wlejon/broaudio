@@ -579,6 +579,36 @@ inline bool boolAt(std::span<const Value> args, size_t i) {
     return ev::toBool(args[i]);
 }
 
+// Throw Web Audio's InvalidStateError: a DOMException when the realm has
+// the constructor (bro installs one), otherwise an Error whose name is
+// 'InvalidStateError'. Returns undefined with the exception pending, for a
+// native to return straight away.
+inline Value throwInvalidStateError(const std::string& message) {
+    ev::GlobalValue dom = ev::globalValue("DOMException");
+    if (dom.found && ev::isFunction(dom.value)) {
+        ev::Persistent ctor(dom.value);
+        ev::Persistent msg(ev::fromUtf8(message));
+        ev::Persistent name(ev::fromUtf8("InvalidStateError"));
+        const Value args[2] = {msg.get(), name.get()};
+        ev::CallResult r = ev::construct(ctor.get(), std::span<const Value>(args, 2));
+        if (!r.thrown) {
+            ev::throwValue(r.value);
+            return ev::undefined();
+        }
+    }
+    ev::GlobalValue errCtor = ev::globalValue("Error");
+    ev::Persistent ctor(errCtor.value);
+    ev::Persistent msg(ev::fromUtf8(message));
+    const Value arg = msg.get();
+    ev::CallResult r = ev::construct(ctor.get(), std::span<const Value>(&arg, 1));
+    if (r.thrown) return ev::throwError(message);
+    ev::Persistent err(r.value);
+    ev::Persistent name(ev::fromUtf8("InvalidStateError"));
+    ev::setProperty(err.get(), "name", name.get());
+    ev::throwValue(err.get());
+    return ev::undefined();
+}
+
 inline bool hasArg(std::span<const Value> args, size_t i) {
     return i < args.size() && !ev::isUndefined(args[i]);
 }

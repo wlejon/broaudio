@@ -37,7 +37,17 @@ void registerAudioContextClips(ObjectBuilder& b) {
                 }
             }
 
-            int clipId = e->createClip(interleaved.data(), frames * channels, channels);
+            // An AudioBuffer carries its rate: resample to the engine's so the
+            // clip plays at the buffer's pitch, as a buffer source does.
+            const int srcRate = hostBuf->sampleRate;
+            const int engRate = e->sampleRate();
+            if (srcRate > 0 && srcRate != engRate) {
+                std::vector<float> resampled =
+                    broaudio::resample(interleaved.data(), frames, channels, srcRate, engRate);
+                if (!resampled.empty()) interleaved = std::move(resampled);
+            }
+
+            int clipId = e->createClip(interleaved.data(), static_cast<int>(interleaved.size()), channels);
             return ev::fromDouble(clipId);
         }
 

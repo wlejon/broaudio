@@ -236,6 +236,50 @@ static void test_typed_array_args() {
     )JS"));
 }
 
+// Argument validation and getter results the docs promise.
+static void test_validation_and_defaults() {
+    runScript("connect/start validation, buffer getters, buffer sample rates", withPrelude(R"JS(
+        const src = ctx.createBufferSource();
+        const conv = ctx.createConvolver();
+        expect(src.buffer === null, "AudioBufferSourceNode.buffer starts null, got " + src.buffer);
+        expect(conv.buffer === null, "ConvolverNode.buffer starts null, got " + conv.buffer);
+        expectThrows(() => { src.buffer = {}; }, TypeError, "buffer = {} on a buffer source");
+        expectThrows(() => { conv.buffer = new Float32Array(4); }, TypeError, "buffer = Float32Array on a convolver");
+        const b = ctx.createBuffer(1, 64, sr);
+        src.buffer = b;
+        expect(src.buffer === b, "buffer reads back");
+        src.buffer = null;
+        expect(src.buffer === null, "buffer = null clears it");
+
+        const osc = ctx.createOscillator();
+        expectThrows(() => osc.connect({}), TypeError, "connect({})");
+        expectThrows(() => osc.connect(undefined), TypeError, "connect(undefined)");
+        expectThrows(() => osc.connect(42), TypeError, "connect(42)");
+        const g = ctx.createGain();
+        expect(osc.connect(g) === g, "connect returns its destination");
+        osc.connect(g.gain);
+        g.connect(ctx.destination);
+        expectThrows(() => osc.start(-1), RangeError, "start(-1)");
+        expectThrows(() => osc.stop(-1), RangeError, "stop(-1)");
+        osc.start();                                   // the rejected start did not count
+        ctx.renderBlock(256);
+        osc.stop();
+        ctx.renderBlock(256);
+
+        expect(ctx.createBuffer(1, 10).sampleRate === sr, "createBuffer defaults to the context rate");
+        expect(new AudioBuffer({ length: 10 }).sampleRate === sr, "new AudioBuffer defaults to the context rate");
+        expect(ctx.createBuffer(1, 10, 22050).sampleRate === 22050, "an explicit rate is kept");
+
+        // createClip(AudioBuffer) honours the buffer's rate.
+        const half = ctx.createBuffer(1, 1000, sr / 2);
+        const clip = ctx.createClip(half);
+        const n = ctx.getClipSampleCount(clip);
+        near(n, 2000, 4, "a half-rate buffer becomes a clip of twice the frames");
+        ctx.deleteClip(clip);
+        return "SUCCESS";
+    )JS"));
+}
+
 int main() {
     std::cout << "Running broaudio API contract tests..." << std::endl;
     const char* stress = std::getenv("BRONZE_GC_STRESS");
@@ -252,6 +296,7 @@ int main() {
         test_compressor_units();
         test_biquad_off_until_connected();
         test_typed_array_args();
+        test_validation_and_defaults();
         broaudio::api::shutdownAudio();
     }
     ev::destroyRealm(realm);

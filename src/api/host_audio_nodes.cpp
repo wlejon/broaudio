@@ -190,7 +190,10 @@ static void driveMasterEffect(broaudio::Engine& eng, HostAudioNode* node, double
 // ring.
 void decorateAudioNodeProto(ObjectBuilder& b) {
     b.def("connect", 3, [](Value self_, std::span<const Value> a) -> Value {
-        if (a.empty()) return ev::throwTypeError("AudioNode.connect: destination argument required");
+        if (!hasArg(a, 0)) return ev::throwTypeError("AudioNode.connect: destination argument required");
+        if (!hostAudioNodeOf(a[0]) && !hostAudioParamOf(a[0])) {
+            return ev::throwTypeError("AudioNode.connect: destination must be an AudioNode or AudioParam");
+        }
         ev::Persistent self(self_);
         HostAudioNode* node = hostAudioNodeOf(self.get());
         if (node) {
@@ -388,6 +391,9 @@ void decorateOscillatorNodeProto(ObjectBuilder& b) {
         HostOscillatorNode* osc = oscOf(self_);
         if (!osc) return ev::undefined();
         if (osc->started) return ev::throwError("OscillatorNode cannot be started more than once");
+        if (hasArg(a, 0) && !(numAt(a, 0) >= 0.0)) {
+            return ev::throwRangeError("OscillatorNode.start: when must be a non-negative number");
+        }
         osc->started = true;
         auto* eng = getAudioEngine();
         if (!eng || osc->voiceId < 0) return ev::undefined();
@@ -448,6 +454,9 @@ void decorateOscillatorNodeProto(ObjectBuilder& b) {
     b.def("stop", 1, [](Value self_, std::span<const Value> a) -> Value {
         HostOscillatorNode* osc = oscOf(self_);
         if (!osc) return ev::undefined();
+        if (hasArg(a, 0) && !(numAt(a, 0) >= 0.0)) {
+            return ev::throwRangeError("OscillatorNode.stop: when must be a non-negative number");
+        }
         osc->stopped = true;
         auto* eng = getAudioEngine();
         if (eng && osc->voiceId >= 0) {

@@ -168,8 +168,9 @@ void decorateAudioContextProto(ObjectBuilder& b) {
     });
 
     b.def("createOscillator", 0, [](Value self_, std::span<const Value>) {
-        Value oscVal = makeOscillatorNodeValue();
+        // The receiver is a plain copy: unwrap it before the node allocates.
         HostAudioContext* ctx = hostAudioContextOf(self_);
+        Value oscVal = makeOscillatorNodeValue();
         if (ctx) {
             HostOscillatorNode* osc = oscOf(oscVal);
             if (osc && osc->voiceId >= 0) {
@@ -216,7 +217,10 @@ void decorateAudioContextProto(ObjectBuilder& b) {
     b.def("createBuffer", 3, [](Value, std::span<const Value> a) {
         int ch = a.size() >= 1 ? i32At(a, 0) : 1;
         int len = a.size() >= 2 ? i32At(a, 1) : 0;
-        int sr = a.size() >= 3 ? i32At(a, 2) : 44100;
+        // A buffer plays at its own rate, so a missing rate is the context's
+        // (no resampling), not a fixed 44100.
+        auto* e = getAudioEngine();
+        int sr = hasArg(a, 2) ? i32At(a, 2) : (e ? e->sampleRate() : 44100);
         return makeAudioBufferValue(ch, len, sr);
     });
 
@@ -722,7 +726,8 @@ void installAudioGlobals() {
     g_audioBufferClass.install(
         "AudioBuffer", 1,
         [](Value, std::span<const Value> a) -> Value {
-            int length = 0, channels = 1, sampleRate = 44100;
+            auto* eng = getAudioEngine();
+            int length = 0, channels = 1, sampleRate = eng ? eng->sampleRate() : 44100;
             if (!a.empty() && ev::isObject(a[0])) {
                 // Read the options off a[0] (rooted) each time: a getProperty
                 // may move the object.

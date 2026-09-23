@@ -238,14 +238,19 @@ Value makeAudioBufferValue(int channels, int length, int sampleRate) {
 void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
     b.accessor("buffer",
                [](Value self_, std::span<const Value>) {
-                   return ev::getProperty(self_, "_buffer");
+                   Value v = ev::getProperty(self_, "_buffer");
+                   return ev::isUndefined(v) ? ev::null() : v;
                },
                [](Value self_, std::span<const Value> a) {
                    HostAudioBufferSourceNode* src = bufSrcOf(self_);
                    if (!src) return ev::undefined();
+                   const bool clear = a.empty() || ev::isNull(a[0]) || ev::isUndefined(a[0]);
+                   if (!clear && !hostAudioBufferOf(a[0])) {
+                       return ev::throwTypeError("AudioBufferSourceNode.buffer must be an AudioBuffer or null");
+                   }
                    // Unwrap before the write: setProperty moves the heap.
-                   src->buffer = a.empty() ? nullptr : hostAudioBufferRef(a[0]);
-                   ev::setProperty(self_, "_buffer", a.empty() ? ev::null() : a[0]);
+                   src->buffer = clear ? nullptr : hostAudioBufferRef(a[0]);
+                   ev::setProperty(self_, "_buffer", clear ? ev::null() : a[0]);
                    return ev::undefined();
                });
 

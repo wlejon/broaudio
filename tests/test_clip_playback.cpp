@@ -474,4 +474,186 @@ TEST(scheduled_clips_join_gaplessly_at_the_seam) {
     PASS();
 }
 
+// ---------------------------------------------------------------------------
+// ClipPlayOptions: offset, loop window, duration (Web Audio start() semantics)
+// ---------------------------------------------------------------------------
+
+static int positionFrames(Engine& e, int pid) {
+    return static_cast<int>(std::lround(e.getPlaybackPositionSeconds(pid) * e.sampleRate()));
+}
+
+static int makeSilentClip(Engine& e, int frames) {
+    std::vector<float> v(frames, 0.25f);
+    return e.createClip(v.data(), frames, 1);
+}
+
+TEST(play_options_offset_starts_mid_clip) {
+    Engine e; e.initHeadless();
+    int cid = makeSilentClip(e, 4000);
+    Engine::ClipPlayOptions o;
+    o.offsetFrames = 3000;
+    int pid = e.playClip(cid, o);
+    ASSERT_TRUE(pid >= 0);
+    e.renderBlock(512);
+    ASSERT_EQ(positionFrames(e, pid), 3512);
+    PASS();
+}
+
+TEST(play_options_loop_window_wraps_between_points) {
+    Engine e; e.initHeadless();
+    int cid = makeSilentClip(e, 4000);
+    Engine::ClipPlayOptions o;
+    o.loop = true;
+    o.loopStartFrame = 1000;
+    o.loopEndFrame = 2000;
+    int pid = e.playClip(cid, o);
+    // 0..2000 once, then 1000..2000 repeating: 5300 frames lands on 1300.
+    e.renderBlock(5300);
+    ASSERT_EQ(positionFrames(e, pid), 1300);
+    ASSERT_TRUE(e.getPlaybackState(pid) == Engine::PlaybackState::Playing);
+    PASS();
+}
+
+TEST(play_options_offset_past_loop_end_wraps_into_window) {
+    Engine e; e.initHeadless();
+    int cid = makeSilentClip(e, 4000);
+    Engine::ClipPlayOptions o;
+    o.loop = true;
+    o.offsetFrames = 3500;
+    o.loopStartFrame = 1000;
+    o.loopEndFrame = 2000;
+    int pid = e.playClip(cid, o);
+    e.renderBlock(200);  // 3500 wraps to 1500 on the first frame
+    ASSERT_EQ(positionFrames(e, pid), 1700);
+    PASS();
+}
+
+TEST(play_options_invalid_loop_window_loops_whole_clip) {
+    Engine e; e.initHeadless();
+    int cid = makeSilentClip(e, 4000);
+    Engine::ClipPlayOptions o;
+    o.loop = true;
+    o.loopStartFrame = 2000;
+    o.loopEndFrame = 1000;  // inverted: whole clip
+    int pid = e.playClip(cid, o);
+    e.renderBlock(4500);
+    ASSERT_EQ(positionFrames(e, pid), 500);
+    PASS();
+}
+
+TEST(play_options_duration_ends_playback) {
+    Engine e; e.initHeadless();
+    int cid = makeSilentClip(e, 4000);
+    Engine::ClipPlayOptions o;
+    o.durationFrames = 1000;
+    int pid = e.playClip(cid, o);
+    e.renderBlock(512);
+    ASSERT_TRUE(e.getPlaybackState(pid) == Engine::PlaybackState::Playing);
+    e.renderBlock(1024);
+    ASSERT_TRUE(e.getPlaybackState(pid) == Engine::PlaybackState::Finished);
+    PASS();
+}
+
+TEST(play_options_duration_counts_across_loops_and_rate) {
+    Engine e; e.initHeadless();
+    int cid = makeSilentClip(e, 4000);
+    Engine::ClipPlayOptions o;
+    o.loop = true;
+    o.loopStartFrame = 0;
+    o.loopEndFrame = 500;
+    o.rate = 2.0f;
+    o.durationFrames = 1200;  // 1200 content frames at rate 2 = 600 output frames
+    int pid = e.playClip(cid, o);
+    e.renderBlock(590);
+    ASSERT_TRUE(e.getPlaybackState(pid) == Engine::PlaybackState::Playing);
+    e.renderBlock(20);
+    ASSERT_TRUE(e.getPlaybackState(pid) == Engine::PlaybackState::Finished);
+    PASS();
+}
+
+TEST(play_options_duration_silences_output_after_budget) {
+    Engine e; e.initHeadless();
+    int sr = e.sampleRate();
+    auto sine = makeSineMono(sr, 440.0f, sr);
+    int cid = e.createClip(sine.data(), (int)sine.size(), 1);
+    Engine::ClipPlayOptions o;
+    o.loop = true;
+    o.durationFrames = 1000;
+    e.startRecording();
+    e.playClip(cid, o);
+    e.renderBlock(4096);
+    e.stopRecording();
+    auto out = e.getRecordBuffer();
+    ASSERT_TRUE((int)out.size() >= 4096);
+    float early = 0.0f, late = 0.0f;
+    for (int i = 0; i < 1000; i++) early = std::max(early, std::fabs(out[i]));
+    // Past the budget plus the limiter's lookahead and release tail.
+    for (int i = 3000; i < 4096; i++) late = std::max(late, std::fabs(out[i]));
+    ASSERT_GT(early, 0.05f);
+    ASSERT_LT(late, 1e-4f);
+    PASS();
+}
+
+TEST(set_playback_loop_points_moves_window_live) {
+    Engine e; e.initHeadless();
+    int cid = makeSilentClip(e, 4000);
+    Engine::ClipPlayOptions o;
+    o.loop = true;
+    int pid = e.playClip(cid, o);
+    e.renderBlock(100);
+    e.setPlaybackLoopPoints(pid, 0, 200);
+    e.renderBlock(250);  // 100..200, then 0..150
+    ASSERT_EQ(positionFrames(e, pid), 150);
+    PASS();
+}
+
+TEST(play_options_rejects_unknown_clip) {
+    Engine e; e.initHeadless();
+    Engine::ClipPlayOptions o;
+    ASSERT_EQ(e.playClip(9999, o), -1);
+    PASS();
+}
+
+// ---------------------------------------------------------------------------
+// getPlaybackState: answered from the playback, not guessed from the cursor
+// ---------------------------------------------------------------------------
+
+TEST(playback_state_tracks_lifecycle) {
+    Engine e; e.initHeadless();
+    int sr = e.sampleRate();
+    int cid = makeSilentClip(e, 1000);
+    ASSERT_TRUE(e.getPlaybackState(12345) == Engine::PlaybackState::Invalid);
+
+    // Playing from the moment it is published, before any audio is mixed
+    // (the cursor is still 0 here).
+    int pid = e.playClip(cid, 1.0f, false);
+    ASSERT_TRUE(e.isPlaybackPlaying(pid));
+
+    e.setPlaybackPlaying(pid, false);
+    ASSERT_TRUE(e.getPlaybackState(pid) == Engine::PlaybackState::Paused);
+    ASSERT_FALSE(e.isPlaybackPlaying(pid));
+    e.setPlaybackPlaying(pid, true);
+
+    e.renderBlock(1500);  // runs off the end
+    ASSERT_TRUE(e.getPlaybackState(pid) == Engine::PlaybackState::Finished);
+    ASSERT_FALSE(e.isPlaybackPlaying(pid));
+
+    // Scheduled until the clock reaches `when`, then playing.
+    int later = e.playClipAt(cid, e.currentTime() + 1000.0 / sr, 1.0f, true);
+    ASSERT_TRUE(e.getPlaybackState(later) == Engine::PlaybackState::Scheduled);
+    ASSERT_FALSE(e.isPlaybackPlaying(later));
+    e.renderBlock(512);
+    ASSERT_TRUE(e.getPlaybackState(later) == Engine::PlaybackState::Scheduled);
+    e.renderBlock(512);
+    ASSERT_TRUE(e.isPlaybackPlaying(later));
+
+    // A looping clip is playing at every point of its cycle, wrap included.
+    e.renderBlock(1000 - static_cast<int>(e.getPlaybackPositionSeconds(later) * sr) % 1000);
+    ASSERT_TRUE(e.isPlaybackPlaying(later));
+
+    e.stopPlayback(later);
+    ASSERT_TRUE(e.getPlaybackState(later) == Engine::PlaybackState::Invalid);
+    PASS();
+}
+
 int main() { return runAllTests(); }

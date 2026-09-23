@@ -77,6 +77,22 @@ struct ClipPlayback {
     // clips joins gaplessly on the audio clock instead of via main-thread timers.
     std::atomic<uint64_t> startSample{0};
 
+    // Loop points, in frames relative to the region start (Web Audio
+    // loopStart / loopEnd). Used only while `looping`: the cursor plays up to
+    // loopEnd and wraps to loopStart. A pair that does not describe a
+    // non-empty window inside the region (end <= start, start < 0, or both 0)
+    // loops the whole region instead. A cursor that starts past loopEnd wraps
+    // into the window on the first frame.
+    std::atomic<int> loopStart{0};
+    std::atomic<int> loopEnd{0};
+
+    // Content budget: the playback ends once it has consumed this many frames
+    // of clip content (16.16 fixed point, counted across loop wraps and scaled
+    // by the playback rate, i.e. Web Audio's start() `duration` in frames).
+    // UINT64_MAX = no limit. `consumedFixed` is audio-thread state.
+    std::atomic<uint64_t> durationFixed{UINT64_MAX};
+    uint64_t consumedFixed = 0;
+
     // Parameter smoothers (audio thread only)
     Smoother smoothGain;
     Smoother smoothPan;

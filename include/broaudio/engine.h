@@ -394,6 +394,44 @@ public:
     // before now plays immediately. Use this to queue streamed chunks so they
     // join on the audio thread without main-thread setTimeout jitter or drift.
     int playClipAt(int clipId, double when, float gain = 1.0f, bool loop = false);
+
+    // Everything a Web Audio AudioBufferSourceNode.start(when, offset,
+    // duration) needs, applied before the playback is published so the first
+    // mixed frame already honours it (no seek racing the audio thread).
+    // Frame values are clip frames. Returns the playback id, or -1 for an
+    // unknown clip or a streaming clip.
+    struct ClipPlayOptions {
+        float  gain = 1.0f;
+        bool   loop = false;
+        float  rate = 1.0f;           // clamped like setPlaybackRate
+        double when = 0.0;            // engine seconds; <= now plays immediately
+        double offsetFrames = 0.0;    // start position; clamped to [0, clip length]
+        int    loopStartFrame = 0;    // loop window (see ClipPlayback::loopStart)
+        int    loopEndFrame = 0;
+        double durationFrames = -1.0; // content to play before ending; < 0 = no limit
+    };
+    int playClip(int clipId, const ClipPlayOptions& opts);
+
+    // Move a playback's loop window while it plays (Web Audio lets loopStart /
+    // loopEnd change mid-playback). Frames relative to the region start; an
+    // invalid window loops the whole region. No-op for unknown ids.
+    void setPlaybackLoopPoints(int instanceId, int loopStartFrame, int loopEndFrame);
+
+    // What a playback id is doing right now, answered from the playback's own
+    // state rather than inferred from its cursor:
+    //   Invalid    never existed, or stopped/finished and already dropped
+    //   Scheduled  started with a `when` the audio clock has not reached yet
+    //   Playing    producing audio (a streaming playback counts while open)
+    //   Paused     setPlaybackPlaying(false)
+    //   Finished   played to its end (or its duration) and is waiting to be
+    //              dropped
+    // Main-thread query; reads atomics only.
+    enum class PlaybackState : uint8_t { Invalid, Scheduled, Playing, Paused, Finished };
+    PlaybackState getPlaybackState(int instanceId) const;
+    bool isPlaybackPlaying(int instanceId) const {
+        return getPlaybackState(instanceId) == PlaybackState::Playing;
+    }
+
     void stopPlayback(int instanceId);
 
     // --- Streaming PCM source (live voice / network audio) ---
@@ -591,6 +629,14 @@ private:
                            float* clipSendBuf, float clipSendAmt,
                            bool spatialFilterActive, const HeadParams& headParams,
                            float rate, int numFrames, int startFrame);
+    // Resample-mix a fixed (non-streaming) clip playback for one block:
+    // scheduled start, region, loop window, content budget, gain/pan
+    // smoothing, spatial filter, aux send. Shared by the headless and
+    // realtime clip loops. `blockStart` is the block's first absolute sample.
+    void mixClipPlayback(ClipPlayback* pb, AudioClip* clip, float* targetBuf,
+                         float* clipSendBuf, float clipSendAmt,
+                         bool spatialFilterActive, const HeadParams& headParams,
+                         float rate, int numFrames, uint64_t blockStart);
 
     static void micCallback(void* userdata, SDL_AudioStream* stream,
                             int additional_amount, int total_amount);

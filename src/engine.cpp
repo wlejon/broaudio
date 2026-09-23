@@ -198,16 +198,7 @@ void Engine::renderInternal(int numFrames)
             }
             if (!targetBuf) continue;
 
-            int start = pb->regionStart.load(std::memory_order_relaxed);
-            int end = pb->regionEnd.load(std::memory_order_relaxed);
-            end = end > 0 ? end : clip->numFrames();
-            int len = end - start;
-            if (len <= 0) continue;
-
-            uint64_t pos = pb->playPos.load(std::memory_order_relaxed);
             float rate = pb->rate.load(std::memory_order_relaxed);
-            bool looping = pb->looping.load(std::memory_order_relaxed);
-            int ch = clip->channels;
 
             // Set smoother targets for gain and pan
             float targetGain = pb->gain.load(std::memory_order_relaxed);
@@ -249,72 +240,8 @@ void Engine::renderInternal(int numFrames)
                 continue;
             }
 
-            constexpr int FRAC_BITS = 16;
-            constexpr uint64_t FRAC_MASK = (1ULL << FRAC_BITS) - 1;
-            uint64_t increment = static_cast<uint64_t>(rate * (1 << FRAC_BITS) + 0.5f);
-
-            // Sample-accurate scheduled start (see the realtime path for the rationale):
-            // stay silent until the audio clock reaches startSample, then begin mid-block.
-            int startFrame = 0;
-            uint64_t startS = pb->startSample.load(std::memory_order_relaxed);
-            if (startS > blockStart) {
-                uint64_t off = startS - blockStart;
-                if (off >= static_cast<uint64_t>(numFrames)) continue;  // starts in a later block
-                startFrame = static_cast<int>(off);
-            }
-
-            for (int i = startFrame; i < numFrames; i++) {
-                int intPos = static_cast<int>(pos >> FRAC_BITS);
-                if (looping) {
-                    intPos = intPos % len;
-                } else if (intPos >= len) {
-                    pb->playing.store(false, std::memory_order_relaxed);
-                    pb->active.store(false, std::memory_order_relaxed);
-                    break;
-                }
-                float frac = static_cast<float>(pos & FRAC_MASK) / (1 << FRAC_BITS);
-                int nextIdx = intPos + 1;
-                if (nextIdx >= len) nextIdx = looping ? 0 : intPos;
-
-                float g = pb->smoothGain.next();
-                float clipPan = pb->smoothPan.next();
-                float panL, panR;
-                panGains(clipPan, panL, panR);
-
-                float outL, outR;
-                if (ch == 2) {
-                    int idx0 = (start + intPos) * 2;
-                    int idx1 = (start + nextIdx) * 2;
-                    float L0 = clip->samples[idx0];
-                    float R0 = clip->samples[idx0 + 1];
-                    float L1 = clip->samples[idx1];
-                    float R1 = clip->samples[idx1 + 1];
-                    float sL = (L0 + frac * (L1 - L0)) * g;
-                    float sR = (R0 + frac * (R1 - R0)) * g;
-                    outL = sL * panL + sR * (1.0f - panR);
-                    outR = sR * panR + sL * (1.0f - panL);
-                } else {
-                    float s0 = clip->samples[start + intPos];
-                    float s1 = clip->samples[start + nextIdx];
-                    float sample = (s0 + frac * (s1 - s0)) * g;
-                    outL = sample * panL;
-                    outR = sample * panR;
-                }
-
-                if (spatialFilterActive)
-                    pb->spatialFilter.process(outL, outR, headParams);
-
-                targetBuf[i * 2]     += outL;
-                targetBuf[i * 2 + 1] += outR;
-
-                if (clipSendBuf) {
-                    clipSendBuf[i * 2]     += outL * clipSendAmt;
-                    clipSendBuf[i * 2 + 1] += outR * clipSendAmt;
-                }
-
-                pos += increment;
-            }
-            pb->playPos.store(pos, std::memory_order_relaxed);
+            mixClipPlayback(pb.get(), clip, targetBuf, clipSendBuf, clipSendAmt,
+                            spatialFilterActive, headParams, rate, numFrames, blockStart);
         }
     }
 
@@ -2247,6 +2174,171 @@ int Engine::playClipAt(int clipId, double when, float gain, bool loop)
     return id;
 }
 
+int Engine::playClip(int clipId, const ClipPlayOptions& opts)
+{
+    std::lock_guard<std::mutex> lock(mediaWriteMutex_);
+    AudioClip* clip = findClip(clipId);
+    if (!clip || clip->streaming) return -1;
+
+    uint64_t startSample = 0;
+    double s = opts.when * static_cast<double>(sampleRate_);
+    if (s > 0.0) startSample = static_cast<uint64_t>(s + 0.5);
+
+    const double frames = static_cast<double>(clip->numFrames());
+    const double offset = std::clamp(opts.offsetFrames, 0.0, frames);
+
+    auto pb = std::make_shared<ClipPlayback>();
+    pb->id = nextPlaybackId_++;
+    pb->clipId = clipId;
+    pb->gain.store(opts.gain, std::memory_order_relaxed);
+    pb->looping.store(opts.loop, std::memory_order_relaxed);
+    pb->rate.store(std::clamp(opts.rate, 0.01f, 16.0f), std::memory_order_relaxed);
+    pb->playing.store(true, std::memory_order_relaxed);
+    pb->active.store(true, std::memory_order_relaxed);
+    pb->playPos.store(static_cast<uint64_t>(offset * 65536.0 + 0.5), std::memory_order_relaxed);
+    pb->regionStart.store(0, std::memory_order_relaxed);
+    pb->regionEnd.store(0, std::memory_order_relaxed);
+    pb->loopStart.store(opts.loopStartFrame, std::memory_order_relaxed);
+    pb->loopEnd.store(opts.loopEndFrame, std::memory_order_relaxed);
+    pb->durationFixed.store(opts.durationFrames < 0.0
+                                ? UINT64_MAX
+                                : static_cast<uint64_t>(opts.durationFrames * 65536.0 + 0.5),
+                            std::memory_order_relaxed);
+    pb->startSample.store(startSample, std::memory_order_relaxed);
+
+    int id = pb->id;
+    auto newList = std::make_shared<PlaybackList>(*playbacks_.load());
+    newList->push_back(std::move(pb));
+    playbacks_.store(std::move(newList));
+    return id;
+}
+
+void Engine::setPlaybackLoopPoints(int instanceId, int loopStartFrame, int loopEndFrame)
+{
+    if (auto* pb = findPlayback(instanceId)) {
+        pb->loopStart.store(loopStartFrame, std::memory_order_relaxed);
+        pb->loopEnd.store(loopEndFrame, std::memory_order_relaxed);
+    }
+}
+
+Engine::PlaybackState Engine::getPlaybackState(int instanceId) const
+{
+    auto current = playbacks_.load();
+    for (auto& pb : *current) {
+        if (pb->id != instanceId) continue;
+        if (!pb->active.load(std::memory_order_relaxed)) return PlaybackState::Finished;
+        if (!pb->playing.load(std::memory_order_relaxed)) return PlaybackState::Paused;
+        // The mixer begins a scheduled playback inside the block that spans
+        // startSample; samplesGenerated_ is the end of the last mixed block.
+        uint64_t startS = pb->startSample.load(std::memory_order_relaxed);
+        if (startS > 0 && startS >= samplesGenerated_.load(std::memory_order_relaxed))
+            return PlaybackState::Scheduled;
+        return PlaybackState::Playing;
+    }
+    return PlaybackState::Invalid;
+}
+
+void Engine::mixClipPlayback(ClipPlayback* pb, AudioClip* clip, float* targetBuf,
+                             float* clipSendBuf, float clipSendAmt,
+                             bool spatialFilterActive, const HeadParams& headParams,
+                             float rate, int numFrames, uint64_t blockStart)
+{
+    const int start = pb->regionStart.load(std::memory_order_relaxed);
+    int end = pb->regionEnd.load(std::memory_order_relaxed);
+    end = end > 0 ? end : clip->numFrames();
+    const int len = end - start;
+    if (len <= 0) return;
+    const int ch = clip->channels;
+    const bool looping = pb->looping.load(std::memory_order_relaxed);
+
+    // Loop window, clamped into the region; a window that is empty, inverted
+    // or starts before 0 loops the whole region (Web Audio's actualLoopStart /
+    // actualLoopEnd fallback).
+    int ls = pb->loopStart.load(std::memory_order_relaxed);
+    int le = pb->loopEnd.load(std::memory_order_relaxed);
+    if (le > len) le = len;
+    if (ls < 0 || le <= ls) { ls = 0; le = len; }
+
+    constexpr int FRAC_BITS = 16;
+    constexpr uint64_t FRAC_MASK = (1ULL << FRAC_BITS) - 1;
+    const uint64_t increment = static_cast<uint64_t>(rate * (1 << FRAC_BITS) + 0.5f);
+    const uint64_t loopStartF = static_cast<uint64_t>(ls) << FRAC_BITS;
+    const uint64_t loopEndF = static_cast<uint64_t>(le) << FRAC_BITS;
+    const uint64_t loopLenF = loopEndF - loopStartF;
+    const uint64_t budget = pb->durationFixed.load(std::memory_order_relaxed);
+
+    // Sample-accurate scheduled start: stay silent until the audio clock
+    // reaches startSample, then begin mid-block at the exact frame. 0 (or any
+    // past sample) starts immediately. Once started, later blocks have
+    // startSample <= blockStart, so startFrame is 0 and playPos continues.
+    int startFrame = 0;
+    uint64_t startS = pb->startSample.load(std::memory_order_relaxed);
+    if (startS > blockStart) {
+        uint64_t off = startS - blockStart;
+        if (off >= static_cast<uint64_t>(numFrames)) return;  // starts in a later block
+        startFrame = static_cast<int>(off);
+    }
+
+    uint64_t pos = pb->playPos.load(std::memory_order_relaxed);
+    uint64_t consumed = pb->consumedFixed;
+    for (int i = startFrame; i < numFrames; i++) {
+        if (looping && pos >= loopEndF) pos = loopStartF + (pos - loopStartF) % loopLenF;
+        int intPos = static_cast<int>(pos >> FRAC_BITS);
+        if ((!looping && intPos >= len) || consumed >= budget) {
+            pb->playing.store(false, std::memory_order_relaxed);
+            pb->active.store(false, std::memory_order_relaxed);
+            break;
+        }
+        float frac = static_cast<float>(pos & FRAC_MASK) / (1 << FRAC_BITS);
+        int nextIdx = intPos + 1;
+        if (looping && intPos < le && nextIdx >= le) nextIdx = ls;
+        else if (nextIdx >= len) nextIdx = intPos;
+
+        float g = pb->smoothGain.next();
+        float clipPan = pb->smoothPan.next();
+        float panL, panR;
+        panGains(clipPan, panL, panR);
+
+        float outL, outR;
+        if (ch == 2) {
+            // Stereo clip: interleaved L/R pairs
+            int idx0 = (start + intPos) * 2;
+            int idx1 = (start + nextIdx) * 2;
+            float L0 = clip->samples[idx0];
+            float R0 = clip->samples[idx0 + 1];
+            float L1 = clip->samples[idx1];
+            float R1 = clip->samples[idx1 + 1];
+            float sL = (L0 + frac * (L1 - L0)) * g;
+            float sR = (R0 + frac * (R1 - R0)) * g;
+            // Pan acts as balance: panL/panR crossfade the stereo image
+            outL = sL * panL + sR * (1.0f - panR);
+            outR = sR * panR + sL * (1.0f - panL);
+        } else {
+            float s0 = clip->samples[start + intPos];
+            float s1 = clip->samples[start + nextIdx];
+            float sample = (s0 + frac * (s1 - s0)) * g;
+            outL = sample * panL;
+            outR = sample * panR;
+        }
+
+        if (spatialFilterActive)
+            pb->spatialFilter.process(outL, outR, headParams);
+
+        targetBuf[i * 2]     += outL;
+        targetBuf[i * 2 + 1] += outR;
+
+        if (clipSendBuf) {
+            clipSendBuf[i * 2]     += outL * clipSendAmt;
+            clipSendBuf[i * 2 + 1] += outR * clipSendAmt;
+        }
+
+        pos += increment;
+        consumed += increment;
+    }
+    pb->playPos.store(pos, std::memory_order_relaxed);
+    pb->consumedFixed = consumed;
+}
+
 // Ring-read mix for a streaming playback. Caller has already set the gain/pan
 // smoother targets and resolved targetBuf / sends / spatial; this just reads the
 // ring and applies the same per-frame gain/pan/spatial/write as the clip path.
@@ -3021,16 +3113,7 @@ void Engine::processOutputChunk(SDL_AudioStream* stream, int numFrames)
             }
             if (!targetBuf) continue;
 
-            int start = pb->regionStart.load(std::memory_order_relaxed);
-            int end = pb->regionEnd.load(std::memory_order_relaxed);
-            end = end > 0 ? end : clip->numFrames();
-            int len = end - start;
-            if (len <= 0) continue;
-
-            uint64_t pos = pb->playPos.load(std::memory_order_relaxed);
             float rate = pb->rate.load(std::memory_order_relaxed);
-            bool looping = pb->looping.load(std::memory_order_relaxed);
-            int ch = clip->channels;
 
             // Set smoother targets for gain and pan
             float targetGain2 = pb->gain.load(std::memory_order_relaxed);
@@ -3074,78 +3157,8 @@ void Engine::processOutputChunk(SDL_AudioStream* stream, int numFrames)
                 continue;
             }
 
-            constexpr int FRAC_BITS = 16;
-            constexpr uint64_t FRAC_MASK = (1ULL << FRAC_BITS) - 1;
-            uint64_t increment = static_cast<uint64_t>(rate * (1 << FRAC_BITS) + 0.5f);
-
-            // Sample-accurate scheduled start: stay silent until the audio clock
-            // reaches startSample, then begin mid-block at the exact frame. 0 (or
-            // any past sample) starts immediately. Once started, later blocks have
-            // startSample <= blockStart, so startFrame is 0 and playPos continues.
-            int startFrame = 0;
-            uint64_t startS = pb->startSample.load(std::memory_order_relaxed);
-            if (startS > blockStart) {
-                uint64_t off = startS - blockStart;
-                if (off >= static_cast<uint64_t>(numFrames)) continue;  // starts in a later block
-                startFrame = static_cast<int>(off);
-            }
-
-            for (int i = startFrame; i < numFrames; i++) {
-                int intPos = static_cast<int>(pos >> FRAC_BITS);
-                if (looping) {
-                    intPos = intPos % len;
-                } else if (intPos >= len) {
-                    pb->playing.store(false, std::memory_order_relaxed);
-                    pb->active.store(false, std::memory_order_relaxed);
-                    break;
-                }
-                float frac = static_cast<float>(pos & FRAC_MASK) / (1 << FRAC_BITS);
-                int nextIdx = intPos + 1;
-                if (nextIdx >= len) nextIdx = looping ? 0 : intPos;
-
-                float g = pb->smoothGain.next();
-                float clipPan = pb->smoothPan.next();
-                float panL, panR;
-                panGains(clipPan, panL, panR);
-
-                float outL, outR;
-                if (ch == 2) {
-                    // Stereo clip: interleaved L/R pairs
-                    int idx0 = (start + intPos) * 2;
-                    int idx1 = (start + nextIdx) * 2;
-                    float L0 = clip->samples[idx0];
-                    float R0 = clip->samples[idx0 + 1];
-                    float L1 = clip->samples[idx1];
-                    float R1 = clip->samples[idx1 + 1];
-                    float sL = (L0 + frac * (L1 - L0)) * g;
-                    float sR = (R0 + frac * (R1 - R0)) * g;
-                    // Pan acts as balance: panL/panR crossfade the stereo image
-                    outL = sL * panL + sR * (1.0f - panR);
-                    outR = sR * panR + sL * (1.0f - panL);
-                } else {
-                    // Mono clip
-                    float s0 = clip->samples[start + intPos];
-                    float s1 = clip->samples[start + nextIdx];
-                    float sample = (s0 + frac * (s1 - s0)) * g;
-                    outL = sample * panL;
-                    outR = sample * panR;
-                }
-
-                if (spatialFilterActive2)
-                    pb->spatialFilter.process(outL, outR, headParams2);
-
-                targetBuf[i * 2]     += outL;
-                targetBuf[i * 2 + 1] += outR;
-
-                // Clip aux send
-                if (clipSendBuf) {
-                    clipSendBuf[i * 2]     += outL * clipSendAmt;
-                    clipSendBuf[i * 2 + 1] += outR * clipSendAmt;
-                }
-
-                pos += increment;
-            }
-            pb->playPos.store(pos, std::memory_order_relaxed);
+            engine->mixClipPlayback(pb.get(), clip, targetBuf, clipSendBuf, clipSendAmt,
+                                    spatialFilterActive2, headParams2, rate, numFrames, blockStart);
         }
     }
 

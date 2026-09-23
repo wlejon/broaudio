@@ -12,6 +12,7 @@
 #include <SDL3/SDL.h>
 #include <cmath>
 #include <cstring>
+#include <new>
 #include <algorithm>
 
 namespace broaudio {
@@ -2470,12 +2471,20 @@ int Engine::createStreamPlayback(int channels, int ringFrames, bool startPlaying
     auto clip = std::make_shared<AudioClip>();
     auto pb   = std::make_shared<ClipPlayback>();
 
+    // The ring is sized by the caller (a script's ringFrames option): an
+    // allocation that cannot be met fails the stream, before any state
+    // changes, rather than throwing out of the engine.
+    try {
+        clip->samples.assign(static_cast<size_t>(ringFrames) * channels, 0.0f);
+    } catch (const std::bad_alloc&) {
+        return -1;
+    }
+
     std::lock_guard<std::mutex> lock(mediaWriteMutex_);
     clip->id = nextClipId_++;
     clip->channels = channels;
     clip->streaming = true;
     clip->ringFrames = ringFrames;
-    clip->samples.assign(static_cast<size_t>(ringFrames) * channels, 0.0f);
     clip->writeFrames.store(0, std::memory_order_relaxed);
     int clipId = clip->id;
 
@@ -2582,6 +2591,9 @@ int Engine::createStreamFromFile(const char* path, const FileStreamOptions& opts
     int id = createStreamPlayback(decoder->channels(), ringFrames,
                                   /*startPlaying=*/false, opts.gain, opts.loop,
                                   clip, pb);
+    if (id < 0) {
+        return fail("cannot allocate a ring of " + std::to_string(ringFrames) + " frames");
+    }
 
     auto runner = std::make_unique<FileStreamRunner>(
         std::move(clip), std::move(pb), std::move(decoder), sampleRate_, prebuffer);
@@ -2723,7 +2735,7 @@ void Engine::setPlaybackRegion(int instanceId, int start, int end)
 
 void Engine::seekPlayback(int instanceId, double seconds)
 {
-    if (seconds < 0.0) seconds = 0.0;
+    if (!(seconds > 0.0)) seconds = 0.0;  // negative, and NaN
 
     // Disk streams: hand the seek to the decode worker (codec seek + ring
     // flush fence). Control-plane mutex only — the audio thread never touches
@@ -2750,8 +2762,10 @@ void Engine::seekPlayback(int instanceId, double seconds)
     int len = end - rs;
     if (len <= 0) return;
 
-    int64_t frame = static_cast<int64_t>(seconds * sampleRate_ + 0.5);
-    if (frame >= len) frame = len - 1;
+    // Compared as a double first: a huge or infinite time converted straight
+    // to int64 is undefined behaviour.
+    const double f = seconds * sampleRate_ + 0.5;
+    const int64_t frame = f >= static_cast<double>(len) ? len - 1 : static_cast<int64_t>(f);
     // playPos is a 16.16 fixed-point cursor relative to the region start.
     // Racing the audio thread's block-end store is benign (same contract as
     // setPlaybackPlaying / setPlaybackRegion): worst case the seek lands one

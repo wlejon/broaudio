@@ -137,4 +137,42 @@ if(TARGET broaudio_api)
                 ENVIRONMENT "PATH=$<TARGET_FILE_DIR:bronze_runtime_shared>;$<TARGET_FILE_DIR:broaudio_test_destination>;$ENV{PATH}")
         endif()
     endif()
+
+    # The binding against embed.h's GC contract: paths that hold a Value
+    # across an allocating call, plus the fixes that came with that audit.
+    add_executable(broaudio_test_api_gc test_audio_api_gc.cpp)
+    target_link_libraries(broaudio_test_api_gc PRIVATE broaudio_api bronze_runtime_shared)
+    if(WIN32)
+        add_custom_command(TARGET broaudio_test_api_gc POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:bronze_runtime_shared>
+                $<TARGET_FILE_DIR:broaudio_test_api_gc>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_LINKER_FILE:bronze_runtime_shared>
+                $<TARGET_FILE_DIR:broaudio_test_api_gc>
+        )
+    endif()
+    if(BRASS_HOST_BACKEND)
+        add_test(NAME broaudio_test_api_gc COMMAND broaudio_test_api_gc)
+        if(WIN32)
+            set_tests_properties(broaudio_test_api_gc PROPERTIES
+                ENVIRONMENT "PATH=$<TARGET_FILE_DIR:bronze_runtime_shared>;$<TARGET_FILE_DIR:broaudio_test_api_gc>;$ENV{PATH}")
+        endif()
+
+        # Every binding test again under bronze's GC stress oracle: a
+        # collection on every allocation, from-space poisoned afterwards, so a
+        # Value held across an allocating embed call crashes or reads garbage
+        # here instead of passing by luck.
+        foreach(api_test broaudio_test_api broaudio_test_api_drift
+                         broaudio_test_destination broaudio_test_api_gc)
+            add_test(NAME ${api_test}_gcstress COMMAND ${api_test})
+            if(WIN32)
+                set_tests_properties(${api_test}_gcstress PROPERTIES
+                    ENVIRONMENT "BRONZE_GC_STRESS=1;BRONZE_GC_POISON=1;PATH=$<TARGET_FILE_DIR:bronze_runtime_shared>;$<TARGET_FILE_DIR:${api_test}>;$ENV{PATH}")
+            else()
+                set_tests_properties(${api_test}_gcstress PROPERTIES
+                    ENVIRONMENT "BRONZE_GC_STRESS=1;BRONZE_GC_POISON=1")
+            endif()
+        endforeach()
+    endif()
 endif()

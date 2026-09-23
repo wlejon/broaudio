@@ -1,0 +1,289 @@
+// broaudio_api under bronze's moving collector: every binding path that
+// holds a Value across an allocating embed call (embed.h's GC contract), plus
+// the functional fixes that came with that audit. Registered twice in
+// tests/CMakeLists.txt, once plainly and once under BRONZE_GC_STRESS=1 +
+// BRONZE_GC_POISON=1 (collect on every allocation, poison from-space), where
+// a stale Value turns into a crash or a wrong answer instead of passing by
+// luck.
+//
+// Runs on its own headless broaudio::Engine so renderBlock() and the mic
+// injection seam drive the pipeline deterministically.
+
+#include "api.h"
+#include "embed/embed.h"
+#include "eval/eval.h"
+#include "broaudio/engine.h"
+
+#include <cstdlib>
+#include <iostream>
+#include <string>
+
+namespace ev = bronze::embed;
+using Value = bronze::Value;
+
+#define TEST_CHECK(cond) do { \
+    if (!(cond)) { \
+        std::cerr << "CHECK FAILED: " #cond " at " << __FILE__ << ":" << __LINE__ << std::endl; \
+        std::exit(1); \
+    } \
+} while (0)
+
+static void runScript(const char* label, const std::string& script) {
+    std::cout << "  " << label << "..." << std::endl;
+    ev::CallResult res = bronze::eval::evalScript(script);
+    if (res.thrown) {
+        std::cerr << label << " threw: " << ev::toUtf8(res.value) << std::endl;
+        std::exit(1);
+    }
+    if (ev::toUtf8(res.value) != "SUCCESS") {
+        std::cerr << label << " returned: " << ev::toUtf8(res.value) << std::endl;
+        std::exit(1);
+    }
+}
+
+static const char* kPrelude = R"JS(
+    const ctx = new AudioContext();
+    function near(a, b, eps, what) {
+        if (!(Math.abs(a - b) <= eps)) throw new Error(what + ": " + a + " != " + b);
+    }
+    function expect(cond, what) { if (!cond) throw new Error(what); }
+    // Churn the heap from inside a callback the binding runs mid-call.
+    function churn() { const junk = []; for (let i = 0; i < 64; i++) junk.push({ i: i, s: "x" + i }); return junk.length; }
+    // A mono 16-bit PCM WAV of `frames` samples of a 441 Hz sine.
+    function wavBytes(frames, rate) {
+        const bytes = new Uint8Array(44 + frames * 2);
+        const dv = new DataView(bytes.buffer);
+        const str = (off, s) => { for (let i = 0; i < s.length; i++) bytes[off + i] = s.charCodeAt(i); };
+        str(0, "RIFF"); dv.setUint32(4, 36 + frames * 2, true); str(8, "WAVE");
+        str(12, "fmt "); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+        dv.setUint32(24, rate, true); dv.setUint32(28, rate * 2, true); dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
+        str(36, "data"); dv.setUint32(40, frames * 2, true);
+        for (let i = 0; i < frames; i++) dv.setInt16(44 + i * 2, Math.round(16000 * Math.sin(2 * Math.PI * 441 * i / rate)), true);
+        return bytes;
+    }
+)JS";
+
+static std::string withPrelude(const char* body) {
+    return std::string("(function() {") + kPrelude + body + "\n})()";
+}
+
+static void test_buffers() {
+    runScript("AudioBuffer channel data", withPrelude(R"JS(
+        const opts = { get length() { churn(); return 32; }, get numberOfChannels() { churn(); return 2; },
+                       get sampleRate() { churn(); return ctx.sampleRate; } };
+        const buf = new AudioBuffer(opts);
+        expect(buf.length === 32 && buf.numberOfChannels === 2, "AudioBuffer options through getters");
+
+        const ch0 = buf.getChannelData(0);
+        expect(ch0 instanceof Float32Array && ch0.length === 32, "getChannelData shape");
+        expect(buf.getChannelData(0) === ch0, "getChannelData returns the cached view");
+
+        // Writes into the view are what copyFromChannel reads back.
+        ch0[3] = 0.5;
+        const out = new Float32Array(8);
+        buf.copyFromChannel(out, 0, 0);
+        near(out[3], 0.5, 1e-6, "copyFromChannel sees getChannelData writes");
+
+        // copyToChannel refreshes the cached view in place.
+        buf.copyToChannel(new Float32Array([0.25, -0.25]), 0, 10);
+        near(ch0[10], 0.25, 1e-6, "copyToChannel -> cached view [10]");
+        near(ch0[11], -0.25, 1e-6, "copyToChannel -> cached view [11]");
+        buf.copyToChannel(new Float32Array([1, 2]), 0, -1);  // negative offset: ignored
+        near(ch0[0], 0, 1e-6, "negative startInChannel is ignored");
+
+        // A two-channel AudioBuffer clip reads both cached channels.
+        buf.getChannelData(1)[0] = 0.75;
+        const clip = ctx.createClip(buf);
+        expect(ctx.getClipChannels(clip) === 2, "createClip(AudioBuffer) channels: " + ctx.getClipChannels(clip));
+        expect(ctx.getClipSampleCount(clip) === 32, "createClip(AudioBuffer) frames: " + ctx.getClipSampleCount(clip));
+        ctx.deleteClip(clip);
+
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        expect(src.buffer === buf, "AudioBufferSourceNode.buffer round-trip");
+        const conv = ctx.createConvolver();
+        conv.buffer = buf;
+        expect(conv.buffer === buf, "ConvolverNode.buffer round-trip");
+        return "SUCCESS";
+    )JS"));
+}
+
+static void test_decode() {
+    runScript("decodeAudioData callbacks and promise fields", withPrelude(R"JS(
+        const bytes = wavBytes(441, 44100);
+        let got = null, err = null;
+        const p = ctx.decodeAudioData(bytes.buffer, (b) => { churn(); got = b; }, (e) => { err = e; });
+        expect(err === null, "valid WAV reported an error: " + err);
+        expect(got instanceof AudioBuffer, "success callback gets an AudioBuffer");
+        expect(got.numberOfChannels === 1, "decoded channels " + got.numberOfChannels);
+        expect(p instanceof Promise, "decodeAudioData returns a Promise");
+        expect(p.samples instanceof Float32Array && p.samples.length === p.numFrames, "promise samples field");
+        expect(got.samples === p.samples, "the AudioBuffer and the promise share one samples array");
+        expect(p.channels === 1 && p.sampleRate === ctx.sampleRate, "promise channels/sampleRate");
+        const peak = p.samples.reduce((m, v) => Math.max(m, Math.abs(v)), 0);
+        expect(peak > 0.3 && peak < 0.6, "decoded peak " + peak);
+
+        let bad = null;
+        const p2 = ctx.decodeAudioData(new Uint8Array([1, 2, 3, 4]).buffer, () => { throw new Error("success on garbage"); },
+                                       (e) => { churn(); bad = e; });
+        expect(bad instanceof Error, "error callback gets an Error");
+        expect(bad.name === "EncodingError", "error name " + bad.name);
+        expect(p2 instanceof Promise, "failed decode still returns the Promise");
+        p2.catch(() => {});
+        expect(ctx.decodeAudioData(new Uint8Array([1, 2, 3]).buffer) === null, "no callbacks + garbage -> null");
+        return "SUCCESS";
+    )JS"));
+}
+
+static void test_nodes() {
+    runScript("node params", withPrelude(R"JS(
+        const g = ctx.createGain();
+        expect(g.gain instanceof AudioParam && g.gain.value === 1, "GainNode.gain");
+
+        const comp = ctx.createDynamicsCompressor();
+        const want = { threshold: -24, knee: 30, ratio: 12, attack: 0.003, release: 0.25 };
+        for (const k in want) {
+            expect(comp[k] instanceof AudioParam, "compressor." + k + " is an AudioParam");
+            near(comp[k].value, want[k], 1e-6, "compressor." + k);
+        }
+
+        const sp = ctx.createStereoPanner();
+        expect(sp.pan instanceof AudioParam && sp.pan.value === 0, "StereoPannerNode.pan");
+
+        const pn = ctx.createPanner();
+        for (const k of ["positionX", "positionY", "positionZ", "orientationX", "orientationY", "orientationZ"]) {
+            expect(pn[k] instanceof AudioParam, "panner." + k);
+        }
+        pn.setPosition(1, 2, 3);
+        expect(pn.positionX.value === 1 && pn.positionY.value === 2 && pn.positionZ.value === 3, "setPosition -> position params");
+        pn.setOrientation(0, 0, -1);
+        expect(pn.orientationX.value === 0 && pn.orientationZ.value === -1, "setOrientation -> orientation params");
+
+        // setValueCurveAtTime with a plain array returns the param itself.
+        const p = ctx.createGain().gain;
+        expect(p.setValueCurveAtTime([0, 1, 0.5], 0, 1) === p, "setValueCurveAtTime chains");
+        near(p.getValueAtTime(0.5), 1, 1e-4, "curve midpoint");
+
+        const osc = ctx.createOscillator();
+        osc.connect(g).connect(pn).connect(ctx.destination);
+        pn.positionX.value = 5;
+        osc.start();
+        osc.stop();
+        return "SUCCESS";
+    )JS"));
+
+    runScript("PeriodicWave and getFrequencyResponse", withPrelude(R"JS(
+        const opts = { get disableNormalization() { churn(); return true; } };
+        const w1 = ctx.createPeriodicWave(new Float32Array([0, 1, 0.5]), new Float32Array([0, 0, 0]), opts);
+        expect(w1 instanceof PeriodicWave, "createPeriodicWave");
+        const w2 = new PeriodicWave(new Float32Array([0, 1, 0.5, 0.25]), new Float32Array([0, 0]), opts);
+        expect(w2 instanceof PeriodicWave, "PeriodicWave with unequal halves");
+        const osc = ctx.createOscillator();
+        osc.setPeriodicWave(w2);
+        expect(osc.type === "custom", "setPeriodicWave -> custom");
+
+        const f = ctx.createBiquadFilter();  // lowpass 350 Hz
+        const freqs = [50, 350, 5000];
+        const mag = new Float32Array(3), phase = new Float32Array(3);
+        f.getFrequencyResponse(freqs, mag, phase);
+        expect(mag[0] > 0.9 && mag[2] < 0.1, "lowpass response " + mag[0] + " / " + mag[2]);
+        const at350 = mag[1];
+        f.detune.value = 1200;  // one octave up: 700 Hz
+        f.getFrequencyResponse(new Float32Array(freqs), mag, phase);
+        expect(mag[1] > at350 + 0.1, "detune raises the cutoff: " + mag[1] + " vs " + at350);
+        return "SUCCESS";
+    )JS"));
+}
+
+static void test_sequencer() {
+    runScript("voice setup through noteOn and Sequence.update", withPrelude(R"JS(
+        const va = ctx.createVoiceAllocator(8);
+        const seen = [];
+        va.setVoiceSetup((voice, note, vel) => { churn(); seen.push(note); });
+        va.noteOn(64, 1);
+        va.noteOn(65, 1);
+        expect(seen.join(",") === "64,65", "noteOn voice setup: " + seen.join(","));
+        va.allNotesOff();
+
+        const seq = ctx.createSequence(va);
+        seq.setBPM(120);
+        seq.addNote(0, 60, 1, 0.25);
+        const t0 = ctx.currentTime;
+        seq.play(t0);
+        seq.update(t0 + 0.01);
+        expect(seen.indexOf(60) >= 0, "Sequence.update ran the allocator's voice setup: " + seen.join(","));
+        seq.stop();
+        return "SUCCESS";
+    )JS"));
+
+    runScript("automation lanes keep their callbacks across removal", withPrelude(R"JS(
+        const seq = ctx.createSequence(ctx.createVoiceAllocator(4));
+        const calls = [];
+        const a = seq.addAutomationLane((v) => { churn(); calls.push("a"); });
+        const b = seq.addAutomationLane((v) => { churn(); calls.push("b:" + v); });
+        expect(a === 0 && b === 1, "lane indices " + a + "," + b);
+        seq.addAutomationPoint(0, 0, 0.1);
+        seq.addAutomationPoint(1, 0, 0.5);
+        seq.removeAutomationLane(0);
+        expect(seq.automationLaneCount === 1, "lane count after removal");
+        const t0 = ctx.currentTime;
+        seq.play(t0);
+        seq.update(t0 + 0.01);
+        expect(calls.length === 1 && calls[0] === "b:0.5", "after removing lane 0 the old lane 1 calls b: " + calls.join(","));
+        return "SUCCESS";
+    )JS"));
+}
+
+static void test_mic_and_media() {
+    runScript("bro.mic options and chunk delivery", withPrelude(R"JS(
+        const chunks = [];
+        bro.mic.start({
+            get chunkFrames() { churn(); return 160; },
+            targetRate: 0,
+            live: false,
+            samples: true,
+            onChunk: (c) => { churn(); chunks.push(c); },
+        });
+        const input = new Float32Array(160 * 4);
+        for (let i = 0; i < input.length; i++) input[i] = 0.5 * Math.sin(i / 5);
+        bro.mic.feed(input);
+        bro.mic.drain();
+        bro.mic.stop();
+        expect(chunks.length === 4, "chunks delivered: " + chunks.length);
+        expect(chunks[0].samples instanceof Float32Array && chunks[0].samples.length === 160, "chunk samples");
+        expect(chunks[1].peak > 0.3, "chunk peak " + chunks[1].peak);
+
+        expect(typeof __nativeGetUserMedia === "function", "__nativeGetUserMedia installed");
+        const ms = ctx.createMediaStreamSource(new MediaStream());
+        expect(ms instanceof MediaStreamAudioSourceNode, "createMediaStreamSource");
+        return "SUCCESS";
+    )JS"));
+}
+
+int main() {
+    std::cout << "Running broaudio API GC-contract tests..." << std::endl;
+    const char* stress = std::getenv("BRONZE_GC_STRESS");
+    std::cout << "  (BRONZE_GC_STRESS=" << (stress ? stress : "unset") << ")" << std::endl;
+
+    broaudio::Engine engine;
+    TEST_CHECK(engine.initHeadless());
+    broaudio::api::setAudioEngine(&engine);
+
+    ev::Realm* realm = ev::createRealm();
+    {
+        ev::RealmScope scope(realm);
+        broaudio::api::installAudio();
+        broaudio::api::installMic();
+        test_buffers();
+        test_decode();
+        test_nodes();
+        test_sequencer();
+        test_mic_and_media();
+        broaudio::api::shutdownAudio();
+    }
+    ev::destroyRealm(realm);
+    engine.shutdown();
+
+    std::cout << "All broaudio API GC-contract tests passed!" << std::endl;
+    return 0;
+}

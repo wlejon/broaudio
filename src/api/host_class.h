@@ -3,6 +3,7 @@
 #include "embed/embed.h"
 #include "object_builder.h"
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <span>
@@ -57,7 +58,14 @@ public:
 
     void setStatic(const char* name, Value v) const;
 
-    void* unwrap(Value val) const { return ev::handleData(val); }
+    // The payload of a handle THIS class (or a class that inherit()s from it)
+    // made; nullptr for anything else, including another class's handle or
+    // another library's. ev::handleData answers for ANY handle, so casting
+    // it and then reading a tag out of the payload is itself the type
+    // confusion; every payload made by make() is registered with its class
+    // instead (host_class.cpp, brands). Allocates nothing.
+    void* unwrap(Value val) const;
+    bool isInstance(Value val) const { return unwrap(val) != nullptr; }
 
     Value prototype() const;
     Value constructor() const;
@@ -65,6 +73,10 @@ public:
     bool installed() const;
 
 private:
+    // The class inherit() chained this one onto. The relationship is the
+    // same on every thread, so it lives on the process-global class object.
+    mutable std::atomic<const HostClass*> base_{nullptr};
+
     Slots& slots() const;
     const Slots* slotsIfAny() const;
 };

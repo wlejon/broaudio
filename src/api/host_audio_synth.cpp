@@ -187,33 +187,35 @@ void hostMediaStreamAudioSourceNodeDtor(void* p) {
 }
 
 HostVoiceAllocator* hostVoiceAllocatorOf(Value v) {
-    auto* h = static_cast<HostVoiceAllocator*>(ev::handleData(v));
+    auto* h = static_cast<HostVoiceAllocator*>(g_voiceAllocatorClass.unwrap(v));
     return (h && h->tag == kHostVoiceAllocatorTag) ? h : nullptr;
 }
 
 HostModMatrix* hostModMatrixOf(Value v) {
-    auto* h = static_cast<HostModMatrix*>(ev::handleData(v));
+    auto* h = static_cast<HostModMatrix*>(g_modMatrixClass.unwrap(v));
     return (h && h->tag == kHostModMatrixTag) ? h : nullptr;
 }
 
 HostMidiInput* hostMidiInputOf(Value v) {
-    auto* h = static_cast<HostMidiInput*>(ev::handleData(v));
+    auto* h = static_cast<HostMidiInput*>(g_midiInputClass.unwrap(v));
     return (h && h->tag == kHostMidiInputTag) ? h : nullptr;
 }
 
 HostSequence* hostSequenceOf(Value v) {
-    auto* h = static_cast<HostSequence*>(ev::handleData(v));
+    auto* h = static_cast<HostSequence*>(g_sequenceClass.unwrap(v));
     return (h && h->tag == kHostSequenceTag) ? h : nullptr;
 }
 
 HostMediaStream* hostMediaStreamOf(Value v) {
-    auto* h = static_cast<HostMediaStream*>(ev::handleData(v));
+    auto* h = static_cast<HostMediaStream*>(g_mediaStreamClass.unwrap(v));
     return (h && h->tag == kHostMediaStreamTag) ? h : nullptr;
 }
 
+// Only a MediaStreamAudioSourceNode's payload: the base tag alone would
+// accept any node (every node leads with the same HostAudioNode).
 HostMediaStreamAudioSourceNode* hostMediaStreamNodeOf(Value v) {
-    auto* h = static_cast<HostMediaStreamAudioSourceNode*>(ev::handleData(v));
-    return (h && h->base.tag == kHostAudioNodeTag) ? h : nullptr;
+    return static_cast<HostMediaStreamAudioSourceNode*>(
+        g_mediaStreamAudioSourceNodeClass.unwrap(v));
 }
 
 // ---------------------------------------------------------------------------

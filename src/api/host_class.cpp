@@ -2,6 +2,7 @@
 #include "object_builder.h"
 
 #include <memory>
+#include <mutex>
 #include <unordered_map>
 
 namespace broaudio::api {
@@ -13,7 +14,60 @@ std::unordered_map<const HostClass*, HostClass::Slots>& threadSlots() {
     return t;
 }
 
+// ── Brands ──────────────────────────────────────────────────────────────────
+// Every payload make() hands out is registered with the class that made it,
+// and unwrap() answers only for that class and the classes it inherits
+// from. The table is process-wide (a Worker's handles live on its own
+// thread but the payload addresses are unique) and outlives every sweep.
+struct Brand {
+    const HostClass* cls;
+    ev::HandleDestructor dtor;
+};
+
+std::mutex& brandMutex() {
+    static std::mutex m;
+    return m;
+}
+
+std::unordered_map<const void*, Brand>& brands() {
+    static auto* m = new std::unordered_map<const void*, Brand>();
+    return *m;
+}
+
+// The destructor every branded handle carries: unregister, then run the
+// class's own destructor.
+void brandedDestroy(void* data) {
+    ev::HandleDestructor dtor = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(brandMutex());
+        auto& m = brands();
+        auto it = m.find(data);
+        if (it != m.end()) {
+            dtor = it->second.dtor;
+            m.erase(it);
+        }
+    }
+    if (dtor) dtor(data);
+}
+
 } // namespace
+
+void* HostClass::unwrap(Value val) const {
+    void* data = ev::handleData(val);
+    if (!data) return nullptr;
+    const HostClass* cls = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(brandMutex());
+        auto& m = brands();
+        auto it = m.find(data);
+        if (it == m.end()) return nullptr;
+        cls = it->second.cls;
+    }
+    for (; cls; cls = cls->base_.load(std::memory_order_acquire)) {
+        if (cls == this) return data;
+    }
+    return nullptr;
+}
 
 HostClass::Slots& HostClass::slots() const {
     return threadSlots()[this];
@@ -59,6 +113,7 @@ void HostClass::alias(const char* name) const {
 }
 
 void HostClass::inherit(const HostClass& base) const {
+    base_.store(&base, std::memory_order_release);
     const Slots* s = slotsIfAny();
     const Slots* b = base.slotsIfAny();
     if (!s || !s->proto || !b || !b->proto) return;
@@ -72,9 +127,13 @@ void HostClass::inherit(const HostClass& base) const {
 }
 
 Value HostClass::make(void* data, ev::HandleDestructor dtor, ev::Finalize when) const {
+    if (data) {
+        std::lock_guard<std::mutex> lk(brandMutex());
+        brands()[data] = Brand{this, dtor};
+    }
     const Slots* s = slotsIfAny();
-    if (!s || !s->proto) return ev::makeHandle(data, dtor, when);
-    return ev::makeHandle(data, dtor, when, s->proto->get());
+    if (!s || !s->proto) return ev::makeHandle(data, brandedDestroy, when);
+    return ev::makeHandle(data, brandedDestroy, when, s->proto->get());
 }
 
 void HostClass::setStatic(const char* name, Value v) const {

@@ -107,14 +107,16 @@ void hostAnalyserDtor(void* p) {
 
 HostAudioNode* hostAudioNodeOf(Value v) {
     if (!ev::isObject(v)) return nullptr;
-    auto* p = static_cast<HostAudioNode*>(ev::handleData(v));
+    // Every node class inherit()s g_audioNodeClass, so this answers for any
+    // node's payload (each leads with its HostAudioNode) and nothing else.
+    auto* p = static_cast<HostAudioNode*>(g_audioNodeClass.unwrap(v));
     if (!p || p->tag != kHostAudioNodeTag) return nullptr;
     return p;
 }
 
 HostPeriodicWave* hostPeriodicWaveOf(Value v) {
     if (!ev::isObject(v)) return nullptr;
-    auto* p = static_cast<HostPeriodicWave*>(ev::handleData(v));
+    auto* p = static_cast<HostPeriodicWave*>(g_periodicWaveClass.unwrap(v));
     if (!p || p->tag != kHostPeriodicWaveTag) return nullptr;
     return p;
 }

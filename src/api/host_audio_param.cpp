@@ -12,7 +12,7 @@ void hostAudioParamDtor(void* p) {
 
 static HostAudioParamHandle* paramHandleOf(Value v) {
     if (!ev::isObject(v)) return nullptr;
-    auto* h = static_cast<HostAudioParamHandle*>(ev::handleData(v));
+    auto* h = static_cast<HostAudioParamHandle*>(g_audioParamClass.unwrap(v));
     if (!h || h->tag != kHostAudioParamTag) return nullptr;
     return h;
 }

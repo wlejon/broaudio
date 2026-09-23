@@ -56,7 +56,7 @@ static void updateLiveLoop(const HostAudioBufferSourceNode& src) {
 
 static HostAudioBufferHandle* bufferHandleOf(Value v) {
     if (!ev::isObject(v)) return nullptr;
-    auto* h = static_cast<HostAudioBufferHandle*>(ev::handleData(v));
+    auto* h = static_cast<HostAudioBufferHandle*>(g_audioBufferClass.unwrap(v));
     if (!h || h->tag != kHostAudioBufferTag) return nullptr;
     return h;
 }

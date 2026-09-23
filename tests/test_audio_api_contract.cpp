@@ -416,6 +416,98 @@ static void test_buffer_source_binds_master_effects() {
     )JS"));
 }
 
+// A handle some other library made: its payload is not broaudio's, but it
+// leads with `tag`, so a binding that trusts the payload's leading bytes (what
+// every xxxOf helper used to do after ev::handleData) takes it for one of
+// its own. The rest of the payload is zero.
+struct ForgedPayload {
+    uint32_t tag;
+    unsigned char rest[252];
+};
+
+static void installForger() {
+    ev::Persistent fn(ev::makeFunction([](Value, std::span<const Value> a) -> Value {
+        auto* p = new ForgedPayload{};
+        p->tag = a.empty() ? 0u : static_cast<uint32_t>(ev::toDouble(a[0]));
+        return ev::makeHandle(p, [](void* d) { delete static_cast<ForgedPayload*>(d); });
+    }, 1, "forgeHandle"));
+    ev::registerGlobal("forgeHandle", fn.get());
+    ev::GlobalValue g = ev::globalValue("globalThis");
+    TEST_CHECK(g.found);
+    ev::Persistent global(g.value);
+    ev::setProperty(global.get(), "forgeHandle", fn.get());
+}
+
+// Every receiver and handle argument is checked against the class that made
+// it (host_class.cpp, brands): a handle of another class, or another
+// library's handle that happens to lead with a broaudio tag, is refused.
+static void test_wrong_receiver() {
+    runScript("methods refuse handles of another class or library", withPrelude(R"JS(
+        const TAGS = { ACTX: 0x41435458, ANOD: 0x414E4F44, APAR: 0x41504152,
+                       ABUF: 0x41425546, PWAV: 0x50574156, VALC: 0x56414C43,
+                       MODM: 0x4D4F444D, MIDI: 0x4D494449, SEQU: 0x53455155,
+                       MSTR: 0x4D535452 };
+        const forged = {};
+        for (const k in TAGS) forged[k] = forgeHandle(TAGS[k]);
+
+        // A forged context is not a context: `state` answers the unbranded
+        // default rather than reading a std::string out of foreign memory.
+        const stateGet = Object.getOwnPropertyDescriptor(AudioContext.prototype, "state").get;
+        expect(stateGet.call(forged.ACTX) === "running", "forged context state");
+        ctx.suspend.call(forged.ACTX);
+        expect(ctx.state === "running", "suspend on a forged context leaves the real one alone");
+
+        const buf = ctx.createBuffer(1, 128, sr);
+        const gain = ctx.createGain();
+        const osc = ctx.createOscillator();
+        const wave = ctx.createPeriodicWave(new Float32Array([0, 1]), new Float32Array([0, 0]));
+
+        // Arguments: a PeriodicWave slot takes only a PeriodicWave.
+        expectThrows(() => osc.setPeriodicWave(forged.PWAV), TypeError, "forged PeriodicWave");
+        expectThrows(() => osc.setPeriodicWave(buf), TypeError, "AudioBuffer as PeriodicWave");
+        osc.setPeriodicWave(wave);
+        // connect() takes a node or a param, not a lookalike.
+        expectThrows(() => gain.connect(forged.ANOD), TypeError, "forged node");
+        expectThrows(() => gain.connect(forged.APAR), TypeError, "forged param");
+        expectThrows(() => gain.connect(buf), TypeError, "AudioBuffer as a node");
+
+        // Receivers: an AudioBuffer method on a node or a forged buffer.
+        expect(AudioBuffer.prototype.getChannelData.call(gain, 0) === undefined, "buffer method on a node");
+        expect(AudioBuffer.prototype.getChannelData.call(forged.ABUF, 0) === undefined, "buffer method on a forged buffer");
+
+        // Every method and getter of every class, on every wrong receiver,
+        // with no arguments: nothing may crash or read a foreign payload.
+        // Names that reach files, devices or dialogs are left out.
+        const skip = /^(constructor|save|export|open|close|decode|load|createClipFromFile|createStreamFromFile|createMediaStreamSource|createMidiInput|startRecording)/;
+        const classes = [AudioContext, AudioNode, AudioParam, AudioBuffer, GainNode,
+                         OscillatorNode, AudioBufferSourceNode, BiquadFilterNode,
+                         AnalyserNode, PannerNode, StereoPannerNode, DelayNode,
+                         DynamicsCompressorNode, WaveShaperNode, ConvolverNode,
+                         ChannelSplitterNode, ChannelMergerNode, PeriodicWave];
+        const receivers = [...Object.values(forged), buf, wave, gain.gain, {}, 1, undefined];
+        let calls = 0;
+        for (const C of classes) {
+            const proto = C.prototype;
+            for (const name of Object.getOwnPropertyNames(proto)) {
+                if (skip.test(name)) continue;
+                const d = Object.getOwnPropertyDescriptor(proto, name);
+                const fn = typeof d.value === "function" ? d.value : d.get;
+                if (typeof fn !== "function") continue;
+                for (const r of receivers) {
+                    if (r === buf && C === AudioBuffer) continue;
+                    if (r === wave && C === PeriodicWave) continue;
+                    if (r === gain.gain && C === AudioParam) continue;
+                    try { fn.call(r); } catch (e) {}
+                    calls++;
+                }
+            }
+        }
+        expect(calls > 500, "swept the prototypes (" + calls + " calls)");
+        ctx.renderBlock(1024);
+        return "SUCCESS";
+    )JS"));
+}
+
 int main() {
     std::cout << "Running broaudio API contract tests..." << std::endl;
     const char* stress = std::getenv("BRONZE_GC_STRESS");
@@ -436,6 +528,8 @@ int main() {
         test_start_stop_same_tick();
         test_buffer_source_stop_and_ended();
         test_buffer_source_binds_master_effects();
+        installForger();
+        test_wrong_receiver();
         broaudio::api::shutdownAudio();
     }
     ev::destroyRealm(realm);

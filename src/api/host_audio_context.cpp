@@ -12,7 +12,7 @@ void hostAudioContextDtor(void* p) {
 
 HostAudioContext* hostAudioContextOf(Value v) {
     if (!ev::isObject(v)) return nullptr;
-    auto* p = static_cast<HostAudioContext*>(ev::handleData(v));
+    auto* p = static_cast<HostAudioContext*>(g_audioContextClass.unwrap(v));
     if (!p || p->tag != kHostAudioContextTag) return nullptr;
     return p;
 }

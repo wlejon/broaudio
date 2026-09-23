@@ -137,6 +137,79 @@ static bool sameNode(Value a, Value b) {
     return da != nullptr && da == ev::handleData(b);
 }
 
+// ---- EventTarget subset ------------------------------------------------------
+// addEventListener / removeEventListener keep their listeners on the node
+// object itself, `_listeners = { <type>: [ {listener, once}, ... ] }`, so the
+// collector sees them as edges (as `_targets`), and a listener closing over
+// its own node is collectable with it. Every read below may allocate, so the
+// node, the map, the array and each entry are held in Persistents.
+
+static void readListenerEntries(const ev::Persistent& self, const std::string& type,
+                                std::vector<ev::Persistent>& out) {
+    ev::Persistent map(ev::getProperty(self.get(), "_listeners"));
+    if (!ev::isObject(map.get())) return;
+    ev::Persistent arr(ev::getProperty(map.get(), type));
+    if (!ev::isObject(arr.get())) return;
+    Value lenV = ev::getProperty(arr.get(), "length");
+    const uint32_t n = ev::isNumber(lenV) ? static_cast<uint32_t>(ev::toDouble(lenV)) : 0;
+    for (uint32_t i = 0; i < n; ++i) out.emplace_back(ev::getElement(arr.get(), i));
+}
+
+static void writeListenerEntries(const ev::Persistent& self, const std::string& type,
+                                 const std::vector<ev::Persistent>& entries) {
+    ev::Persistent map(ev::getProperty(self.get(), "_listeners"));
+    if (!ev::isObject(map.get())) {
+        map.set(ev::createObject());
+        ev::setProperty(self.get(), "_listeners", map.get());
+    }
+    ev::Persistent arr(ev::makeArray(0));
+    for (size_t i = 0; i < entries.size(); ++i) {
+        arr.set(ev::setElement(arr.get(), static_cast<uint32_t>(i), entries[i].get()));
+    }
+    ev::setProperty(map.get(), type, arr.get());
+}
+
+// Same function object? `fn` is read from its rooted slot only AFTER the
+// (allocating) property read, so both values are post-collection addresses.
+static bool sameListener(const ev::Persistent& entry, const Value& fnSlot) {
+    Value l = ev::getProperty(entry.get(), "listener");
+    return ev::toBits(l) == ev::toBits(fnSlot);
+}
+
+void dispatchNodeEvent(Value nodeValue, const char* type) {
+    ev::Persistent node(nodeValue);
+    ObjectBuilder evt;
+    evt.set("type", type);
+    evt.set("target", node.get());
+    evt.set("currentTarget", node.get());
+
+    // The `on<type>` handler property first, then the listeners in the
+    // order they were added. The listener list is snapshotted before any is
+    // called, and `once` listeners are removed before they run.
+    ev::Persistent handler(ev::getProperty(node.get(), std::string("on") + type));
+    if (ev::isFunction(handler.get())) {
+        const Value arg = evt.get();
+        ev::call(handler.get(), node.get(), std::span<const Value>(&arg, 1));
+    }
+
+    std::vector<ev::Persistent> entries;
+    readListenerEntries(node, type, entries);
+    if (entries.empty()) return;
+    std::vector<ev::Persistent> fns, kept;
+    bool anyOnce = false;
+    for (auto& en : entries) {
+        fns.emplace_back(ev::getProperty(en.get(), "listener"));
+        if (ev::toBool(ev::getProperty(en.get(), "once"))) anyOnce = true;
+        else kept.push_back(en);
+    }
+    if (anyOnce) writeListenerEntries(node, type, kept);
+    for (auto& fn : fns) {
+        if (!ev::isFunction(fn.get())) continue;
+        const Value arg = evt.get();
+        ev::call(fn.get(), node.get(), std::span<const Value>(&arg, 1));
+    }
+}
+
 // The master-bus effect a Delay / DynamicsCompressor / WaveShaper /
 // Convolver node stands for, switched on (fully wet) and set from the node's
 // params at engine time `t`. The compressor's threshold is dB on the node and
@@ -264,6 +337,46 @@ void decorateAudioNodeProto(ObjectBuilder& b) {
         return ev::undefined();
     });
 
+    // addEventListener(type, listener, options?): a function listener,
+    // added once per (type, listener) pair; `options.once` removes it after
+    // its first call. The only event a node dispatches is a buffer source's
+    // 'ended'. Non-string types and non-function listeners are ignored.
+    b.def("addEventListener", 3, [](Value self_, std::span<const Value> a) -> Value {
+        ev::Persistent self(self_);
+        if (!ev::isObject(self.get()) || a.size() < 2 || !ev::isString(a[0]) || !ev::isFunction(a[1])) {
+            return ev::undefined();
+        }
+        const std::string type = ev::toUtf8(a[0]);
+        bool once = false;
+        if (a.size() >= 3 && ev::isObject(a[2])) once = ev::toBool(ev::getProperty(a[2], "once"));
+        std::vector<ev::Persistent> entries;
+        readListenerEntries(self, type, entries);
+        for (const auto& en : entries) {
+            if (sameListener(en, a[1])) return ev::undefined();
+        }
+        ObjectBuilder entry;
+        entry.set("listener", a[1]);
+        entry.set("once", once);
+        entries.emplace_back(entry.get());
+        writeListenerEntries(self, type, entries);
+        return ev::undefined();
+    });
+
+    b.def("removeEventListener", 3, [](Value self_, std::span<const Value> a) -> Value {
+        ev::Persistent self(self_);
+        if (!ev::isObject(self.get()) || a.size() < 2 || !ev::isString(a[0])) return ev::undefined();
+        const std::string type = ev::toUtf8(a[0]);
+        std::vector<ev::Persistent> entries, kept;
+        readListenerEntries(self, type, entries);
+        bool removed = false;
+        for (auto& en : entries) {
+            if (sameListener(en, a[1])) removed = true;
+            else kept.push_back(std::move(en));
+        }
+        if (removed) writeListenerEntries(self, type, kept);
+        return ev::undefined();
+    });
+
     b.accessor("numberOfInputs", [](Value self_, std::span<const Value>) {
         HostAudioNode* node = hostAudioNodeOf(self_);
         if (!node) return ev::fromDouble(1.0);
@@ -363,6 +476,24 @@ static void bindToMasterBus(HostDynamicsCompressorNode* comp) {
     }
 }
 
+void engageMasterEffect(broaudio::Engine& eng, HostAudioNode* node, double t) {
+    if (!node) return;
+    switch (node->nodeType) {
+    case AudioNodeType::Delay:
+        bindToMasterBus(reinterpret_cast<HostDelayNode*>(node));
+        break;
+    case AudioNodeType::DynamicsCompressor:
+        bindToMasterBus(reinterpret_cast<HostDynamicsCompressorNode*>(node));
+        break;
+    case AudioNodeType::WaveShaper:
+    case AudioNodeType::Convolver:
+        break;
+    default:
+        return;
+    }
+    driveMasterEffect(eng, node, t);
+}
+
 void decorateOscillatorNodeProto(ObjectBuilder& b) {
     // connect(gain) is handled by the shared AudioNode.connect (see
     // decorateAudioNodeProto); start() reads the remembered gain.value.
@@ -432,15 +563,8 @@ void decorateOscillatorNodeProto(ObjectBuilder& b) {
                 eng->setVoiceSpatialMaxDistance(osc->voiceId, pn->maxDistance);
                 eng->setVoiceSpatialRolloff(osc->voiceId, pn->rolloffFactor);
                 eng->setVoiceSpatialDistanceModel(osc->voiceId, parseDistanceModel(pn->distanceModel));
-            } else if (cur->nodeType == AudioNodeType::Delay) {
-                bindToMasterBus(reinterpret_cast<HostDelayNode*>(cur));
-                driveMasterEffect(*eng, cur, when);
-            } else if (cur->nodeType == AudioNodeType::DynamicsCompressor) {
-                bindToMasterBus(reinterpret_cast<HostDynamicsCompressorNode*>(cur));
-                driveMasterEffect(*eng, cur, when);
-            } else if (cur->nodeType == AudioNodeType::WaveShaper ||
-                       cur->nodeType == AudioNodeType::Convolver) {
-                driveMasterEffect(*eng, cur, when);
+            } else {
+                engageMasterEffect(*eng, cur, when);
             }
 
             pushConnectedTargets(curObj.get(), queue, when);

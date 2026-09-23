@@ -221,16 +221,8 @@ void tickLiveParams() {
         }
     }
 
-    for (auto& node : ended) {
-        ev::Persistent cb(ev::getProperty(node.get(), "onended"));
-        if (!ev::isFunction(cb.get())) continue;
-        ObjectBuilder evt;
-        evt.set("type", "ended");
-        evt.set("target", node.get());
-        evt.set("currentTarget", node.get());
-        const Value arg = evt.get();
-        ev::call(cb.get(), node.get(), std::span<const Value>(&arg, 1));
-    }
+    // `onended`, then any addEventListener('ended', ...) listeners.
+    for (auto& node : ended) dispatchNodeEvent(node.get(), "ended");
 }
 
 void shutdownLiveParams() {

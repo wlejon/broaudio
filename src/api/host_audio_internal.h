@@ -375,6 +375,18 @@ struct HostConvolverNode {
     bool normalize = true;
 };
 
+// A source's start() reaching a master-bus effect node (Delay, Dynamics-
+// Compressor, WaveShaper, Convolver): switch the bus effect on from the
+// node's params at engine time `t`, and bind a Delay's / compressor's params
+// to the master bus so later sets and automation reach it live. Any other
+// node type is ignored. (host_audio_nodes.cpp)
+void engageMasterEffect(broaudio::Engine& eng, HostAudioNode* node, double t);
+
+// Fire event `type` at a node: its `on<type>` property, then the listeners
+// added with addEventListener, each called with this = node and one event
+// {type, target, currentTarget}. Runs JS. (host_audio_nodes.cpp)
+void dispatchNodeEvent(Value node, const char* type);
+
 struct HostChannelSplitterNode {
     HostAudioNode base;
     int numberOfOutputs = 6;

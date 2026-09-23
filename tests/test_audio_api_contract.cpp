@@ -280,6 +280,126 @@ static void test_validation_and_defaults() {
     )JS"));
 }
 
+// start() and stop() in the same tick: the stop is newer than the start, so
+// the note ends (it used to be cleared by the start and ring on).
+static void test_start_stop_same_tick() {
+    runScript("OscillatorNode start + stop in one tick is silent", withPrelude(R"JS(
+        const osc = ctx.createOscillator();
+        osc.frequency.value = 440;
+        osc.connect(ctx.destination);
+        osc.start();
+        osc.stop();
+        ctx.renderBlock(4096);                     // the 40 ms release runs out
+        const tail = peak(ctx.renderBlock(4096), 0, 4096);
+        expect(tail < 1e-4, "start+stop in one tick left the voice sounding: " + tail);
+
+        // A noteOff followed by a noteOn in one tick still retriggers.
+        const v = ctx.createOscillator();
+        v.connect(ctx.destination);
+        v.start();
+        ctx.renderBlock(1024);
+        v.stop();
+        const id = v.voiceId;
+        ctx.startVoice(id);                        // restart after the release was issued
+        ctx.renderBlock(4096);
+        const held = peak(ctx.renderBlock(4096), 0, 4096);
+        expect(held > 1e-2, "a start after a stop in one tick keeps the note: " + held);
+        v.stop();
+        ctx.renderBlock(4096);
+        return "SUCCESS";
+    )JS"));
+}
+
+// AudioBufferSourceNode.stop(when) is sample-accurate on the audio clock,
+// and `ended` reaches onended plus addEventListener listeners.
+static void test_buffer_source_stop_and_ended() {
+    runScript("AudioBufferSourceNode stop(when), onended and addEventListener", withPrelude(R"JS(
+        function toneBuffer(seconds) {
+            const b = ctx.createBuffer(1, Math.round(seconds * sr), sr);
+            const d = b.getChannelData(0);
+            for (let i = 0; i < d.length; i++) d[i] = 0.5 * Math.sin(2 * Math.PI * 1000 * i / sr);
+            return b;
+        }
+        expectThrows(() => ctx.createBufferSource().stop(-1), RangeError, "stop(-1)");
+
+        // Scheduled stop 0.1 s in: sound up to that frame, silence after.
+        const src = ctx.createBufferSource();
+        src.buffer = toneBuffer(1);
+        let ended = 0;
+        src.onended = function (e) {
+            ended++;
+            expect(this === src && e.type === "ended" && e.target === src && e.currentTarget === src,
+                   "ended event shape");
+        };
+        src.connect(ctx.destination);
+        src.start();
+        const stopFrame = Math.round(0.1 * sr);
+        src.stop(ctx.currentTime + 0.1);
+        const out = ctx.renderBlock(stopFrame + 2048);
+        expect(peak(out, 0, stopFrame - 256) > 0.1, "plays until the stop time");
+        expect(peak(out, stopFrame + 256, stopFrame + 2048) < 1e-4,
+               "silent after the stop time: " + peak(out, stopFrame + 256, stopFrame + 2048));
+        expect(ended === 1, "onended fired once the scheduled stop was reached: " + ended);
+        ctx.renderBlock(1024);
+        expect(ended === 1, "onended fires once");
+
+        // A stop before the scheduled start: never sounds, still ends.
+        const late = ctx.createBufferSource();
+        late.buffer = toneBuffer(0.5);
+        let lateEnded = 0;
+        late.onended = () => { lateEnded++; };
+        late.connect(ctx.destination);
+        const t0 = ctx.currentTime;
+        late.start(t0 + 0.05);
+        late.stop(t0 + 0.02);
+        const quiet = ctx.renderBlock(Math.round(0.1 * sr));
+        expect(peak(quiet, 0, quiet.length) < 1e-4, "a stop before the start never sounds");
+        expect(lateEnded === 1, "and still fires onended: " + lateEnded);
+
+        // addEventListener: deduplicated, `once`, removable; after onended.
+        const ev = ctx.createBufferSource();
+        ev.buffer = toneBuffer(0.02);
+        const calls = [];
+        const f = function (e) { calls.push("f:" + e.type + ":" + (this === ev)); };
+        const gone = () => calls.push("gone");
+        ev.onended = () => calls.push("on");
+        ev.addEventListener("ended", f);
+        ev.addEventListener("ended", f);           // same pair: ignored
+        ev.addEventListener("ended", () => calls.push("once"), { once: true });
+        ev.addEventListener("ended", gone);
+        ev.removeEventListener("ended", gone);
+        ev.start();
+        ctx.renderBlock(4096);
+        expect(calls.join() === "on,f:ended:true,once", "dispatch: " + calls.join());
+        return "SUCCESS";
+    )JS"));
+}
+
+// A buffer source's start() binds Delay / DynamicsCompressor params to the
+// master bus, as an oscillator's does: later sets reach the bus.
+static void test_buffer_source_binds_master_effects() {
+    runScript("AudioBufferSourceNode start binds delay and compressor params live", withPrelude(R"JS(
+        const b = ctx.createBuffer(1, sr, sr);
+        const src = ctx.createBufferSource();
+        src.buffer = b;
+        const delay = ctx.createDelay(2);
+        const comp = ctx.createDynamicsCompressor();
+        delay.delayTime.value = 0.2;
+        src.connect(delay).connect(comp).connect(ctx.destination);
+        const before = ctx.getBusDelayTime(0);
+        src.start();
+        delay.delayTime.value = 0.4;
+        near(ctx.getBusDelayTime(0) / before, 2, 0.01, "delayTime is live on the master bus");
+        comp.ratio.value = 4;
+        near(ctx.getBusCompressorRatio(0), 4, 1e-4, "compressor ratio is live on the master bus");
+        src.stop();
+        delay.disconnect();
+        comp.disconnect();
+        ctx.renderBlock(1024);
+        return "SUCCESS";
+    )JS"));
+}
+
 int main() {
     std::cout << "Running broaudio API contract tests..." << std::endl;
     const char* stress = std::getenv("BRONZE_GC_STRESS");
@@ -297,6 +417,9 @@ int main() {
         test_biquad_off_until_connected();
         test_typed_array_args();
         test_validation_and_defaults();
+        test_start_stop_same_tick();
+        test_buffer_source_stop_and_ended();
+        test_buffer_source_binds_master_effects();
         broaudio::api::shutdownAudio();
     }
     ev::destroyRealm(realm);

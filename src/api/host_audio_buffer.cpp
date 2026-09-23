@@ -484,6 +484,11 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
                     processDynamicsCompressor(comp, interleaved.data(), frames, channels, sr, curTime);
                 }
 
+                // As for an oscillator: a Delay / Compressor / WaveShaper /
+                // Convolver on the path switches its master-bus effect on,
+                // and a Delay's or compressor's params bind to the bus live.
+                engageMasterEffect(*e, cur, curTime);
+
                 pushConnectedTargets(curObj.get(), queue, curTime);
             }
 
@@ -533,16 +538,18 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
         return ev::undefined();
     });
 
-    b.def("stop", 1, [](Value self_, std::span<const Value>) -> Value {
+    // stop(when = 0): Web Audio's stop on the context clock. A `when` at or
+    // before now stops at once; a later one is a sample-accurate scheduled
+    // stop on the audio clock (Engine::stopPlaybackAt), and calling again
+    // moves it. The playing hold fires `onended` on the first tick after
+    // the playback has stopped.
+    b.def("stop", 1, [](Value self_, std::span<const Value> a) -> Value {
         HostAudioBufferSourceNode* src = bufSrcOf(self_);
         if (!src) return ev::undefined();
+        const double when = hasArg(a, 0) ? numAt(a, 0) : 0.0;
+        if (!(when >= 0.0)) return ev::throwRangeError("stop: when must be a non-negative number");
         auto* e = getAudioEngine();
-        if (e && src->playbackId >= 0) {
-            e->stopPlayback(src->playbackId);
-            // The playing hold sees the playback gone on the next tick and
-            // fires `onended`, as Web Audio does for stop().
-            src->playbackId = -1;
-        }
+        if (e && src->playbackId >= 0) e->stopPlaybackAt(src->playbackId, when);
         src->stopped = true;
         return ev::undefined();
     });

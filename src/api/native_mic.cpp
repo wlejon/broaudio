@@ -22,6 +22,27 @@ constexpr int kMicRing = 4096;
 // slots rather than a kMicRing * chunkFrames allocation (16 GB at the cap).
 constexpr size_t kSampleRingBudget = size_t{1} << 24;
 
+// Relaxed element access for the PCM ring. std::atomic_ref where the library
+// has it; Apple's libc++ only ships it from Xcode 16, so older ones use the
+// builtins atomic_ref is itself built on (MSVC's STL always has atomic_ref).
+inline void relaxedStore(float& dst, float v) {
+#if defined(__cpp_lib_atomic_ref)
+    std::atomic_ref<float>(dst).store(v, std::memory_order_relaxed);
+#else
+    __atomic_store(&dst, &v, __ATOMIC_RELAXED);
+#endif
+}
+
+inline float relaxedLoad(const float& src) {
+#if defined(__cpp_lib_atomic_ref)
+    return std::atomic_ref<float>(const_cast<float&>(src)).load(std::memory_order_relaxed);
+#else
+    float v;
+    __atomic_load(&src, &v, __ATOMIC_RELAXED);
+    return v;
+#endif
+}
+
 // One bro.mic.start()'s ring, shared by the main thread and the tap callback.
 // The callback owns a reference, so a callback still running on the audio
 // thread after removeMicTap (the tap list is reclaimed by QSBR, not
@@ -90,9 +111,9 @@ struct MicSession {
             const int m = n < cf ? n : cf;
             float* dst = sampleRing.data() + sslot * static_cast<size_t>(cf);
             for (int k = 0; k < m; ++k)
-                std::atomic_ref<float>(dst[k]).store(s[k], std::memory_order_relaxed);
+                relaxedStore(dst[k], s[k]);
             for (int k = m; k < cf; ++k)
-                std::atomic_ref<float>(dst[k]).store(0.0f, std::memory_order_relaxed);
+                relaxedStore(dst[k], 0.0f);
             sampleSeq[sslot].store(2 * idx + 2, std::memory_order_release);
         }
         slotSeq[slot].store(2 * idx + 2, std::memory_order_release);
@@ -114,8 +135,7 @@ struct MicSession {
             samples.resize(cf);
             const float* src = sampleRing.data() + sslot * cf;
             for (size_t k = 0; k < cf; ++k)
-                samples[k] = std::atomic_ref<float>(const_cast<float&>(src[k]))
-                                 .load(std::memory_order_relaxed);
+                samples[k] = relaxedLoad(src[k]);
         }
         // Orders the payload loads before the re-checks: a payload load that
         // saw a lapping write makes that write's odd sequence visible below.

@@ -15,6 +15,14 @@ void installAudio();
 /// Mount the `bro.mic` live audio streaming API into the current Bronze realm.
 void installMic();
 
+/// Mount `bro.ear` (measure / compare / spectrogram: offline analysis of a
+/// finished clip, include/broaudio/ear/ear.h) into the current Bronze realm.
+/// Creates `bro` and `bro.ear` when absent and otherwise adds to them, so
+/// another library's members of `bro.ear` (brosoundml's `loadClap`) survive
+/// in either install order. Needs no audio engine: pure computation, safe in
+/// a worker realm. File paths resolve through setPathResolver below.
+void installEar();
+
 /// Drain pending microphone audio chunks into JS onChunk callback, and settle
 /// the background work the AudioContext started (tickAsyncJobs below).
 /// Safe and recommended to invoke once per frame / tick from the main JS thread.
@@ -35,7 +43,8 @@ void tickAsyncJobs();
 
 /// How a path handed to the file loaders and savers (`createClipFromFile`,
 /// `createClipFromFileAsync`, `createStreamFromFile`, `decodeAudioFile`,
-/// `saveWav`, `exportRecordingToWav`, `savePreset`, `loadPreset`) becomes a
+/// `saveWav`, `exportRecordingToWav`, `savePreset`, `loadPreset`, and
+/// `bro.ear`'s clip paths and spectrogram PNG) becomes a
 /// filesystem path. Unset, the path is used as given; a host sets its `fs`
 /// resolver so a relative path or a mount path ("/app/assets/hit.ogg") means
 /// what it means to the app. A path about to be WRITTEN resolves through its
@@ -59,4 +68,5 @@ void shutdownAudio();
 // Global namespace aliases for compatibility
 using broaudio::api::installAudio;
 using broaudio::api::installMic;
+using broaudio::api::installEar;
 using broaudio::api::shutdownAudio;

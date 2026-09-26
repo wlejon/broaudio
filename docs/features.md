@@ -140,6 +140,12 @@ Per bus, in a chain whose order is set by `setBusEffectOrder`.
   wake-word detectors, live ASR, and custom analyzers. `injectMicSamples` drives the same tap chain
   from synthetic audio for headless and test use.
 - **Output recording**: captures up to 60 seconds of engine output.
+- **The ear** (`include/broaudio/ear/ear.h`, JS `bro.ear`): offline, deterministic judgement of a
+  finished clip. `measure` reports timing (peak, attack, tail, Schroeder T60), loudness (peak,
+  RMS, BS.1770 integrated LUFS), spectral centroid and flatness, tonality, and tracked partials
+  with ring times, harmonicity and a ring score; `compare` scores a clip against a reference
+  (loudness-normalised, onset-aligned, rate-matched) by envelope, spectrum and tonality;
+  `spectrogram` renders clips on shared axes into RGBA with a built-in font and PNG writer.
 
 ## System-audio capture
 

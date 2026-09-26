@@ -9,9 +9,15 @@
 #include "embed/embed.h"
 #include "eval/eval.h"
 
+#include <broaudio/io/audio_file.h>
+
+#include <cmath>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
+#include <vector>
 
 namespace ev = bronze::embed;
 using Value = bronze::Value;
@@ -307,6 +313,134 @@ static void test_graph_script() {
     TEST_CHECK(ev::toUtf8(res.value) == "SUCCESS");
 }
 
+// bro.ear: measure / compare / spectrogram from a compiled script, over every
+// clip form (bare Float32Array, {samples, sampleRate, channels}, AudioBuffer,
+// a path), plus the PNG it writes and the members of bro.ear it must keep.
+static void test_ear_script() {
+    std::cout << "[4/4] bro.ear via bronze eval..." << std::endl;
+
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "broaudio_test_ear";
+    fs::create_directories(dir);
+    const std::string wavPath = (dir / "tone.wav").generic_string();
+    const std::string pngPath = (dir / "pair.png").generic_string();
+    fs::remove(pngPath);
+    {
+        // 0.5 s stereo 660 Hz, decaying: the path form of a clip.
+        const int rate = 44100, frames = rate / 2;
+        std::vector<float> s(static_cast<size_t>(frames) * 2);
+        for (int i = 0; i < frames; ++i) {
+            const double t = static_cast<double>(i) / rate;
+            const float v = static_cast<float>(0.5 * std::exp(-t / 0.2) * std::sin(2.0 * 3.141592653589793 * 660.0 * t));
+            s[2 * i] = v;
+            s[2 * i + 1] = v;
+        }
+        TEST_CHECK(broaudio::saveWav(wavPath.c_str(), s.data(), frames, 2, rate));
+    }
+
+    std::string script = R"JS(
+        (function() {
+            const ear = bro.ear;
+            if (typeof ear.loadClap !== "function") throw new Error("installEar replaced bro.ear");
+            for (const k of ["measure", "compare", "spectrogram"]) {
+                if (typeof ear[k] !== "function") throw new Error("missing bro.ear." + k);
+            }
+            const sr = 48000;
+            function tone(freq, tau, secs, amp, delay) {
+                const n = Math.floor(secs * sr), d = Math.floor((delay || 0) * sr);
+                const s = new Float32Array(n + d);
+                for (let i = 0; i < n; i++) s[i + d] = amp * Math.exp(-i / sr / tau) * Math.sin(2 * Math.PI * freq * i / sr);
+                return s;
+            }
+            const a = tone(440, 0.3, 1.5, 0.7);
+            const m = ear.measure(a, { sampleRate: sr });
+            if (!(m.tonality > 0.9)) throw new Error("sine tonality " + m.tonality);
+            if (Math.abs(m.partials[0].freqHz - 440) > 2) throw new Error("partial " + m.partials[0].freqHz);
+            if (!(m.partials[0].ringTime > 1)) throw new Error("ringTime " + m.partials[0].ringTime);
+            if (typeof m.t60 !== "number" || Math.abs(m.t60 - 2.07) > 0.2) throw new Error("t60 " + m.t60);
+            if (m.tailEnd !== "end" || m.noiseFloorDb !== null) throw new Error("tailEnd " + m.tailEnd + " " + m.noiseFloorDb);
+            if (m.timeline.length !== 8) throw new Error("timeline " + m.timeline.length);
+            if (m.ringing.count !== 1 || m.ringing.inharmonicity !== 0) throw new Error("ringing " + JSON.stringify(m.ringing));
+            if (typeof m.lufs !== "number") throw new Error("lufs " + m.lufs);
+
+            // Deterministic: the same report twice.
+            if (JSON.stringify(ear.measure(a, { sampleRate: sr })) !== JSON.stringify(m)) throw new Error("measure not deterministic");
+
+            // White noise, as a stereo {samples, sampleRate, channels} object.
+            let seed = 1;
+            const noise = new Float32Array(sr * 2);
+            for (let i = 0; i < noise.length; i++) { seed = (seed * 1103515245 + 12345) % 2147483648; noise[i] = 0.2 * (seed / 1073741824 - 1); }
+            const mn = ear.measure({ samples: noise, sampleRate: sr, channels: 2 });
+            if (mn.channels !== 2 || Math.abs(mn.duration - 1) > 1e-9) throw new Error("channels/duration " + mn.channels + " " + mn.duration);
+            if (!(mn.flatness > 0.7) || !(mn.tonality < 0.05)) throw new Error("noise " + mn.flatness + " " + mn.tonality);
+            if (mn.t60 !== null && typeof mn.t60 !== "number") throw new Error("t60 type");
+
+            // AudioBuffer and a path.
+            const buf = new AudioBuffer({ length: a.length, numberOfChannels: 1, sampleRate: sr });
+            buf.copyToChannel(a, 0);
+            const mb = ear.measure(buf);
+            if (mb.tonality !== m.tonality) throw new Error("AudioBuffer measure differs");
+            const mp = ear.measure(WAV_PATH);
+            if (mp.sampleRate !== 44100 || Math.abs(mp.partials[0].freqHz - 660) > 3) throw new Error("path measure " + mp.sampleRate + " " + (mp.partials[0] && mp.partials[0].freqHz));
+
+            // compare.
+            const ref = { samples: a, sampleRate: sr };
+            const self = ear.compare(ref, ref);
+            if (self.score !== 0) throw new Error("self score " + self.score);
+            const shifted = ear.compare({ samples: tone(440, 0.3, 1.5, 0.35, 0.02), sampleRate: sr }, ref);
+            if (!(shifted.score < 0.03) || Math.abs(shifted.offsetTime - 0.02) > 0.006) throw new Error("shifted " + JSON.stringify(shifted));
+            const far = ear.compare({ samples: noise, sampleRate: sr }, ref);
+            if (!(far.score > 0.5)) throw new Error("noise vs tone " + far.score);
+            const w = ear.compare({ samples: noise, sampleRate: sr }, ref, { weights: { envelope: 0, spectrum: 0, tonality: 1 } });
+            if (Math.abs(w.score - w.tonality) > 1e-12) throw new Error("weights ignored");
+
+            // spectrogram, two clips stacked, written as a PNG.
+            const img = ear.spectrogram([ref, { samples: noise, sampleRate: sr }], { width: 300, height: 120, labels: ["tone", "noise"], path: PNG_PATH });
+            if (!(img.data instanceof Uint8ClampedArray)) throw new Error("data type");
+            if (img.data.length !== img.width * img.height * 4) throw new Error("data size");
+            if (img.panels.length !== 2 || img.panels[0].label !== "tone") throw new Error("panels " + JSON.stringify(img.panels));
+            if (img.path !== PNG_PATH) throw new Error("path " + img.path);
+            const again = ear.spectrogram([ref, { samples: noise, sampleRate: sr }], { width: 300, height: 120, labels: ["tone", "noise"] });
+            for (let i = 0; i < img.data.length; i++) if (img.data[i] !== again.data[i]) throw new Error("spectrogram not deterministic at " + i);
+            const side = ear.spectrogram([a, a], { sampleRate: sr, layout: "side", scale: "mel" });
+            if (side.panels[0].y !== side.panels[1].y) throw new Error("side layout");
+
+            // Errors.
+            function throwsType(f) { try { f(); } catch (e) { return e instanceof TypeError; } return false; }
+            if (!throwsType(() => ear.measure(new Float32Array(10)))) throw new Error("bare array without sampleRate");
+            if (!throwsType(() => ear.measure(42))) throw new Error("number clip");
+            if (!throwsType(() => ear.spectrogram(ref, { layout: "diagonal" }))) throw new Error("bad layout");
+            let threw = false;
+            try { ear.measure("no/such/file.wav"); } catch (e) { threw = true; }
+            if (!threw) throw new Error("missing file did not throw");
+            return "SUCCESS";
+        })()
+    )JS";
+    auto replace = [&script](const std::string& key, const std::string& value) {
+        for (size_t p; (p = script.find(key)) != std::string::npos;) script.replace(p, key.size(), "\"" + value + "\"");
+    };
+    replace("WAV_PATH", wavPath);
+    replace("PNG_PATH", pngPath);
+
+    // Another library's member of bro.ear, present before installEar runs.
+    ev::CallResult pre = bronze::eval::evalScript("globalThis.bro = { ear: { loadClap: function () { return 1; } } }; 0");
+    TEST_CHECK(!pre.thrown);
+    broaudio::api::installEar();
+
+    ev::CallResult res = bronze::eval::evalScript(script);
+    if (res.thrown) {
+        std::cerr << "eval threw: " << ev::toUtf8(res.value) << std::endl;
+        std::exit(1);
+    }
+    TEST_CHECK(ev::toUtf8(res.value) == "SUCCESS");
+
+    std::ifstream png(pngPath, std::ios::binary);
+    TEST_CHECK(png.good());
+    char sig[8] = {};
+    png.read(sig, 8);
+    TEST_CHECK(sig[0] == static_cast<char>(0x89) && sig[1] == 'P' && sig[2] == 'N' && sig[3] == 'G');
+}
+
 int main() {
     std::cout << "Running broaudio API test..." << std::endl;
 
@@ -317,6 +451,7 @@ int main() {
         test_mounts();
         test_context_direct();
         test_graph_script();
+        test_ear_script();
     }
     ev::destroyRealm(realm);
     broaudio::api::shutdownAudio();

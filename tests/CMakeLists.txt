@@ -43,6 +43,7 @@ set(BROAUDIO_TESTS
     test_mic_tap
     test_loopback_capture
     test_midi_input
+    test_ear
 )
 
 foreach(test ${BROAUDIO_TESTS})

@@ -154,6 +154,13 @@ add_library(broaudio STATIC
     src/dsp/jit/jit_bus_builder.cpp
     src/dsp/jit/jit_bus_pipeline.cpp
     src/dsp/jit/jit_compiler.cpp
+    src/ear/ear_signal.cpp
+    src/ear/ear_partials.cpp
+    src/ear/ear_measure.cpp
+    src/ear/ear_compare.cpp
+    src/ear/ear_spectrogram.cpp
+    src/ear/ear_font.cpp
+    src/ear/ear_png.cpp
 )
 
 # Loopback / process-audio capture: Windows uses WASAPI, macOS uses CoreAudio

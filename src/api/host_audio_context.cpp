@@ -395,11 +395,32 @@ void decorateAudioContextProto(ObjectBuilder& b) {
     });
 
     // 5. Recording & WAV
-    b.def("startRecording", 0, [](Value, std::span<const Value>) {
+    b.def("startRecording", 0, [](Value, std::span<const Value> a) {
         auto* e = getAudioEngine();
-        if (e) e->startRecording();
+        if (!e) return ev::undefined();
+        int channels = 1;
+        double seconds = 60.0;
+        if (!a.empty() && ev::isObject(a[0])) {
+            ev::Persistent opt(a[0]);
+            Value c = ev::getProperty(opt.get(), "channels");
+            if (!ev::isUndefined(c) && !ev::isObject(c)) {
+                double d = ev::toDouble(c);
+                if (!std::isnan(d)) channels = d >= 2.0 ? 2 : 1;
+            }
+            Value s = ev::getProperty(opt.get(), "seconds");
+            if (!ev::isUndefined(s) && !ev::isObject(s)) {
+                double d = ev::toDouble(s);
+                if (d > 0.0) seconds = d;
+            }
+        }
+        e->startRecording(channels, seconds);
         return ev::undefined();
     });
+
+    b.accessor("recordingChannels", [](Value, std::span<const Value>) {
+        auto* e = getAudioEngine();
+        return ev::fromDouble(e ? e->recordChannels() : 1);
+    }, nullptr);
 
     b.def("stopRecording", 0, [](Value, std::span<const Value>) -> Value {
         auto* e = getAudioEngine();

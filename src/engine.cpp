@@ -309,17 +309,7 @@ void Engine::renderInternal(int numFrames)
         std::memset(buffer, 0, numFrames * 2 * sizeof(float));
     }
 
-    // Record tap (mono mixdown of final stereo output). Lives here, after
-    // the bus graph + master gain + limiter, so it captures voices routed
-    // through user buses — not just voices on the master bus.
-    if (recording_.load(std::memory_order_relaxed)) {
-        uint64_t wp = recordWritePos_.load(std::memory_order_relaxed);
-        for (int i = 0; i < numFrames; i++) {
-            float mono = (buffer[i * 2] + buffer[i * 2 + 1]) * 0.5f;
-            recordRing_[static_cast<int>((wp + i) % RECORD_RING_SIZE)] = mono;
-        }
-        recordWritePos_.store(wp + numFrames, std::memory_order_release);
-    }
+    tapRecord(buffer, numFrames);
 
     // Mono mixdown to output ring buffer for analysis
     for (int i = 0; i < numFrames; i++) {
@@ -1933,31 +1923,73 @@ void Engine::deliverTapChunk(MicTap& tap, const float* samples, int numSamples)
 // Recording
 // ---------------------------------------------------------------------------
 
-void Engine::startRecording()
+void Engine::startRecording(int channels, double maxSeconds)
 {
+    channels = channels >= 2 ? 2 : 1;
+    if (!(maxSeconds > 0.0)) maxSeconds = 60.0;
+    double wantFrames = std::ceil(maxSeconds * static_cast<double>(sampleRate_));
+    double capFrames = static_cast<double>(MAX_RECORD_SAMPLES / static_cast<size_t>(channels));
+    uint64_t frames = static_cast<uint64_t>(std::max(1.0, std::min(wantFrames, capFrames)));
+
+    recording_.store(false, std::memory_order_release);
+    auto tap = recordTap_.load();
+    if (!tap || tap->channels != channels || tap->frames != frames) {
+        auto fresh = std::make_shared<RecordTap>();
+        fresh->channels = channels;
+        fresh->frames = frames;
+        fresh->ring.assign(static_cast<size_t>(frames) * static_cast<size_t>(channels), 0.0f);
+        std::lock_guard<std::mutex> lock(mediaWriteMutex_);
+        recordTap_.store(std::move(fresh));
+    }
     recordStartPos_.store(recordWritePos_.load(std::memory_order_relaxed),
                           std::memory_order_relaxed);
     recording_.store(true, std::memory_order_release);
+}
+
+void Engine::tapRecord(const float* stereo, int numFrames)
+{
+    if (!recording_.load(std::memory_order_relaxed)) return;
+    auto tap = recordTap_.load();
+    if (!tap || tap->frames == 0) return;
+    uint64_t wp = recordWritePos_.load(std::memory_order_relaxed);
+    float* ring = tap->ring.data();
+    const uint64_t cap = tap->frames;
+    if (tap->channels == 2) {
+        for (int i = 0; i < numFrames; i++) {
+            size_t at = static_cast<size_t>((wp + i) % cap) * 2;
+            ring[at] = stereo[i * 2];
+            ring[at + 1] = stereo[i * 2 + 1];
+        }
+    } else {
+        for (int i = 0; i < numFrames; i++) {
+            ring[static_cast<size_t>((wp + i) % cap)] = (stereo[i * 2] + stereo[i * 2 + 1]) * 0.5f;
+        }
+    }
+    recordWritePos_.store(wp + numFrames, std::memory_order_release);
 }
 
 void Engine::stopRecording()
 {
     recording_.store(false, std::memory_order_release);
 
+    auto tap = recordTap_.load();
     uint64_t endPos = recordWritePos_.load(std::memory_order_acquire);
     uint64_t startPos = recordStartPos_.load(std::memory_order_relaxed);
-    int count = static_cast<int>(endPos - startPos);
-    if (count <= 0) {
+    if (!tap || endPos <= startPos) {
         recordOutput_.clear();
         return;
     }
-    if (count > RECORD_RING_SIZE) {
-        startPos = endPos - RECORD_RING_SIZE;
-        count = RECORD_RING_SIZE;
+    uint64_t count = endPos - startPos;
+    if (count > tap->frames) {
+        startPos = endPos - tap->frames;
+        count = tap->frames;
     }
-    recordOutput_.resize(count);
-    for (int i = 0; i < count; i++) {
-        recordOutput_[i] = recordRing_[static_cast<int>((startPos + i) % RECORD_RING_SIZE)];
+    const int ch = tap->channels;
+    recordOutputChannels_ = ch;
+    recordOutput_.resize(static_cast<size_t>(count) * static_cast<size_t>(ch));
+    for (uint64_t i = 0; i < count; i++) {
+        size_t from = static_cast<size_t>((startPos + i) % tap->frames) * static_cast<size_t>(ch);
+        for (int c = 0; c < ch; c++) recordOutput_[static_cast<size_t>(i) * ch + c] = tap->ring[from + c];
     }
 }
 
@@ -3241,19 +3273,9 @@ void Engine::processOutputChunk(SDL_AudioStream* stream, int numFrames)
         engine->micPlaybackReadPos_.store(rp + toRead, std::memory_order_relaxed);
     }
 
-    // Record tap (mono mixdown from master bus, before effects)
     Bus* masterBus = nullptr;
     for (auto& bus : *currentBuses) {
         if (bus->id == MASTER_BUS_ID) { masterBus = bus.get(); break; }
-    }
-
-    if (engine->recording_.load(std::memory_order_relaxed) && masterBus) {
-        uint64_t wp = engine->recordWritePos_.load(std::memory_order_relaxed);
-        for (int i = 0; i < numFrames; i++) {
-            float mono = (masterBus->buffer[i * 2] + masterBus->buffer[i * 2 + 1]) * 0.5f;
-            engine->recordRing_[static_cast<int>((wp + i) % RECORD_RING_SIZE)] = mono;
-        }
-        engine->recordWritePos_.store(wp + numFrames, std::memory_order_release);
     }
 
     // Process child buses: apply effects, then mix into parent + send
@@ -3310,6 +3332,7 @@ void Engine::processOutputChunk(SDL_AudioStream* stream, int numFrames)
     } else {
         std::memset(buffer, 0, numFloats * sizeof(float));
     }
+    engine->tapRecord(buffer, numFrames);
 
     // Mix mic monitor (direct-to-output, only when not routed through a bus)
     if (micBusId < 0 && !engine->micMuted_.load(std::memory_order_relaxed)) {
@@ -3812,11 +3835,10 @@ std::future<int> Engine::createClipFromFileAsync(const char* path)
 
 bool Engine::exportRecordingToWav(const char* path)
 {
-    auto buf = getRecordBuffer();
-    if (buf.empty()) return false;
-    // Record buffer is mono (single channel)
-    int numFrames = static_cast<int>(buf.size());
-    return saveWav(path, buf.data(), numFrames, 1, sampleRate_);
+    if (recordOutput_.empty()) return false;
+    const int ch = recordOutputChannels_;
+    int numFrames = static_cast<int>(recordOutput_.size() / static_cast<size_t>(ch));
+    return saveWav(path, recordOutput_.data(), numFrames, ch, sampleRate_);
 }
 
 // ---------------------------------------------------------------------------

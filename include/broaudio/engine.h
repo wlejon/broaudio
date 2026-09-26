@@ -373,10 +373,12 @@ public:
 
     // --- Recording ---
 
-    void startRecording();
+    void startRecording(int channels = 1, double maxSeconds = 60.0);
     void stopRecording();
     bool isRecording() const { return recording_.load(std::memory_order_relaxed); }
     std::vector<float> getRecordBuffer() const { return recordOutput_; }
+    int recordChannels() const { return recordOutputChannels_; }
+    static constexpr size_t MAX_RECORD_SAMPLES = size_t(1) << 27;
 
     // --- Audio Clips ---
 
@@ -785,12 +787,18 @@ private:
     std::atomic<float> micMonitorGain_{0.5f};
     std::atomic<int> micBusId_{-1};  // -1 = direct-to-output (legacy), >= 0 = route through bus
 
-    static constexpr int RECORD_RING_SIZE = 44100 * 60;
-    std::vector<float> recordRing_ = std::vector<float>(RECORD_RING_SIZE, 0.0f);
+    struct RecordTap {
+        int channels = 1;
+        uint64_t frames = 0;
+        std::vector<float> ring;
+    };
+    void tapRecord(const float* stereo, int numFrames);
+    AtomicSharedPtr<RecordTap> recordTap_{rcu_};
     std::atomic<uint64_t> recordWritePos_{0};
     std::atomic<uint64_t> recordStartPos_{0};
     std::atomic<bool> recording_{false};
     std::vector<float> recordOutput_;
+    int recordOutputChannels_ = 1;
 
     // Sample-accurate scheduled events (main thread writes, audio thread reads)
     struct ScheduledEvent {

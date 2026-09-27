@@ -30,8 +30,15 @@ TEST(default_cache_matches_order) {
 
 // --- EffectSlot enum ---
 
-TEST(effect_slot_count_is_seven) {
-    ASSERT_EQ(static_cast<int>(EffectSlot::Count), 7);
+TEST(effect_slot_count_is_eight) {
+    ASSERT_EQ(static_cast<int>(EffectSlot::Count), 8);
+    PASS();
+}
+
+TEST(convolution_is_last_by_default) {
+    Bus bus;
+    ASSERT_EQ(bus.effectOrder[7].load(), static_cast<uint8_t>(EffectSlot::Convolution));
+    ASSERT_EQ(bus.effectOrderCache[7], 7);
     PASS();
 }
 

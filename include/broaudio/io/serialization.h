@@ -103,7 +103,7 @@ struct BusPreset {
     EffectSlot effectOrder[static_cast<int>(EffectSlot::Count)] = {
         EffectSlot::Filter, EffectSlot::Delay, EffectSlot::Compressor,
         EffectSlot::Chorus, EffectSlot::Reverb, EffectSlot::Equalizer,
-        EffectSlot::Distortion
+        EffectSlot::Distortion, EffectSlot::Convolution
     };
 
     // Per-effect presets

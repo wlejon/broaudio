@@ -133,8 +133,11 @@ add_library(broaudio STATIC
     src/dsp/equalizer.cpp
     src/dsp/fft.cpp
     src/dsp/limiter.cpp
+    src/dsp/partitioned_convolver.cpp
     src/dsp/resampler.cpp
     src/dsp/reverb.cpp
+    src/spatial/air_absorption.cpp
+    src/spatial/spatial_chain.cpp
     src/synth/oscillator.cpp
     src/synth/modulation.cpp
     src/synth/voice.cpp
@@ -148,6 +151,9 @@ add_library(broaudio STATIC
     src/io/audio_stream.cpp
     src/io/serialization.cpp
     src/engine.cpp
+    src/engine_bus_fx.cpp
+    src/engine_distance.cpp
+    src/engine_playback_mix.cpp
     src/log.cpp
     src/mic_tap.cpp
     src/rcu.cpp

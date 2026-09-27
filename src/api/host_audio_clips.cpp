@@ -140,9 +140,9 @@ void registerAudioContextClips(ObjectBuilder& b) {
         return ev::fromBool(e && !a.empty() && e->isPlaybackPlaying(i32At(a, 0)));
     });
 
-    b.def("setClipGain", 2, [](Value, std::span<const Value> a) {
+    b.def("setClipGain", 3, [](Value, std::span<const Value> a) {
         auto* e = getAudioEngine();
-        if (e && a.size() >= 2) e->setPlaybackGain(i32At(a, 0), static_cast<float>(numAt(a, 1)));
+        if (e && a.size() >= 2) e->setPlaybackGain(i32At(a, 0), static_cast<float>(numAt(a, 1)), rampAt(a, 2));
         return ev::undefined();
     });
 
@@ -164,9 +164,11 @@ void registerAudioContextClips(ObjectBuilder& b) {
         return ev::undefined();
     });
 
-    b.def("setPlaybackGain", 2, [](Value, std::span<const Value> a) {
+    // setPlaybackGain(playbackId, gain, rampSeconds?): linear ramp when
+    // rampSeconds > 0, a ~5 ms de-zipper otherwise.
+    b.def("setPlaybackGain", 3, [](Value, std::span<const Value> a) {
         auto* e = getAudioEngine();
-        if (e && a.size() >= 2) e->setPlaybackGain(i32At(a, 0), static_cast<float>(numAt(a, 1)));
+        if (e && a.size() >= 2) e->setPlaybackGain(i32At(a, 0), static_cast<float>(numAt(a, 1)), rampAt(a, 2));
         return ev::undefined();
     });
 

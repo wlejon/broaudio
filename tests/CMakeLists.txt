@@ -44,6 +44,11 @@ set(BROAUDIO_TESTS
     test_loopback_capture
     test_midi_input
     test_ear
+    test_air_absorption
+    test_propagation_delay
+    test_param_ramps
+    test_partitioned_convolver
+    test_spatial_chain_cost
 )
 
 foreach(test ${BROAUDIO_TESTS})

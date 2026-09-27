@@ -10,6 +10,8 @@
 #include "broaudio/dsp/equalizer.h"
 #include "broaudio/dsp/reverb.h"
 #include "broaudio/dsp/smoother.h"
+#include "broaudio/dsp/param_ramp.h"
+#include "broaudio/dsp/partitioned_convolver.h"
 #include "broaudio/atomic_shared_ptr.h"
 #include "broaudio/dsp/jit/jit_bus_pipeline.h"
 
@@ -59,6 +61,18 @@ struct Bus {
     DistortionParams distortionParams;
     EqualizerParams eqParams;
 
+    // Convolution reverb: switch, wet/dry mix, and the prepared IR. The
+    // convolver is built on the control thread (Engine::
+    // setBusConvolutionImpulse) and published whole; the audio thread only
+    // loads it. convolutionClipId is the clip the IR was taken from (-1 none).
+    std::atomic<bool> convolutionEnabled{false};
+    std::atomic<float> convolutionMix{1.0f};
+    std::atomic<int> convolutionClipId{-1};
+    AtomicSharedPtr<PartitionedConvolver> convolver;
+
+    // Ramp control for `gain` (Engine::setBusGain's rampSeconds).
+    RampControl gainRamp;
+
     // Effect processing order (main thread writes, audio thread reads)
     std::atomic<uint8_t> effectOrder[NUM_EFFECT_SLOTS] = {
         static_cast<uint8_t>(EffectSlot::Filter),
@@ -67,7 +81,8 @@ struct Bus {
         static_cast<uint8_t>(EffectSlot::Chorus),
         static_cast<uint8_t>(EffectSlot::Reverb),
         static_cast<uint8_t>(EffectSlot::Equalizer),
-        static_cast<uint8_t>(EffectSlot::Distortion)
+        static_cast<uint8_t>(EffectSlot::Distortion),
+        static_cast<uint8_t>(EffectSlot::Convolution)
     };
     std::atomic<uint32_t> effectOrderVersion{0};
 
@@ -87,12 +102,16 @@ struct Bus {
     uint32_t distortionVersion = 0;
     Equalizer equalizer;
     uint32_t eqVersion = 0;
-    uint8_t effectOrderCache[NUM_EFFECT_SLOTS] = {0, 1, 2, 3, 4, 5, 6};
+    uint8_t effectOrderCache[NUM_EFFECT_SLOTS] = {0, 1, 2, 3, 4, 5, 6, 7};
     uint32_t effectOrderVersionSeen = 0;
 
-    // Parameter smoothers (audio thread only)
-    Smoother smoothGain;
+    // Parameter smoothers (audio thread only). gainState follows `gain`
+    // through gainRamp; gainBlock holds this block's per-sample gain so the
+    // parent mix and the aux send apply the same trajectory.
+    ParamRamp gainState;
+    std::vector<float> gainBlock;
     Smoother smoothPan;
+    ParamRamp convMix;
 
     // Metering (audio thread writes, main thread reads)
     std::atomic<float> peakL{0.0f};
@@ -106,8 +125,10 @@ struct Bus {
         compressor.init(sampleRate);
         reverb.init(sampleRate);
         chorus.init(sampleRate);
-        smoothGain.init(sampleRate);
+        gainState.init(sampleRate);
+        gainBlock.assign(static_cast<size_t>(maxFrames), 1.0f);
         smoothPan.init(sampleRate);
+        convMix.init(sampleRate);
     }
 
     void clearBuffer(int numFrames) {

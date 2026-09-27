@@ -579,6 +579,15 @@ inline double numAt(std::span<const Value> args, size_t i) {
     return std::isnan(d) ? 0.0 : d;
 }
 
+// Optional trailing rampSeconds (setPlaybackGain / setPlaybackSend /
+// setBusGain): absent, negative, NaN or non-finite is 0 (the de-zipper),
+// otherwise capped at an hour.
+inline float rampAt(std::span<const Value> args, size_t i) {
+    double d = numAt(args, i);
+    if (!std::isfinite(d) || d <= 0.0) return 0.0f;
+    return static_cast<float>(std::min(d, 3600.0));
+}
+
 // A JS number truncated to int32, saturating: NaN is 0 and +-Infinity or
 // anything past the range lands on the nearest end. A plain static_cast of an
 // out-of-range double is undefined behaviour (MSVC yields INT_MIN, so 1e10

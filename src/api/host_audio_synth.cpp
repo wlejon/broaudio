@@ -137,6 +137,7 @@ broaudio::EffectSlot parseEffectSlot(const std::string& str, broaudio::EffectSlo
     if (str == "reverb") return broaudio::EffectSlot::Reverb;
     if (str == "equalizer" || str == "eq") return broaudio::EffectSlot::Equalizer;
     if (str == "distortion") return broaudio::EffectSlot::Distortion;
+    if (str == "convolution") return broaudio::EffectSlot::Convolution;
     return def;
 }
 
@@ -149,6 +150,7 @@ const char* effectSlotToString(broaudio::EffectSlot slot) {
         case broaudio::EffectSlot::Reverb: return "reverb";
         case broaudio::EffectSlot::Equalizer: return "equalizer";
         case broaudio::EffectSlot::Distortion: return "distortion";
+        case broaudio::EffectSlot::Convolution: return "convolution";
         default: return "unknown";
     }
 }

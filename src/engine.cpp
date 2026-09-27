@@ -79,6 +79,7 @@ bool Engine::init()
         master->parentId.store(-1, std::memory_order_relaxed);  // no parent
         master->initAudioState(sampleRate_, MAX_SCRATCH_FRAMES);
         master->jitPipeline.setDomain(rcu_);
+        master->convolver.setDomain(rcu_);
         syncBusJitTopology(*master);
 
         auto list = std::make_shared<BusList>();
@@ -89,6 +90,7 @@ bool Engine::init()
     // Pre-allocate scratch buffers
     outputScratch_.resize(MAX_SCRATCH_FRAMES * 2, 0.0f);
     micScratch_.resize(MAX_SCRATCH_FRAMES, 0.0f);
+    initDistanceState(MAX_SCRATCH_FRAMES);
 
     // Initialize master gain smoother
     smoothMasterGain_.init(sampleRate_);
@@ -113,6 +115,7 @@ bool Engine::initHeadless()
         master->id = MASTER_BUS_ID;
         master->parentId.store(-1, std::memory_order_relaxed);
         master->initAudioState(sampleRate_, MAX_SCRATCH_FRAMES);
+        master->convolver.setDomain(rcu_);
 
         auto list = std::make_shared<BusList>();
         list->push_back(std::move(master));
@@ -121,6 +124,7 @@ bool Engine::initHeadless()
 
     outputScratch_.resize(MAX_SCRATCH_FRAMES * 2, 0.0f);
     micScratch_.resize(MAX_SCRATCH_FRAMES, 0.0f);
+    initDistanceState(MAX_SCRATCH_FRAMES);
 
     // Initialize master gain smoother
     smoothMasterGain_.init(sampleRate_);
@@ -168,83 +172,7 @@ void Engine::renderInternal(int numFrames)
     generateSamples(numFrames, *currentBuses);
 
     // Mix clip playback into target bus buffers
-    {
-        auto currentClips = clips_.load();
-        auto currentPlaybacks = playbacks_.load();
-        // This block spans absolute samples [blockStart, blockStart+numFrames).
-        // generateSamples() above already advanced samplesGenerated_ by numFrames
-        // (same as the realtime path), so the counter holds the block's END sample.
-        uint64_t blockEnd = samplesGenerated_.load(std::memory_order_relaxed);
-        uint64_t blockStart = blockEnd >= static_cast<uint64_t>(numFrames)
-                                  ? blockEnd - static_cast<uint64_t>(numFrames) : 0;
-        for (auto& pb : *currentPlaybacks) {
-            if (!pb->active.load(std::memory_order_relaxed)) continue;
-            if (!pb->playing.load(std::memory_order_relaxed)) continue;
-
-            AudioClip* clip = nullptr;
-            for (auto& c : *currentClips) {
-                if (c->id == pb->clipId) { clip = c.get(); break; }
-            }
-            if (!clip) continue;
-
-            int targetBusId = pb->busId.load(std::memory_order_relaxed);
-            float* targetBuf = nullptr;
-            for (auto& bus : *currentBuses) {
-                if (bus->id == targetBusId) { targetBuf = bus->buffer.data(); break; }
-            }
-            if (!targetBuf) {
-                for (auto& bus : *currentBuses) {
-                    if (bus->id == MASTER_BUS_ID) { targetBuf = bus->buffer.data(); break; }
-                }
-            }
-            if (!targetBuf) continue;
-
-            float rate = pb->rate.load(std::memory_order_relaxed);
-
-            // Set smoother targets for gain and pan
-            float targetGain = pb->gain.load(std::memory_order_relaxed);
-            float targetPan = pb->pan.load(std::memory_order_relaxed);
-
-            HeadParams headParams;
-            bool spatialFilterActive = false;
-            if (pb->spatial.spatialEnabled.load(std::memory_order_relaxed)) {
-                auto sr = computeSpatial(listener_, pb->spatial);
-                targetGain *= sr.gain;
-                targetPan = 0.0f; // center — head model does L/R
-                headParams = computeHeadParams(sr, headModel_, sampleRate_,
-                                               pb->spatial.occlusion.load(std::memory_order_relaxed));
-                spatialFilterActive = true;
-                // Doppler composes into the resample rate.
-                float dop = computeDopplerRatio(
-                    listener_, pb->spatial,
-                    dopplerFactor_.load(std::memory_order_relaxed));
-                pb->spatial.lastDopplerRatio.store(dop, std::memory_order_relaxed);
-                rate *= dop;
-            }
-
-            pb->smoothGain.set(targetGain);
-            pb->smoothPan.set(targetPan);
-
-            int clipSendId = pb->sendBusId.load(std::memory_order_relaxed);
-            float clipSendAmt = pb->sendAmount.load(std::memory_order_relaxed);
-            float* clipSendBuf = nullptr;
-            if (clipSendId >= 0 && clipSendAmt > 0.0f) {
-                for (auto& bus : *currentBuses) {
-                    if (bus->id == clipSendId) { clipSendBuf = bus->buffer.data(); break; }
-                }
-            }
-
-            // Streaming sources read from a ring instead of a fixed clip.
-            if (clip->streaming) {
-                mixStreamPlayback(pb.get(), clip, targetBuf, clipSendBuf, clipSendAmt,
-                                  spatialFilterActive, headParams, rate, numFrames, 0);
-                continue;
-            }
-
-            mixClipPlayback(pb.get(), clip, targetBuf, clipSendBuf, clipSendAmt,
-                            spatialFilterActive, headParams, rate, numFrames, blockStart);
-        }
-    }
+    mixPlaybacks(numFrames, *currentBuses);
 
     // Locate the master bus for the bus-graph mixdown below. The record tap
     // happens after the master limiter (further down) so it captures voices
@@ -279,12 +207,7 @@ void Engine::renderInternal(int numFrames)
         if (audible && busSendId >= 0 && busSendAmt > 0.0f) {
             for (auto& sendTarget : *currentBuses) {
                 if (sendTarget->id == busSendId) {
-                    float busGain = bus->gain.load(std::memory_order_relaxed) * busSendAmt;
-                    float* src = bus->buffer.data();
-                    float* dst = sendTarget->buffer.data();
-                    for (int i = 0; i < numFrames * 2; i++) {
-                        dst[i] += src[i] * busGain;
-                    }
+                    mixBusSend(*bus, *sendTarget, busSendAmt, numFrames);
                     break;
                 }
             }
@@ -367,6 +290,7 @@ int Engine::createBus()
     bus->parentId.store(MASTER_BUS_ID, std::memory_order_relaxed);
     bus->initAudioState(sampleRate_, MAX_SCRATCH_FRAMES);
     bus->jitPipeline.setDomain(rcu_);
+    bus->convolver.setDomain(rcu_);
     syncBusJitTopology(*bus);
 
     auto newList = std::make_shared<BusList>(*buses_.load());
@@ -536,10 +460,10 @@ std::vector<float> Engine::processEffectsOffline(int busId, const float* monoInp
     return output;
 }
 
-void Engine::setBusGain(int busId, float gain)
+void Engine::setBusGain(int busId, float gain, float rampSeconds)
 {
     if (auto* b = findBus(busId))
-        b->gain.store(std::clamp(gain, 0.0f, 2.0f), std::memory_order_relaxed);
+        b->gainRamp.set(b->gain, std::clamp(gain, 0.0f, 2.0f), rampSeconds);
 }
 
 void Engine::setBusPan(int busId, float pan)
@@ -1247,9 +1171,18 @@ void Engine::setBusEffectOrder(int busId, const EffectSlot* order, int count)
 {
     auto* bus = findBus(busId);
     if (!bus) return;
-    int n = std::min(count, Bus::NUM_EFFECT_SLOTS);
-    for (int i = 0; i < n; i++)
+    int n = std::clamp(count, 0, Bus::NUM_EFFECT_SLOTS);
+    bool named[Bus::NUM_EFFECT_SLOTS] = {};
+    for (int i = 0; i < n; i++) {
+        const int s = static_cast<int>(order[i]);
         bus->effectOrder[i].store(static_cast<uint8_t>(order[i]), std::memory_order_relaxed);
+        if (s >= 0 && s < Bus::NUM_EFFECT_SLOTS) named[s] = true;
+    }
+    // Refill the rest with the slots the list left out, in default order.
+    int pos = n;
+    for (int s = 0; s < Bus::NUM_EFFECT_SLOTS && pos < Bus::NUM_EFFECT_SLOTS; s++) {
+        if (!named[s]) bus->effectOrder[pos++].store(static_cast<uint8_t>(s), std::memory_order_relaxed);
+    }
     bus->effectOrderVersion.fetch_add(1, std::memory_order_release);
 }
 
@@ -1275,11 +1208,11 @@ void Engine::setVoiceSend(int voiceId, int sendBusId, float amount)
     }
 }
 
-void Engine::setPlaybackSend(int instanceId, int sendBusId, float amount)
+void Engine::setPlaybackSend(int instanceId, int sendBusId, float amount, float rampSeconds)
 {
     if (auto* pb = findPlayback(instanceId)) {
         pb->sendBusId.store(sendBusId, std::memory_order_relaxed);
-        pb->sendAmount.store(std::clamp(amount, 0.0f, 1.0f), std::memory_order_relaxed);
+        pb->sendRamp.set(pb->sendAmount, std::clamp(amount, 0.0f, 1.0f), rampSeconds);
     }
 }
 
@@ -2268,235 +2201,6 @@ Engine::PlaybackState Engine::getPlaybackState(int instanceId) const
     return PlaybackState::Invalid;
 }
 
-void Engine::mixClipPlayback(ClipPlayback* pb, AudioClip* clip, float* targetBuf,
-                             float* clipSendBuf, float clipSendAmt,
-                             bool spatialFilterActive, const HeadParams& headParams,
-                             float rate, int numFrames, uint64_t blockStart)
-{
-    const int start = pb->regionStart.load(std::memory_order_relaxed);
-    int end = pb->regionEnd.load(std::memory_order_relaxed);
-    end = end > 0 ? end : clip->numFrames();
-    const int len = end - start;
-    if (len <= 0) return;
-    const int ch = clip->channels;
-    const bool looping = pb->looping.load(std::memory_order_relaxed);
-
-    // Loop window, clamped into the region; a window that is empty, inverted
-    // or starts before 0 loops the whole region (Web Audio's actualLoopStart /
-    // actualLoopEnd fallback).
-    int ls = pb->loopStart.load(std::memory_order_relaxed);
-    int le = pb->loopEnd.load(std::memory_order_relaxed);
-    if (le > len) le = len;
-    if (ls < 0 || le <= ls) { ls = 0; le = len; }
-
-    constexpr int FRAC_BITS = 16;
-    constexpr uint64_t FRAC_MASK = (1ULL << FRAC_BITS) - 1;
-    const uint64_t increment = static_cast<uint64_t>(rate * (1 << FRAC_BITS) + 0.5f);
-    const uint64_t loopStartF = static_cast<uint64_t>(ls) << FRAC_BITS;
-    const uint64_t loopEndF = static_cast<uint64_t>(le) << FRAC_BITS;
-    const uint64_t loopLenF = loopEndF - loopStartF;
-    const uint64_t budget = pb->durationFixed.load(std::memory_order_relaxed);
-
-    // Sample-accurate scheduled start: stay silent until the audio clock
-    // reaches startSample, then begin mid-block at the exact frame. 0 (or any
-    // past sample) starts immediately. Once started, later blocks have
-    // startSample <= blockStart, so startFrame is 0 and playPos continues.
-    // Sample-accurate scheduled stop (stopPlaybackAt): mixing ends at
-    // stopSample and the playback finishes there. A stop at or before the
-    // start finishes it, silent, in the block that holds the stop.
-    const uint64_t blockEndS = blockStart + static_cast<uint64_t>(numFrames);
-    const uint64_t stopS = pb->stopSample.load(std::memory_order_relaxed);
-    uint64_t startS = pb->startSample.load(std::memory_order_relaxed);
-    if (stopS < blockEndS && stopS <= std::max(blockStart, startS)) {
-        pb->playing.store(false, std::memory_order_relaxed);
-        pb->active.store(false, std::memory_order_relaxed);
-        return;
-    }
-    const int endFrame = stopS < blockEndS ? static_cast<int>(stopS - blockStart) : numFrames;
-
-    int startFrame = 0;
-    if (startS > blockStart) {
-        uint64_t off = startS - blockStart;
-        if (off >= static_cast<uint64_t>(numFrames)) return;  // starts in a later block
-        startFrame = static_cast<int>(off);
-    }
-
-    uint64_t pos = pb->playPos.load(std::memory_order_relaxed);
-    uint64_t consumed = pb->consumedFixed;
-    for (int i = startFrame; i < endFrame; i++) {
-        if (looping && pos >= loopEndF) pos = loopStartF + (pos - loopStartF) % loopLenF;
-        int intPos = static_cast<int>(pos >> FRAC_BITS);
-        if ((!looping && intPos >= len) || consumed >= budget) {
-            pb->playing.store(false, std::memory_order_relaxed);
-            pb->active.store(false, std::memory_order_relaxed);
-            break;
-        }
-        float frac = static_cast<float>(pos & FRAC_MASK) / (1 << FRAC_BITS);
-        int nextIdx = intPos + 1;
-        if (looping && intPos < le && nextIdx >= le) nextIdx = ls;
-        else if (nextIdx >= len) nextIdx = intPos;
-
-        float g = pb->smoothGain.next();
-        float clipPan = pb->smoothPan.next();
-        float panL, panR;
-        panGains(clipPan, panL, panR);
-
-        float outL, outR;
-        if (ch == 2) {
-            // Stereo clip: interleaved L/R pairs
-            int idx0 = (start + intPos) * 2;
-            int idx1 = (start + nextIdx) * 2;
-            float L0 = clip->samples[idx0];
-            float R0 = clip->samples[idx0 + 1];
-            float L1 = clip->samples[idx1];
-            float R1 = clip->samples[idx1 + 1];
-            float sL = (L0 + frac * (L1 - L0)) * g;
-            float sR = (R0 + frac * (R1 - R0)) * g;
-            // Pan acts as balance: panL/panR crossfade the stereo image
-            outL = sL * panL + sR * (1.0f - panR);
-            outR = sR * panR + sL * (1.0f - panL);
-        } else {
-            float s0 = clip->samples[start + intPos];
-            float s1 = clip->samples[start + nextIdx];
-            float sample = (s0 + frac * (s1 - s0)) * g;
-            outL = sample * panL;
-            outR = sample * panR;
-        }
-
-        if (spatialFilterActive)
-            pb->spatialFilter.process(outL, outR, headParams);
-
-        targetBuf[i * 2]     += outL;
-        targetBuf[i * 2 + 1] += outR;
-
-        if (clipSendBuf) {
-            clipSendBuf[i * 2]     += outL * clipSendAmt;
-            clipSendBuf[i * 2 + 1] += outR * clipSendAmt;
-        }
-
-        pos += increment;
-        consumed += increment;
-    }
-    pb->playPos.store(pos, std::memory_order_relaxed);
-    pb->consumedFixed = consumed;
-    if (endFrame < numFrames) {
-        pb->playing.store(false, std::memory_order_relaxed);
-        pb->active.store(false, std::memory_order_relaxed);
-    }
-}
-
-// Ring-read mix for a streaming playback. Caller has already set the gain/pan
-// smoother targets and resolved targetBuf / sends / spatial; this just reads the
-// ring and applies the same per-frame gain/pan/spatial/write as the clip path.
-void Engine::mixStreamPlayback(ClipPlayback* pb, AudioClip* clip, float* targetBuf,
-                               float* clipSendBuf, float clipSendAmt,
-                               bool spatialFilterActive, const HeadParams& headParams,
-                               float rate, int numFrames, int startFrame)
-{
-    const int cap = clip->ringFrames;
-    const int ch = clip->channels;
-    if (cap <= 0) return;
-
-    // A disk-stream seek the worker has not applied yet: what the ring holds
-    // is pre-seek audio the caller already seeked away from. Hold the cursor
-    // and stay silent (not starvation) until the fence below is published.
-    if (clip->streamSeekApplied.load(std::memory_order_acquire) !=
-        clip->streamSeekRequested.load(std::memory_order_relaxed))
-        return;
-
-    uint64_t wf = clip->writeFrames.load(std::memory_order_acquire);
-    uint64_t rf = pb->playPos.load(std::memory_order_relaxed);
-    // Seek fence: a disk-stream seek publishes the writeFrames value at the
-    // moment of the seek; everything below it is pre-seek audio the worker
-    // could not un-push. Fast-forward past it (silence until the worker
-    // refills from the new file position).
-    uint64_t ff = clip->streamFlushFrames.load(std::memory_order_acquire);
-    if (ff > rf) { rf = ff; pb->streamFrac = 0.0f; }
-    // Overrun: if the reader has fallen more than a full ring behind, jump
-    // forward (drop the oldest audio) so latency stays bounded.
-    if (wf > rf + static_cast<uint64_t>(cap))
-        rf = wf - static_cast<uint64_t>(cap) / 2;
-
-    // Starvation accounting: silent frames emitted while the producer is
-    // still expected to deliver (i.e. the stream hasn't ended). Batched into
-    // one relaxed add after the loop — never a lock, never a syscall.
-    int underruns = 0;
-    const bool ended = clip->streamEnded.load(std::memory_order_acquire);
-
-    // Playback rate. A live PCM stream used to ignore this outright, which is
-    // how a video player ended up with slow-motion picture over full-speed
-    // sound. The ring is read with a fractional cursor and linear
-    // interpolation instead — tape-style, so pitch follows speed, matching
-    // what clip playback already does.
-    if (!(rate > 0.0f)) rate = 1.0f;
-    const bool resampling = (rate < 0.999f || rate > 1.001f);
-
-    for (int i = startFrame; i < numFrames; i++) {
-        float sL = 0.0f, sR = 0.0f;
-        if (!resampling) {
-            if (rf < wf) { // else underrun → silence, hold the cursor
-                int slot = static_cast<int>(rf % cap);
-                if (ch == 2) { sL = clip->samples[slot * 2]; sR = clip->samples[slot * 2 + 1]; }
-                else { float s = clip->samples[slot]; sL = s; sR = s; }
-                rf++;
-            } else if (!ended) {
-                underruns++;
-            }
-        } else if (rf + 1 < wf) {
-            // Two neighbours are needed to interpolate, so this runs one frame
-            // shallower into the ring than the rate-1 path.
-            const int s0 = static_cast<int>(rf % cap);
-            const int s1 = static_cast<int>((rf + 1) % cap);
-            const float t = pb->streamFrac;
-            if (ch == 2) {
-                sL = clip->samples[s0 * 2]     + (clip->samples[s1 * 2]     - clip->samples[s0 * 2])     * t;
-                sR = clip->samples[s0 * 2 + 1] + (clip->samples[s1 * 2 + 1] - clip->samples[s0 * 2 + 1]) * t;
-            } else {
-                const float s = clip->samples[s0] + (clip->samples[s1] - clip->samples[s0]) * t;
-                sL = s; sR = s;
-            }
-            float frac = t + rate;
-            // rate > 1 consumes more than one input frame per output frame.
-            const int whole = static_cast<int>(frac);
-            frac -= static_cast<float>(whole);
-            rf += static_cast<uint64_t>(whole);
-            pb->streamFrac = frac;
-        } else if (!ended) {
-            underruns++;
-        }
-
-        float g = pb->smoothGain.next();
-        float clipPan = pb->smoothPan.next();
-        float panL, panR;
-        panGains(clipPan, panL, panR);
-
-        float outL, outR;
-        if (ch == 2) {
-            float L = sL * g, R = sR * g;
-            outL = L * panL + R * (1.0f - panR);
-            outR = R * panR + L * (1.0f - panL);
-        } else {
-            float s = sL * g;
-            outL = s * panL;
-            outR = s * panR;
-        }
-
-        if (spatialFilterActive)
-            pb->spatialFilter.process(outL, outR, headParams);
-
-        targetBuf[i * 2]     += outL;
-        targetBuf[i * 2 + 1] += outR;
-        if (clipSendBuf) {
-            clipSendBuf[i * 2]     += outL * clipSendAmt;
-            clipSendBuf[i * 2 + 1] += outR * clipSendAmt;
-        }
-    }
-    pb->playPos.store(rf, std::memory_order_relaxed);
-    if (underruns > 0)
-        clip->streamUnderrunFrames.fetch_add(static_cast<uint64_t>(underruns),
-                                             std::memory_order_relaxed);
-}
-
 // ---------------------------------------------------------------------------
 // Streaming PCM source — a ring-backed clip + a persistent playback. Reuses the
 // full ClipPlayback machinery (gain/pan/bus/sends/spatial); the mixer takes a
@@ -2724,10 +2428,10 @@ void Engine::stopPlaybackAt(int instanceId, double when)
         pb->stopSample.store(static_cast<uint64_t>(s + 0.5), std::memory_order_relaxed);
 }
 
-void Engine::setPlaybackGain(int instanceId, float gain)
+void Engine::setPlaybackGain(int instanceId, float gain, float rampSeconds)
 {
     if (auto* pb = findPlayback(instanceId))
-        pb->gain.store(gain, std::memory_order_relaxed);
+        pb->gainRamp.set(pb->gain, gain, rampSeconds);
 }
 
 void Engine::setPlaybackLoop(int instanceId, bool loop)
@@ -2862,239 +2566,6 @@ float Engine::getPlaybackPosition(int instanceId) const
 }
 
 // ---------------------------------------------------------------------------
-// Bus effect processing — audio thread only
-// ---------------------------------------------------------------------------
-
-void Engine::processBusFilters(Bus& bus, float* buf, int numFrames)
-{
-    for (int f = 0; f < Bus::MAX_FILTERS; f++) {
-        uint32_t ver = bus.filterParams[f].version.load(std::memory_order_acquire);
-        if (ver != bus.filterVersions[f]) {
-            bus.filterVersions[f] = ver;
-            bool enabled = bus.filterParams[f].enabled.load(std::memory_order_relaxed);
-            bus.filters[f].enabled = enabled;
-            if (enabled) {
-                bus.filters[f].type = static_cast<BiquadFilter::Type>(
-                    bus.filterParams[f].type.load(std::memory_order_relaxed));
-                bus.filters[f].frequency = bus.filterParams[f].frequency.load(std::memory_order_relaxed);
-                bus.filters[f].Q = bus.filterParams[f].Q.load(std::memory_order_relaxed);
-                bus.filters[f].gainDB = bus.filterParams[f].gainDB.load(std::memory_order_relaxed);
-                bus.filters[f].computeCoefficients(sampleRate_);
-                bus.filters[f].snapToTarget();
-            } else {
-                bus.filters[f].reset();
-            }
-        }
-        if (!bus.filters[f].enabled) continue;
-        for (int i = 0; i < numFrames; i++) {
-            buf[i * 2]     = bus.filters[f].process(buf[i * 2], 0);
-            buf[i * 2 + 1] = bus.filters[f].process(buf[i * 2 + 1], 1);
-        }
-    }
-}
-
-void Engine::processBusDelay(Bus& bus, float* buf, int numFrames)
-{
-    uint32_t ver = bus.delayParams.version.load(std::memory_order_acquire);
-    if (ver != bus.delayVersion) {
-        bus.delayVersion = ver;
-        bus.delay.enabled = bus.delayParams.enabled.load(std::memory_order_relaxed);
-        float delaySec = bus.delayParams.time.load(std::memory_order_relaxed);
-        int maxSamples = static_cast<int>(bus.delay.buffer.size());
-        bus.delay.delaySamples = std::clamp(
-            static_cast<int>(delaySec * sampleRate_), 1, maxSamples - 1);
-        bus.delay.feedback = bus.delayParams.feedback.load(std::memory_order_relaxed);
-        bus.delay.mix = bus.delayParams.mix.load(std::memory_order_relaxed);
-    }
-    if (bus.delay.enabled) {
-        bus.delay.processStereo(buf, numFrames);
-    }
-}
-
-void Engine::processBusCompressor(Bus& bus, float* buf, int numFrames)
-{
-    uint32_t ver = bus.compressorParams.version.load(std::memory_order_acquire);
-    if (ver != bus.compressorVersion) {
-        bus.compressorVersion = ver;
-        bus.compressor.threshold = bus.compressorParams.threshold.load(std::memory_order_relaxed);
-        bus.compressor.ratio = bus.compressorParams.ratio.load(std::memory_order_relaxed);
-        float attackMs = bus.compressorParams.attackMs.load(std::memory_order_relaxed);
-        float releaseMs = bus.compressorParams.releaseMs.load(std::memory_order_relaxed);
-        bus.compressor.attackCoeff = 1.0f - std::exp(-1.0f / (attackMs * 0.001f * static_cast<float>(sampleRate_)));
-        bus.compressor.releaseCoeff = 1.0f - std::exp(-1.0f / (releaseMs * 0.001f * static_cast<float>(sampleRate_)));
-    }
-    if (bus.compressorParams.enabled.load(std::memory_order_relaxed)) {
-        int scBusId = bus.compressorParams.sidechainBusId.load(std::memory_order_relaxed);
-        if (scBusId >= 0) {
-            // Sidechain: detect level from another bus's buffer
-            auto currentBuses = buses_.load();
-            for (auto& scBus : *currentBuses) {
-                if (scBus->id == scBusId) {
-                    bus.compressor.processStereoWithSidechain(buf, scBus->buffer.data(), numFrames);
-                    return;
-                }
-            }
-        }
-        bus.compressor.processStereo(buf, numFrames);
-    }
-}
-
-void Engine::processBusChorus(Bus& bus, float* buf, int numFrames)
-{
-    uint32_t ver = bus.chorusParams.version.load(std::memory_order_acquire);
-    if (ver != bus.chorusVersion) {
-        bus.chorusVersion = ver;
-        bus.chorus.enabled = bus.chorusParams.enabled.load(std::memory_order_relaxed);
-        bus.chorus.rate = bus.chorusParams.rate.load(std::memory_order_relaxed);
-        bus.chorus.depth = bus.chorusParams.depth.load(std::memory_order_relaxed);
-        bus.chorus.mix = bus.chorusParams.mix.load(std::memory_order_relaxed);
-        bus.chorus.feedback = bus.chorusParams.feedback.load(std::memory_order_relaxed);
-        bus.chorus.baseDelay = bus.chorusParams.baseDelay.load(std::memory_order_relaxed);
-    }
-    if (bus.chorus.enabled) {
-        bus.chorus.processStereo(buf, numFrames);
-    }
-}
-
-void Engine::processBusReverb(Bus& bus, float* buf, int numFrames)
-{
-    uint32_t ver = bus.reverbParams.version.load(std::memory_order_acquire);
-    if (ver != bus.reverbVersion) {
-        bus.reverbVersion = ver;
-        bus.reverb.enabled = bus.reverbParams.enabled.load(std::memory_order_relaxed);
-        bus.reverb.roomSize = bus.reverbParams.roomSize.load(std::memory_order_relaxed);
-        bus.reverb.damping = bus.reverbParams.damping.load(std::memory_order_relaxed);
-        bus.reverb.mix = bus.reverbParams.mix.load(std::memory_order_relaxed);
-    }
-    if (bus.reverb.enabled) {
-        bus.reverb.processStereo(buf, numFrames);
-    }
-}
-
-void Engine::processBusEqualizer(Bus& bus, float* buf, int numFrames)
-{
-    uint32_t ver = bus.eqParams.version.load(std::memory_order_acquire);
-    if (ver != bus.eqVersion) {
-        bus.eqVersion = ver;
-        bool enabled = bus.eqParams.enabled.load(std::memory_order_relaxed);
-        bus.equalizer.setEnabled(enabled);
-        if (enabled) {
-            bus.equalizer.setSampleRate(sampleRate_);
-            bus.equalizer.setMasterGain(bus.eqParams.masterGain.load(std::memory_order_relaxed));
-            for (int b = 0; b < Equalizer::NUM_BANDS; b++) {
-                bus.equalizer.setBandGain(b, bus.eqParams.bandGains[b].load(std::memory_order_relaxed));
-            }
-        }
-    }
-    if (bus.equalizer.isEnabled()) {
-        bus.equalizer.processStereoInterleaved(buf, numFrames);
-    }
-}
-
-void Engine::processBusDistortion(Bus& bus, float* buf, int numFrames)
-{
-    uint32_t ver = bus.distortionParams.version.load(std::memory_order_acquire);
-    if (ver != bus.distortionVersion) {
-        bus.distortionVersion = ver;
-        bus.distortion.enabled = bus.distortionParams.enabled.load(std::memory_order_relaxed);
-        bus.distortion.mode = static_cast<DistortionMode>(bus.distortionParams.mode.load(std::memory_order_relaxed));
-        bus.distortion.drive = bus.distortionParams.drive.load(std::memory_order_relaxed);
-        bus.distortion.mix = bus.distortionParams.mix.load(std::memory_order_relaxed);
-        bus.distortion.outputGain = bus.distortionParams.outputGain.load(std::memory_order_relaxed);
-        bus.distortion.crushBits = bus.distortionParams.crushBits.load(std::memory_order_relaxed);
-        bus.distortion.crushRate = bus.distortionParams.crushRate.load(std::memory_order_relaxed);
-    }
-    if (bus.distortion.enabled) {
-        bus.distortion.processStereo(buf, numFrames);
-    }
-}
-
-void Engine::updateBusMeters(Bus& bus, int numFrames)
-{
-    float* buf = bus.buffer.data();
-    float pL = 0.0f, pR = 0.0f;
-    float sumSqL = 0.0f, sumSqR = 0.0f;
-    for (int i = 0; i < numFrames; i++) {
-        float l = std::fabs(buf[i * 2]);
-        float r = std::fabs(buf[i * 2 + 1]);
-        if (l > pL) pL = l;
-        if (r > pR) pR = r;
-        sumSqL += buf[i * 2] * buf[i * 2];
-        sumSqR += buf[i * 2 + 1] * buf[i * 2 + 1];
-    }
-    bus.peakL.store(pL, std::memory_order_relaxed);
-    bus.peakR.store(pR, std::memory_order_relaxed);
-    float invN = 1.0f / static_cast<float>(std::max(numFrames, 1));
-    bus.rmsL.store(std::sqrt(sumSqL * invN), std::memory_order_relaxed);
-    bus.rmsR.store(std::sqrt(sumSqR * invN), std::memory_order_relaxed);
-}
-
-void Engine::processBusEffects(Bus& bus, int numFrames)
-{
-    float* buf = bus.buffer.data();
-
-    // Fast JIT path: if JIT is enabled and pipeline matches the bus topology,
-    // execute the single fused AVX2/FMA kernel across the stereo buffer.
-    if (bus.jitEnabled.load(std::memory_order_relaxed)) {
-        auto pipeline = bus.jitPipeline.load(std::memory_order_acquire);
-        if (pipeline && pipeline->matches(bus)) {
-            pipeline->updateParams(bus, numFrames, sampleRate_);
-            pipeline->process(buf, numFrames);
-            bus.jitActive.store(true, std::memory_order_relaxed);
-            updateBusMeters(bus, numFrames);
-            return;
-        }
-    }
-    bus.jitActive.store(false, std::memory_order_relaxed);
-
-    uint32_t ver = bus.effectOrderVersion.load(std::memory_order_acquire);
-    if (ver != bus.effectOrderVersionSeen) {
-        bus.effectOrderVersionSeen = ver;
-        for (int i = 0; i < Bus::NUM_EFFECT_SLOTS; i++)
-            bus.effectOrderCache[i] = bus.effectOrder[i].load(std::memory_order_relaxed);
-    }
-
-    for (int i = 0; i < Bus::NUM_EFFECT_SLOTS; i++) {
-        switch (static_cast<EffectSlot>(bus.effectOrderCache[i])) {
-            case EffectSlot::Filter:     processBusFilters(bus, buf, numFrames); break;
-            case EffectSlot::Delay:      processBusDelay(bus, buf, numFrames); break;
-            case EffectSlot::Compressor: processBusCompressor(bus, buf, numFrames); break;
-            case EffectSlot::Chorus:     processBusChorus(bus, buf, numFrames); break;
-            case EffectSlot::Reverb:     processBusReverb(bus, buf, numFrames); break;
-            case EffectSlot::Equalizer:  processBusEqualizer(bus, buf, numFrames); break;
-            case EffectSlot::Distortion: processBusDistortion(bus, buf, numFrames); break;
-            default: break;
-        }
-    }
-
-    updateBusMeters(bus, numFrames);
-}
-
-void Engine::mixBusIntoParent(Bus& child, Bus& parent, int numFrames)
-{
-    if (child.muted.load(std::memory_order_relaxed)) return;
-
-    child.smoothGain.set(child.gain.load(std::memory_order_relaxed));
-    child.smoothPan.set(child.pan.load(std::memory_order_relaxed));
-
-    float* src = child.buffer.data();
-    float* dst = parent.buffer.data();
-
-    for (int i = 0; i < numFrames; i++) {
-        float g = child.smoothGain.next();
-        float panVal = child.smoothPan.next();
-        float panL, panR;
-        panGains(panVal, panL, panR);
-
-        float L = src[i * 2]     * g;
-        float R = src[i * 2 + 1] * g;
-        // Apply bus panning (cross-mix stereo signal)
-        dst[i * 2]     += L * panL + R * (1.0f - panR);
-        dst[i * 2 + 1] += R * panR + L * (1.0f - panL);
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Output audio callback + synthesis — LOCK-FREE
 // ---------------------------------------------------------------------------
 
@@ -3158,87 +2629,7 @@ void Engine::processOutputChunk(SDL_AudioStream* stream, int numFrames)
     engine->generateSamples(numFrames, *currentBuses);
 
     // Mix clip playback into target bus buffers
-    {
-        auto currentClips = engine->clips_.load();
-        auto currentPlaybacks = engine->playbacks_.load();
-        // This block spans absolute samples [blockStart, blockStart+numFrames).
-        // generateSamples() already advanced samplesGenerated_ by numFrames above,
-        // so the counter now holds the block's END sample.
-        uint64_t blockEnd = engine->samplesGenerated_.load(std::memory_order_relaxed);
-        uint64_t blockStart = blockEnd >= static_cast<uint64_t>(numFrames)
-                                  ? blockEnd - static_cast<uint64_t>(numFrames) : 0;
-        for (auto& pb : *currentPlaybacks) {
-            if (!pb->active.load(std::memory_order_relaxed)) continue;
-            if (!pb->playing.load(std::memory_order_relaxed)) continue;
-
-            AudioClip* clip = nullptr;
-            for (auto& c : *currentClips) {
-                if (c->id == pb->clipId) { clip = c.get(); break; }
-            }
-            if (!clip) continue;
-
-            // Find target bus buffer
-            int targetBusId = pb->busId.load(std::memory_order_relaxed);
-            float* targetBuf = nullptr;
-            for (auto& bus : *currentBuses) {
-                if (bus->id == targetBusId) { targetBuf = bus->buffer.data(); break; }
-            }
-            if (!targetBuf) {
-                // Fallback to master
-                for (auto& bus : *currentBuses) {
-                    if (bus->id == MASTER_BUS_ID) { targetBuf = bus->buffer.data(); break; }
-                }
-            }
-            if (!targetBuf) continue;
-
-            float rate = pb->rate.load(std::memory_order_relaxed);
-
-            // Set smoother targets for gain and pan
-            float targetGain2 = pb->gain.load(std::memory_order_relaxed);
-            float targetPan2 = pb->pan.load(std::memory_order_relaxed);
-
-            // Spatial override for clip playback
-            HeadParams headParams2;
-            bool spatialFilterActive2 = false;
-            if (pb->spatial.spatialEnabled.load(std::memory_order_relaxed)) {
-                auto sr = computeSpatial(engine->listener_, pb->spatial);
-                targetGain2 *= sr.gain;
-                targetPan2 = 0.0f; // center — head model does L/R
-                headParams2 = computeHeadParams(sr, engine->headModel_, engine->sampleRate_,
-                                                pb->spatial.occlusion.load(std::memory_order_relaxed));
-                spatialFilterActive2 = true;
-                // Doppler composes into the resample rate.
-                float dop = computeDopplerRatio(
-                    engine->listener_, pb->spatial,
-                    engine->dopplerFactor_.load(std::memory_order_relaxed));
-                pb->spatial.lastDopplerRatio.store(dop, std::memory_order_relaxed);
-                rate *= dop;
-            }
-
-            pb->smoothGain.set(targetGain2);
-            pb->smoothPan.set(targetPan2);
-
-            // Find clip send bus buffer (if configured)
-            int clipSendId = pb->sendBusId.load(std::memory_order_relaxed);
-            float clipSendAmt = pb->sendAmount.load(std::memory_order_relaxed);
-            float* clipSendBuf = nullptr;
-            if (clipSendId >= 0 && clipSendAmt > 0.0f) {
-                for (auto& bus : *currentBuses) {
-                    if (bus->id == clipSendId) { clipSendBuf = bus->buffer.data(); break; }
-                }
-            }
-
-            // Streaming sources read from a ring instead of a fixed clip.
-            if (clip->streaming) {
-                engine->mixStreamPlayback(pb.get(), clip, targetBuf, clipSendBuf, clipSendAmt,
-                                          spatialFilterActive2, headParams2, rate, numFrames, 0);
-                continue;
-            }
-
-            engine->mixClipPlayback(pb.get(), clip, targetBuf, clipSendBuf, clipSendAmt,
-                                    spatialFilterActive2, headParams2, rate, numFrames, blockStart);
-        }
-    }
+    engine->mixPlaybacks(numFrames, *currentBuses);
 
     // Mix mic into target bus (if routed)
     int micBusId = engine->micBusId_.load(std::memory_order_relaxed);
@@ -3303,12 +2694,7 @@ void Engine::processOutputChunk(SDL_AudioStream* stream, int numFrames)
         if (audible && busSendId >= 0 && busSendAmt > 0.0f) {
             for (auto& sendTarget : *currentBuses) {
                 if (sendTarget->id == busSendId) {
-                    float busGain = bus->gain.load(std::memory_order_relaxed) * busSendAmt;
-                    float* src = bus->buffer.data();
-                    float* dst = sendTarget->buffer.data();
-                    for (int i = 0; i < numFrames * 2; i++) {
-                        dst[i] += src[i] * busGain;
-                    }
+                    mixBusSend(*bus, *sendTarget, busSendAmt, numFrames);
                     break;
                 }
             }
@@ -3538,7 +2924,9 @@ void Engine::generateSamples(int numFrames, const BusList& buses)
             // the voice's pitch bend (block-rate, like the rest of spatial).
             float dop = computeDopplerRatio(
                 listener_, voice.spatial,
-                dopplerFactor_.load(std::memory_order_relaxed));
+                dopplerFactor_.load(std::memory_order_relaxed),
+                speedOfSound_.load(std::memory_order_relaxed)
+                    / metresPerUnit_.load(std::memory_order_relaxed));
             voice.spatial.lastDopplerRatio.store(dop, std::memory_order_relaxed);
             if (dop != 1.0f)
                 pitchBendSemitones += 12.0f * std::log2(dop);

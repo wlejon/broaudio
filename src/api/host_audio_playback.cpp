@@ -134,13 +134,60 @@ void registerAudioContextPlayback(ObjectBuilder& b) {
         return ev::undefined();
     });
 
-    // setPlaybackSend(playbackId, sendBusId, amount): aux send from a
-    // playback instance, the counterpart of setVoiceSend / setBusSend.
-    b.def("setPlaybackSend", 3, [](Value, std::span<const Value> a) {
+    // setPlaybackSend(playbackId, sendBusId, amount, rampSeconds?): aux send
+    // from a playback instance, the counterpart of setVoiceSend / setBusSend.
+    // The amount ramps linearly when rampSeconds > 0, de-zippered otherwise.
+    b.def("setPlaybackSend", 4, [](Value, std::span<const Value> a) {
         auto* e = getAudioEngine();
         if (e && a.size() >= 3) {
-            e->setPlaybackSend(i32At(a, 0), i32At(a, 1), static_cast<float>(numAt(a, 2)));
+            e->setPlaybackSend(i32At(a, 0), i32At(a, 1), static_cast<float>(numAt(a, 2)), rampAt(a, 3));
         }
+        return ev::undefined();
+    });
+
+    // ---- Physical distance -------------------------------------------------
+    // World scale, ISO 9613-1 air absorption and propagation delay; see
+    // Engine (engine.h) for the model behind each.
+    b.def("setSpatialMetresPerUnit", 1, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && !a.empty()) e->setSpatialMetresPerUnit(static_cast<float>(numAt(a, 0)));
+        return ev::undefined();
+    });
+
+    b.def("setSpatialAirConditions", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 2)
+            e->setSpatialAirConditions(static_cast<float>(numAt(a, 0)), static_cast<float>(numAt(a, 1)));
+        return ev::undefined();
+    });
+
+    b.def("setSpatialAirAbsorptionStrength", 1, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && !a.empty()) e->setSpatialAirAbsorptionStrength(static_cast<float>(numAt(a, 0)));
+        return ev::undefined();
+    });
+
+    b.def("setPlaybackSpatialAirAbsorption", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 2) e->setPlaybackSpatialAirAbsorption(i32At(a, 0), boolAt(a, 1));
+        return ev::undefined();
+    });
+
+    b.def("setSpatialSpeedOfSound", 1, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && !a.empty()) e->setSpatialSpeedOfSound(static_cast<float>(numAt(a, 0)));
+        return ev::undefined();
+    });
+
+    b.def("setSpatialMaxPropagationDelay", 1, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && !a.empty()) e->setSpatialMaxPropagationDelay(static_cast<float>(numAt(a, 0)));
+        return ev::undefined();
+    });
+
+    b.def("setPlaybackSpatialPropagationDelay", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 2) e->setPlaybackSpatialPropagationDelay(i32At(a, 0), boolAt(a, 1));
         return ev::undefined();
     });
 

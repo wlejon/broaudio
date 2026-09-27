@@ -16,6 +16,7 @@
 #include "broaudio/clip/clip.h"
 #include "broaudio/mic_tap.h"
 #include "broaudio/spatial/listener.h"
+#include "broaudio/spatial/air_absorption.h"
 #include "broaudio/io/audio_file.h"
 #include "broaudio/io/serialization.h"
 #include "broaudio/dsp/jit/jit_compiler.h"
@@ -123,7 +124,11 @@ public:
 
     int createBus();                               // returns bus id, feeds into master
     void deleteBus(int busId);                     // cannot delete master
-    void setBusGain(int busId, float gain);
+    // rampSeconds > 0: linear ramp from the current gain, landing on `gain`
+    // exactly rampSeconds later (sample-accurate on the audio clock). 0: a
+    // ~5 ms de-zipper, so moving it every frame is click-free. The bus's aux
+    // send follows the same per-sample gain.
+    void setBusGain(int busId, float gain, float rampSeconds = 0.0f);
     float getBusGain(int busId) const;
     void setBusPan(int busId, float pan);
     float getBusPan(int busId) const;
@@ -199,7 +204,32 @@ public:
     void setBusEqMasterGain(int busId, float gainDB);
     float getBusEqMasterGain(int busId) const;
 
-    // Per-bus effect chain order
+    // Per-bus convolution reverb: uniformly partitioned FFT convolution
+    // (dsp/partitioned_convolver.h), fed by whatever reaches the bus — the
+    // natural use is a return bus fed by playback/voice/bus sends, mix 1.
+    //
+    // setBusConvolutionImpulse copies the clip's frames (mono or stereo, at
+    // the engine rate like every clip) and prepares the partition spectra on
+    // the calling thread — never the audio thread; a 3 s stereo IR takes a
+    // few ms — then publishes the convolver lock-free. The clip may be deleted
+    // afterwards. clipId -1 clears the IR. Returns false for an unknown bus or
+    // clip, a streaming clip, or an allocation failure. Swapping IRs starts
+    // the new one with an empty history (the old tail stops).
+    // Latency is PartitionedConvolver::kDefaultBlock frames (5.8 ms).
+    // The IR is not normalised. Mix: 0 dry .. 1 fully wet (default 1),
+    // de-zippered per sample. The slot is EffectSlot::Convolution, last in the
+    // default order. A bus with convolution enabled runs the interpreted
+    // effect chain (the JIT pipeline does not fuse it).
+    bool setBusConvolutionImpulse(int busId, int clipId);
+    int getBusConvolutionImpulse(int busId) const;
+    void setBusConvolutionMix(int busId, float mix);
+    float getBusConvolutionMix(int busId) const;
+    void setBusConvolutionEnabled(int busId, bool enabled);
+    bool getBusConvolutionEnabled(int busId) const;
+
+    // Per-bus effect chain order. Positions past `count` are refilled with
+    // the slots the list did not name, in default order, so a partial order
+    // never runs an effect twice or drops one.
     void setBusEffectOrder(int busId, const EffectSlot* order, int count);
 
     // Per-bus JIT pipeline control
@@ -250,7 +280,10 @@ public:
 
     // Aux sends (voice, clip, and bus)
     void setVoiceSend(int voiceId, int sendBusId, float amount);
-    void setPlaybackSend(int instanceId, int sendBusId, float amount);
+    // Playback sends are post-fader, post-spatial (the send carries the air,
+    // delay and head colouring). rampSeconds as setBusGain; the amount is
+    // de-zippered without one. Changing the target bus switches at once.
+    void setPlaybackSend(int instanceId, int sendBusId, float amount, float rampSeconds = 0.0f);
     void setBusSend(int busId, int sendBusId, float amount);
 
     // --- Master output ---
@@ -491,7 +524,9 @@ public:
     // stats.valid is false when the id is not an active streaming playback.
     StreamStats getStreamStats(int instanceId) const;
 
-    void setPlaybackGain(int instanceId, float gain);
+    // rampSeconds as setBusGain. A ramp set before the playback's first mixed
+    // block starts from the gain it replaced (play at 0, ramp to 1 = fade-in).
+    void setPlaybackGain(int instanceId, float gain, float rampSeconds = 0.0f);
     void setPlaybackLoop(int instanceId, bool loop);
     void setPlaybackRegion(int instanceId, int start, int end);
     void setPlaybackPlaying(int instanceId, bool playing);
@@ -577,6 +612,65 @@ public:
     void setPlaybackSpatialDistanceModel(int instanceId, DistanceModel model);
     void setPlaybackSpatialOcclusion(int instanceId, float occlusion);
 
+    // --- Physical distance (clip playbacks and streams) ---
+    //
+    // World scale: metres per position unit (default 1). Air absorption and
+    // propagation delay measure the true source-listener distance in metres;
+    // the Doppler model's speed of sound is converted to units with it.
+    // Distance gain (refDistance / maxDistance / rolloff) stays in units:
+    // loudness is the caller's decision, these only shape the character.
+    void setSpatialMetresPerUnit(float metres);
+    float spatialMetresPerUnit() const { return metresPerUnit_.load(std::memory_order_relaxed); }
+
+    // Air absorption (ISO 9613-1, see spatial/air_absorption.h). The
+    // spatializer looks up, each block, the air filter for the playback's
+    // current distance x strength and moves its seven section poles and mixes
+    // linearly across the block, so a moving source darkens smoothly. Separate from
+    // occlusion, which keeps its own lowpass in the head stage.
+    //   setSpatialAirConditions: temperature °C (clamped -20..50) and relative
+    //     humidity % (clamped 1..100); defaults 20 / 50. Refits the filter
+    //     table on the calling thread (tens of ms) and publishes it lock-free.
+    //     The first setPlaybackSpatialAirAbsorption(true) fits the default
+    //     table the same way, so engines that never use air never pay for it.
+    //   setSpatialAirAbsorptionStrength: multiplies the absorbing distance
+    //     (0 = none, 1 = physical, 2 = twice the air); default 1.
+    //   setPlaybackSpatialAirAbsorption: per playback, default off. Applies
+    //     while the playback is spatialized.
+    void setSpatialAirConditions(float temperatureC, float relativeHumidityPct);
+    void setSpatialAirAbsorptionStrength(float strength);
+    float spatialAirAbsorptionStrength() const { return airStrength_.load(std::memory_order_relaxed); }
+    void setPlaybackSpatialAirAbsorption(int instanceId, bool enabled);
+    std::shared_ptr<const AirFilterTable> airFilterTable() const { return airTable_.load(); }
+
+    // Propagation delay: a spatialized playback with it on is heard
+    // distance / speedOfSound later, capped at the max delay.
+    //  - A one-shot's onset lands exactly at that delay (the line snaps to the
+    //    distance on the first block), and a finished one-shot keeps playing
+    //    until its delayed tail has arrived.
+    //  - Loops, streams and moving sources run a continuous 4-point
+    //    interpolated delay line whose delay follows the distance through two
+    //    cascaded one-poles (~20 ms), so steps in position at the caller's
+    //    frame rate never click.
+    //  - Doppler falls out of the delay line (the read cursor speeds up while
+    //    the path shortens): with the delay on, the rate-based Doppler of
+    //    setDopplerFactor is NOT applied to that playback, so nothing is
+    //    counted twice, and getPlaybackDopplerRatio reports the delay line's
+    //    effective ratio. The line's slew is clamped to a ratio in [0.5, 2].
+    //  - Enable it before the playback starts sounding: switching it on
+    //    mid-play restarts the line (a gap of the current delay), and off
+    //    jumps to the undelayed signal.
+    //  setSpatialSpeedOfSound: metres per second, default 343 (clamped >= 1).
+    //  setSpatialMaxPropagationDelay: seconds, default 0.5, clamped 0..10.
+    //    Raising it reallocates the lines of playbacks that have the delay on
+    //    (restarting them); memory is capacity x channels floats each.
+    //  setPlaybackSpatialPropagationDelay: default off; allocates the line on
+    //    the calling thread.
+    void setSpatialSpeedOfSound(float metresPerSecond);
+    float spatialSpeedOfSound() const { return speedOfSound_.load(std::memory_order_relaxed); }
+    void setSpatialMaxPropagationDelay(float seconds);
+    float spatialMaxPropagationDelay() const { return maxPropagationDelay_.load(std::memory_order_relaxed); }
+    void setPlaybackSpatialPropagationDelay(int instanceId, bool enabled);
+
     // --- Audio file I/O ---
 
     // Create a clip by loading an audio file (WAV, FLAC, MP3, Ogg Vorbis;
@@ -630,23 +724,33 @@ private:
     void processBusDistortion(Bus& bus, float* buf, int numFrames);
     void processBusReverb(Bus& bus, float* buf, int numFrames);
     void processBusEqualizer(Bus& bus, float* buf, int numFrames);
+    void processBusConvolution(Bus& bus, float* buf, int numFrames);
     void updateBusMeters(Bus& bus, int numFrames);
+    // Advance a bus's gain ramp over the block into bus.gainBlock (once per
+    // block, before the parent mix and the aux send read it).
+    void advanceBusGain(Bus& bus, int numFrames);
     void mixBusIntoParent(Bus& child, Bus& parent, int numFrames);
-    // Ring-read mix path for streaming playbacks (clip->streaming). Shared by the
-    // headless and realtime clip loops. Outputs silence on underrun, skips ahead
-    // on overrun.
-    void mixStreamPlayback(ClipPlayback* pb, AudioClip* clip, float* targetBuf,
-                           float* clipSendBuf, float clipSendAmt,
-                           bool spatialFilterActive, const HeadParams& headParams,
-                           float rate, int numFrames, int startFrame);
-    // Resample-mix a fixed (non-streaming) clip playback for one block:
-    // scheduled start, region, loop window, content budget, gain/pan
-    // smoothing, spatial filter, aux send. Shared by the headless and
-    // realtime clip loops. `blockStart` is the block's first absolute sample.
-    void mixClipPlayback(ClipPlayback* pb, AudioClip* clip, float* targetBuf,
-                         float* clipSendBuf, float clipSendAmt,
-                         bool spatialFilterActive, const HeadParams& headParams,
-                         float rate, int numFrames, uint64_t blockStart);
+    void mixBusSend(Bus& bus, Bus& target, float amount, int numFrames);
+
+    // Clip playback mixing (engine_playback_mix.cpp): for each playback the
+    // source stage reads the clip or stream into planar scratch, the
+    // spatializer fills a VoiceChainParams, and runVoiceChain does the rest.
+    // Shared by the headless and realtime paths.
+    void mixPlaybacks(int numFrames, const BusList& buses);
+    // Source stages. Write `numFrames` raw (pre-gain) frames per channel into
+    // L/R (R only for stereo), zero where silent. Return true when the source
+    // has ended (content, duration or scheduled stop); they never deactivate
+    // the playback themselves.
+    bool sourceClip(ClipPlayback* pb, AudioClip* clip, float rate, int numFrames,
+                    uint64_t blockStart, float* L, float* R);
+    void sourceStream(ClipPlayback* pb, AudioClip* clip, float rate, int numFrames,
+                      float* L, float* R);
+    // Allocate (or grow) a playback's propagation delay line. Control thread.
+    void ensureDelayBuffer(ClipPlayback& pb, int channels);
+    // Chain scratch; called by init / initHeadless.
+    void initDistanceState(int maxFrames);
+    // Fit the air table for the current conditions if none is published yet.
+    void ensureAirTable();
 
     static void micCallback(void* userdata, SDL_AudioStream* stream,
                             int additional_amount, int total_amount);
@@ -724,6 +828,17 @@ private:
     Listener listener_;
     HeadModel headModel_;
     std::atomic<float> dopplerFactor_{1.0f};
+    std::atomic<float> metresPerUnit_{1.0f};
+    std::atomic<float> speedOfSound_{343.0f};
+    std::atomic<float> maxPropagationDelay_{0.5f};
+    std::atomic<float> airStrength_{1.0f};
+    std::atomic<float> airTemperature_{20.0f};
+    std::atomic<float> airHumidity_{50.0f};
+    AtomicSharedPtr<const AirFilterTable> airTable_{rcu_};
+    std::mutex airWriteMutex_;   // serialises air-table publishes
+    // Planar source scratch (2 x MAX) and the chain's stereo scratch (2 x MAX),
+    // pre-sized at init; audio thread only.
+    std::vector<float> chainScratch_;
 
     SDL_AudioStream* stream_ = nullptr;
     SDL_AudioStream* micStream_ = nullptr;

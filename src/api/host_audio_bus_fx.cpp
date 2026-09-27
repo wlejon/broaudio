@@ -134,12 +134,49 @@ void registerAudioContextBusFx(ObjectBuilder& b) {
         return ev::fromDouble(e && !a.empty() ? e->getBusDistortionCrushRate(i32At(a, 0)) : 1.0);
     });
 
+    // ---- Convolution reverb ------------------------------------------------
+    // setBusConvolutionImpulse(busId, clipId) -> bool: prepare a mono or
+    // stereo clip as the bus's impulse response (-1 clears).
+    b.def("setBusConvolutionImpulse", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (!e || a.size() < 2) return ev::fromBool(false);
+        return ev::fromBool(e->setBusConvolutionImpulse(i32At(a, 0), i32At(a, 1)));
+    });
+
+    b.def("getBusConvolutionImpulse", 1, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        return ev::fromDouble(e && !a.empty() ? e->getBusConvolutionImpulse(i32At(a, 0)) : -1);
+    });
+
+    b.def("setBusConvolutionMix", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 2) e->setBusConvolutionMix(i32At(a, 0), static_cast<float>(numAt(a, 1)));
+        return ev::undefined();
+    });
+
+    b.def("getBusConvolutionMix", 1, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        return ev::fromDouble(e && !a.empty() ? e->getBusConvolutionMix(i32At(a, 0)) : 1.0);
+    });
+
+    b.def("setBusConvolutionEnabled", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 2) e->setBusConvolutionEnabled(i32At(a, 0), boolAt(a, 1));
+        return ev::undefined();
+    });
+
+    b.def("getBusConvolutionEnabled", 1, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        return ev::fromBool(e && !a.empty() ? e->getBusConvolutionEnabled(i32At(a, 0)) : false);
+    });
+
     // ---- Effect order ------------------------------------------------------
-    // setBusEffectOrder(busId, names[]): 1..7 slot names ("filter", "delay",
-    // "compressor", "chorus", "reverb", "equalizer", "distortion"). A longer
-    // or empty list is ignored; a name that is not a slot keeps that
-    // position's default slot (position i = slot i), so a typo never
-    // collapses the chain onto one effect.
+    // setBusEffectOrder(busId, names[]): 1..8 slot names ("filter", "delay",
+    // "compressor", "chorus", "reverb", "equalizer", "distortion",
+    // "convolution"). A longer or empty list is ignored; a name that is not a
+    // slot keeps that position's default slot (position i = slot i), so a
+    // typo never collapses the chain onto one effect. Positions the list does
+    // not reach are refilled with the slots it left out, in default order.
     b.def("setBusEffectOrder", 2, [](Value, std::span<const Value> a) {
         auto* e = getAudioEngine();
         if (!e || a.size() < 2 || !ev::isObject(a[1])) return ev::undefined();

@@ -300,9 +300,11 @@ void registerAudioContextBuses(ObjectBuilder& b) {
         return ev::undefined();
     });
 
-    b.def("setBusGain", 2, [](Value, std::span<const Value> a) {
+    // setBusGain(busId, gain, rampSeconds?): linear ramp when rampSeconds > 0,
+    // a ~5 ms de-zipper otherwise.
+    b.def("setBusGain", 3, [](Value, std::span<const Value> a) {
         auto* e = getAudioEngine();
-        if (e && a.size() >= 2) e->setBusGain(i32At(a, 0), static_cast<float>(numAt(a, 1)));
+        if (e && a.size() >= 2) e->setBusGain(i32At(a, 0), static_cast<float>(numAt(a, 1)), rampAt(a, 2));
         return ev::undefined();
     });
 

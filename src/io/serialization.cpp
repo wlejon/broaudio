@@ -160,6 +160,7 @@ static const char* effectSlotName(EffectSlot e) {
         case EffectSlot::Reverb:     return "reverb";
         case EffectSlot::Equalizer:  return "equalizer";
         case EffectSlot::Distortion: return "distortion";
+        case EffectSlot::Convolution: return "convolution";
         default: return "filter";
     }
 }
@@ -172,6 +173,7 @@ static EffectSlot effectSlotFromName(const std::string& s) {
     if (s == "reverb")     return EffectSlot::Reverb;
     if (s == "equalizer")  return EffectSlot::Equalizer;
     if (s == "distortion") return EffectSlot::Distortion;
+    if (s == "convolution") return EffectSlot::Convolution;
     return EffectSlot::Filter;
 }
 

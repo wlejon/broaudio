@@ -25,6 +25,7 @@ enum class EffectSlot : uint8_t {
     Reverb,
     Equalizer,
     Distortion,
+    Convolution,   // partitioned FFT convolution reverb (Engine::setBusConvolution*)
     Count
 };
 

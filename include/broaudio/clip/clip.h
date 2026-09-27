@@ -2,6 +2,7 @@
 
 #include "broaudio/dsp/smoother.h"
 #include "broaudio/spatial/listener.h"
+#include "broaudio/spatial/spatial_chain.h"
 #include <atomic>
 #include <cstdint>
 #include <vector>
@@ -109,9 +110,10 @@ struct ClipPlayback {
     std::atomic<uint64_t> durationFixed{UINT64_MAX};
     uint64_t consumedFixed = 0;
 
-    // Parameter smoothers (audio thread only)
-    Smoother smoothGain;
-    Smoother smoothPan;
+    // Ramp controls for gain (target: `gain`) and the send amount (target:
+    // `sendAmount`); see RampControl. Main thread writes.
+    RampControl gainRamp;
+    RampControl sendRamp;
 
     // Sub-sample read phase for streaming playbacks at rate != 1. The ring
     // cursor (playPos) stays a whole-frame count so the producer's
@@ -119,9 +121,29 @@ struct ClipPlayback {
     // output frames. Audio thread only.
     float streamFrac = 0.0f;
 
-    // Spatial source and directional filter (audio-thread only)
+    // Spatial source parameters (main thread writes)
     SpatialSource spatial;
-    SpatialFilter spatialFilter;
+    // Air absorption and propagation delay switches (Engine::
+    // setPlaybackSpatialAirAbsorption / setPlaybackSpatialPropagationDelay).
+    std::atomic<bool> airAbsorption{false};
+    std::atomic<bool> propagationDelay{false};
+    // Delay memory, owned by the playback. Allocated and replaced on the
+    // control thread (the old one is RCU-retired); the audio thread loads it
+    // once per block. Freed with the playback, which the RCU list outlives.
+    std::atomic<PropagationDelayBuffer*> delayBuffer{nullptr};
+
+    // The per-voice chain's audio-thread state (air, delay, gain/pan ramps,
+    // head filter) — see spatial/spatial_chain.h.
+    VoiceChainState chain;
+    // A one-shot whose source has ended keeps running its chain on silence
+    // until the propagation delay has drained (audio thread only).
+    bool sourceEnded = false;
+    int tailRemaining = 0;
+
+    ClipPlayback() = default;
+    ClipPlayback(const ClipPlayback&) = delete;
+    ClipPlayback& operator=(const ClipPlayback&) = delete;
+    ~ClipPlayback() { delete delayBuffer.load(std::memory_order_relaxed); }
 };
 
 } // namespace broaudio

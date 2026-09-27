@@ -184,11 +184,13 @@ inline SpatialResult computeSpatial(const Listener& listener, const SpatialSourc
 // stays finite, and the result is clamped to [0.5, 2.0] (±1 octave) — beyond
 // that real games want a whoosh, not aliasing or subsonic mush. Units are
 // whatever the app uses for positions; velocities just have to match.
+// `speedOfSound` is in those units per second (the engine passes its
+// setSpatialSpeedOfSound / setSpatialMetresPerUnit quotient; 343 by default).
 inline float computeDopplerRatio(const Listener& listener, const SpatialSource& src,
-                                 float factor)
+                                 float factor, float speedOfSound = 343.0f)
 {
     if (factor <= 0.0f) return 1.0f;
-    constexpr float kSpeedOfSound = 343.0f;
+    const float kSpeedOfSound = speedOfSound > 0.0f ? speedOfSound : 343.0f;
 
     bromath::Vec3 d = listener.position() - src.position();
     float dist = bromath::vlen(d);
@@ -197,7 +199,7 @@ inline float computeDopplerRatio(const Listener& listener, const SpatialSource& 
 
     float vl = bromath::vdot(listener.velocity(), dn) * factor;
     float vs = bromath::vdot(src.velocity(), dn) * factor;
-    constexpr float kMaxV = 0.9f * kSpeedOfSound;
+    const float kMaxV = 0.9f * kSpeedOfSound;
     vl = std::clamp(vl, -kMaxV, kMaxV);
     vs = std::clamp(vs, -kMaxV, kMaxV);
 

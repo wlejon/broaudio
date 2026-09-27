@@ -89,10 +89,17 @@ struct SynthTrigger {
 // `snap` moves every periodic rate onto a whole number of cycles over the
 // loop (at least one): constant oscillator and FM carrier frequencies (the
 // FM ratio follows so the modulator is whole too) and constant impulse
-// rates. A frequency that is a signal (a sweep, a mix) is not snapped. The
-// voice's values() report the snapped numbers.
+// rates. A rate wired to a `mix` or `mul` of constants only is constant
+// (folded): the first constant feeding it that can carry the change moves (a
+// mix's first input with a non-zero weight, a mul's first factor). A rate
+// that is a real signal (a sweep, an LFO) is not snapped. The voice's
+// values() (and SynthGraph::values with the loop) report the snapped numbers.
+//
+// The crossfade is per layer: each layer's two halves are blended with the
+// curve, and under Auto with that layer's own correlation, so a tonal layer
+// and a noise layer each keep their level through the blend.
 enum class SynthLoopCurve : uint8_t {
-    Auto,     // equal power, corrected for the halves' correlation (r = 1: equal gain)
+    Auto,     // per layer: equal power corrected for its halves' correlation (r = 1: equal gain)
     Power,    // equal power (uncorrelated halves: noise)
     Linear,   // equal gain (identical halves: snapped, settled tones)
 };
@@ -128,6 +135,14 @@ public:
     // SynthGraphError for an unknown name, a non-number or a value outside
     // the parameter's range.
     std::vector<std::pair<int, float>> overridesFromJson(std::string_view json) const;
+
+    // One trigger's parameter values as its voice resolves them (overrides,
+    // jitter, the range) at `sampleRate`, and, for an enabled `loop` with
+    // `snap`, snapped as that loop snaps them: what SynthVoice::values()
+    // reports, without rendering anything. Snapping is idempotent, so these
+    // values given back as overrides (jitter off) render the same loop.
+    std::vector<float> values(const SynthTrigger& trigger, int sampleRate = 48000,
+                              const SynthLoopOptions& loop = SynthLoopOptions{}) const;
 
     int layerCount() const noexcept;
     std::string layerId(int layer) const;

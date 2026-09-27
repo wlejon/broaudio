@@ -232,6 +232,35 @@ TEST(short_click_loudness_and_loops)
     ro.trigger.jitter = false;
     ro.loop = lo.loop;
     ASSERT_TRUE(sameBits(renderSynth(hum, ro), lr.clip.samples));
+
+    // A searched fundamental, directly and through a mix of numbers, is
+    // reported snapped (whole cycles per 0.25 s: a multiple of 4 Hz), and
+    // the snapped values round-trip: as overrides they render the clip, and
+    // values() of them is them.
+    for (const char* desc : {
+             R"({"nodes": {"s": {"type": "osc", "wave": "saw", "freq": 90},
+                 "lp": {"type": "filter", "input": "s", "cutoff": 900}}, "output": "lp"})",
+             R"({"nodes": {"f": {"type": "mix", "inputs": [60, 30]}, "s": {"type": "osc", "wave": "saw", "freq": "f"},
+                 "lp": {"type": "filter", "input": "s", "cutoff": 900}}, "output": "lp"})"}) {
+        auto sg = SynthGraph::fromJson(desc);
+        const bool folded = sg->paramIndex("f.inputs.0") >= 0;
+        ear::FitOptions so;
+        so.params = {{folded ? "f.inputs.0" : "s.freq"}};
+        so.measures = {{"partialHz", 131.0}};
+        so.loop.length = 0.25;
+        so.maxEvaluations = 80;
+        const ear::FitResult sr = ear::fit(sg, so);
+        const double hz = folded ? sr.values[0] + 30.0 : sr.values[0];
+        std::printf("  loop fit %s: %.4f Hz\n", folded ? "through a mix" : "direct", hz);
+        ASSERT_NEAR(hz / 4.0, std::round(hz / 4.0), 1e-4);
+        SynthRenderOptions back;
+        back.trigger.overrides = sr.overrides;
+        back.trigger.jitter = false;
+        back.loop = so.loop;
+        ASSERT_TRUE(sameBits(renderSynth(sg, back), sr.clip.samples));
+        const std::vector<float> v = sg->values(back.trigger, sr.sampleRate, so.loop);
+        ASSERT_TRUE(v[sr.params[0].index] == static_cast<float>(sr.values[0]));
+    }
     PASS();
 }
 

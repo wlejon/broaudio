@@ -165,6 +165,116 @@ TEST(snap_puts_periodic_rates_on_whole_cycles)
     PASS();
 }
 
+TEST(snap_folds_constant_mixes_and_round_trips)
+{
+    // o1's frequency is a mix of numbers (55.3 Hz), o2's a mul of that mix
+    // by 2, the FM carrier a mix too; the vibrato osc's is a real signal.
+    auto g = SynthGraph::fromJson(R"({"nodes": {
+        "f":   {"type": "mix", "inputs": [40, {"node": "c", "weight": 1}]},
+        "c":   {"type": "mix", "inputs": [15.3]},
+        "o1":  {"type": "osc", "wave": "saw", "freq": "f"},
+        "f2":  {"type": "mul", "a": "f", "b": 2},
+        "o2":  {"type": "osc", "freq": "f2", "gain": 0.3},
+        "fc":  {"type": "mix", "inputs": [100, 10.2]},
+        "fm":  {"type": "fm", "freq": "fc", "ratio": 1.4142, "gain": 0.2},
+        "lfo": {"type": "osc", "freq": 3, "gain": 4},
+        "vf":  {"type": "mix", "inputs": [220, "lfo"]},
+        "vib": {"type": "osc", "freq": "vf", "gain": 0.1},
+        "m":   {"type": "mix", "inputs": ["o1", "o2", "fm", "vib"]}
+      }, "output": "m"})");
+    const SynthLoopOptions l = loopOf(0.5, 0.05, 0.25, true);
+    SynthTrigger t;
+    t.jitter = false;
+    const std::vector<float> v = g->values(t, kSr, l);
+    auto at = [&](const char* n) { return v[g->paramIndex(n)]; };
+    // 55.3 -> 56 Hz: the mix's first input carries it (40 -> 40.7).
+    ASSERT_NEAR(at("f.inputs.0") + at("c.inputs.0"), 56.0f, 1e-4f);
+    ASSERT_TRUE(at("c.inputs.0") == 15.3f);
+    // 2 x 56 = 112 is already whole: the mul's factor stays.
+    ASSERT_TRUE(at("f2.b") == 2.0f);
+    // The carrier 110.2 -> 110, then the ratio follows (155.6 -> 156 Hz).
+    ASSERT_NEAR(at("fc.inputs.0") + at("fc.inputs.1"), 110.0f, 1e-4f);
+    ASSERT_NEAR(at("fm.ratio"), 156.0f / 110.0f, 1e-5f);
+    // A signal frequency is not constant: untouched (the LFO itself snaps).
+    ASSERT_TRUE(at("vf.inputs.0") == 220.0f);
+    ASSERT_TRUE(at("lfo.freq") == 4.0f);
+    // What the looping voice reports.
+    SynthVoice voice(g, kSr, t, l);
+    ASSERT_TRUE(voice.values() == v);
+    // Without a loop (or without snap) nothing moves.
+    ASSERT_TRUE(g->values(t, kSr)[g->paramIndex("f.inputs.0")] == 40.0f);
+
+    // Idempotent: the snapped values as overrides resolve to themselves and
+    // render the same loop.
+    SynthTrigger back = t;
+    for (size_t i = 0; i < v.size(); i++) back.overrides.push_back({static_cast<int>(i), v[i]});
+    ASSERT_TRUE(g->values(back, kSr, l) == v);
+    SynthRenderOptions o;
+    o.trigger = t;
+    o.loop = l;
+    const auto a = renderSynth(g, o);
+    o.trigger = back;
+    ASSERT_TRUE(sameBits(renderSynth(g, o), a));
+    PASS();
+}
+
+TEST(each_layer_crossfades_with_its_own_curve)
+{
+    // A snapped hum (halves identical) and a hiss (halves unrelated), at
+    // equal power. As two layers each blends with its own curve: the hum
+    // and the hiss each keep their level through the crossfade. Mixed
+    // inside one layer one curve serves both (the power-weighted
+    // correlation, 0.5): the total stays flat but the hum lifts and the
+    // hiss dips mid-crossfade.
+    const char* layered = R"({"layers": {
+        "hum":  {"nodes": {"o": {"type": "osc", "freq": 440, "gain": 0.5}}, "output": "o"},
+        "hiss": {"nodes": {"n": {"type": "noise"},
+                           "hp": {"type": "filter", "mode": "highpass", "input": "n", "cutoff": 4000, "gain": 0.65}},
+                 "output": "hp"}}})";
+    const char* single = R"({"nodes": {
+        "o": {"type": "osc", "freq": 440, "gain": 0.5}, "n": {"type": "noise"},
+        "hp": {"type": "filter", "mode": "highpass", "input": "n", "cutoff": 4000, "gain": 0.65},
+        "m": {"type": "mix", "inputs": ["o", "hp"]}}, "output": "m"})";
+    const int len = kSr, fade = kSr / 5, win = fade * 3 / 10, start = kSr / 4;
+    // Over a window: the 440 Hz component's power (least squares on sin and
+    // cos) and the rest's (the hiss, far above it).
+    struct Parts { double hum, hiss, total; };
+    auto parts = [&](const std::vector<float>& x, int from) {
+        double ss = 0, cc = 0, sc = 0, xs = 0, xc = 0, xx = 0;
+        for (int i = from; i < from + win; i++) {
+            const double ph = 2.0 * std::numbers::pi * 440.0 * (start + i) / kSr;
+            const double s = std::sin(ph), c = std::cos(ph);
+            ss += s * s; cc += c * c; sc += s * c;
+            xs += x[i] * s; xc += x[i] * c; xx += static_cast<double>(x[i]) * x[i];
+        }
+        const double det = ss * cc - sc * sc;
+        const double a = (xs * cc - xc * sc) / det, b = (xc * ss - xs * sc) / det;
+        const double hum = (a * a + b * b) / 2.0;
+        return Parts{hum, xx / win - hum, xx / win};
+    };
+    auto lifts = [&](const char* desc) {
+        const auto L = renderLoop(SynthGraph::fromJson(desc), loopOf(1.0, 0.2, 0.25, true), 3);
+        Parts steady{0, 0, 0};
+        for (int k = 0; k < 6; k++) {
+            const Parts p = parts(L, fade + k * (len - fade - win) / 6);
+            steady.hum += p.hum / 6; steady.hiss += p.hiss / 6; steady.total += p.total / 6;
+        }
+        const Parts mid = parts(L, fade / 2 - win / 2);
+        return Parts{10 * std::log10(mid.hum / steady.hum), 10 * std::log10(mid.hiss / steady.hiss),
+                     10 * std::log10(mid.total / steady.total)};
+    };
+    const Parts per = lifts(layered), one = lifts(single);
+    std::printf("  mid-crossfade vs steady, dB: per layer hum %+.2f hiss %+.2f total %+.2f; "
+                "one layer hum %+.2f hiss %+.2f total %+.2f\n",
+                per.hum, per.hiss, per.total, one.hum, one.hiss, one.total);
+    ASSERT_LT(std::fabs(per.hum), 0.05);
+    ASSERT_LT(std::fabs(per.hiss), 0.3);
+    ASSERT_LT(std::fabs(per.total), 0.2);
+    ASSERT_GT(one.hum, 0.8);
+    ASSERT_LT(one.hiss, -0.8);
+    PASS();
+}
+
 TEST(compiled_loops_match_interpreted)
 {
     if (!voiceJitBackendAvailable()) {

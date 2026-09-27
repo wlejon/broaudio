@@ -8,6 +8,7 @@
 //   g.render({sampleRate, seed, params, jitter, maxDuration, compiled, loop})
 //   ctx.playSynth(g, {seed, params, jitter, gain, when, pan, bus, position, loop})
 //     loop: {length, crossfade, start, snap, curve, releaseFade}
+//   g.values(renderOpts)   the resolved (for a loop, snapped) values by name
 //   ctx.releaseSynth(id)
 //
 // The description crosses as JSON.stringify of the object (a string is taken
@@ -213,6 +214,31 @@ Value renderFn(Value self, std::span<const Value> a) {
     return buf.get();
 }
 
+// The values one trigger resolves to (overrides, jitter, the range; snapped
+// for a loop), by parameter name, without rendering.
+Value valuesFn(Value self, std::span<const Value> a) {
+    HostSynthGraph* h = thisGraph(self, "values");
+    const std::shared_ptr<const SynthGraph> g = h->graph;
+    // render()'s options (maxDuration and compiled change nothing here), so
+    // g.values(fitResult.render) works.
+    Opts o = readOpts(a, 0, "values", {"sampleRate", "seed", "params", "jitter", "maxDuration", "compiled", "loop"});
+    Engine* eng = existingAudioEngine();
+    int rate = eng && eng->sampleRate() > 0 ? eng->sampleRate() : 48000;
+    double d = 0;
+    if (o.number("sampleRate", d, 8000.0, 384000.0)) rate = static_cast<int>(d);
+    bool unusedCompiled = true;
+    o.number("maxDuration", d, 0.0, 600.0);
+    o.boolean("compiled", unusedCompiled);
+    SynthTrigger t;
+    readTrigger(o, *g, t);
+    SynthLoopOptions loop;
+    readLoop(o, loop);
+    const std::vector<float> v = g->values(t, rate, loop);
+    ObjectBuilder out;
+    for (size_t i = 0; i < v.size(); ++i) out.set(g->params()[i].name, static_cast<double>(v[i]));
+    return out.get();
+}
+
 Value paramsGetter(Value self, std::span<const Value>) {
     HostSynthGraph* h = thisGraph(self, "params");
     const std::shared_ptr<const SynthGraph> g = h->graph;
@@ -258,6 +284,7 @@ void decorateSynthGraphProto(ObjectBuilder& b) {
         return ev::fromBool(g->precompile());
     });
     b.def("render", 1, renderFn);
+    b.def("values", 1, valuesFn);
 }
 
 // The SynthGraph a playSynth argument names: an instance, or a description

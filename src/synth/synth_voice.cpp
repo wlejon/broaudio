@@ -215,45 +215,141 @@ bool SynthVoiceData::runLayer(SynthLayerRun& lr, float* out, int n, bool compile
     return allCompiled;
 }
 
+namespace {
+
+// A layer's constant slots, seen through constant folding: a slot is
+// constant when it is a number, or wired to a `mix` or `mul` whose every
+// input (and weight, and gain) is constant in turn. Setting a folded slot
+// moves the first constant number feeding it that can carry the change (a
+// mix's first input with a non-zero weight, a mul's first factor).
+struct ConstFolder {
+    const SynthGraphData& g;
+    const LayerPlan& plan;
+    std::vector<float>& values;
+    std::vector<int> paramOfK;
+
+    static constexpr int kMaxDepth = 8;
+
+    ConstFolder(const SynthGraphData& gd, const LayerData& L, std::vector<float>& v)
+        : g(gd), plan(L.shape->plan), values(v), paramOfK(L.shape->plan.kCount, -1)
+    {
+        for (const auto& [kIdx, param] : L.feeds) paramOfK[kIdx] = param;
+    }
+
+    float k(int kIdx) const { return paramOfK[kIdx] >= 0 ? values[paramOfK[kIdx]] : 0.0f; }
+
+    // The slot's value (as the kernel computes it, in float) when constant.
+    bool value(const SlotPlan& s, float& out, int depth = 0) const
+    {
+        if (!s.wired()) {
+            if (paramOfK[s.k] < 0) return false;
+            out = values[paramOfK[s.k]];
+            return true;
+        }
+        if (depth >= kMaxDepth) return false;
+        const NodePlan& nd = plan.nodes[s.node];
+        float gain;
+        if (!value(nd.gain(), gain, depth + 1)) return false;
+        if (nd.kind == SynthKind::Mix) {
+            float y = 0.0f;
+            for (int q = 0; q < nd.count; ++q) {
+                float x;
+                if (!value(nd.slots[q], x, depth + 1)) return false;
+                const float term = x * k(nd.kBase + q);
+                y = q == 0 ? term : y + term;
+            }
+            out = y * gain;
+            return true;
+        }
+        if (nd.kind == SynthKind::Mul) {
+            float a, b;
+            if (!value(nd.slots[0], a, depth + 1) || !value(nd.slots[1], b, depth + 1)) return false;
+            out = a * b * gain;
+            return true;
+        }
+        return false;
+    }
+
+    bool constant(const SlotPlan& s) const
+    {
+        float v;
+        return value(s, v);
+    }
+
+    // Move the slot's value onto `target`; false when nothing can carry it.
+    bool set(const SlotPlan& s, double target, int depth = 0)
+    {
+        if (!s.wired()) {
+            const int p = paramOfK[s.k];
+            if (p < 0) return false;
+            values[p] = std::clamp(static_cast<float>(target), g.params[p].lo, g.params[p].hi);
+            return true;
+        }
+        if (depth >= kMaxDepth) return false;
+        const NodePlan& nd = plan.nodes[s.node];
+        float gain, cur;
+        if (!value(nd.gain(), gain, depth + 1) || !value(s, cur, depth) || gain == 0.0f) return false;
+        if (nd.kind == SynthKind::Mix) {
+            for (int q = 0; q < nd.count; ++q) {
+                const float w = k(nd.kBase + q);
+                float x;
+                if (w == 0.0f || !value(nd.slots[q], x, depth + 1)) continue;
+                if (set(nd.slots[q], x + (target - cur) / (static_cast<double>(gain) * w), depth + 1)) return true;
+            }
+            return false;
+        }
+        if (nd.kind == SynthKind::Mul) {
+            float a, b;
+            value(nd.slots[0], a, depth + 1);
+            value(nd.slots[1], b, depth + 1);
+            if (b != 0.0f && set(nd.slots[0], target / (static_cast<double>(b) * gain), depth + 1)) return true;
+            return a != 0.0f && set(nd.slots[1], target / (static_cast<double>(a) * gain), depth + 1);
+        }
+        return false;
+    }
+};
+
+} // namespace
+
 // Whole cycles over the loop for every constant periodic rate: oscillator
 // and FM carrier frequencies (the ratio following, so the modulator is whole
-// too) and impulse rates. At least one cycle; clamped into the range.
+// too) and impulse rates, a number or a constant-folded mix / mul of
+// numbers. At least one cycle; clamped into the range. Idempotent: snapping
+// snapped values changes nothing (a folded rate already within 1e-6 of whole
+// is left alone), so snapped values round-trip as overrides.
 void SynthVoiceData::snap(const SynthGraphData& g, int64_t loopFrames)
 {
     const double perCycle = static_cast<double>(fs) / static_cast<double>(loopFrames);   // Hz of one cycle
     auto cyclesOf = [&](double hz) { return std::max<double>(1.0, std::round(hz / perCycle)); };
-    auto snapParam = [&](int p) -> double {
-        if (p < 0 || !(values[p] > 0.0f)) return 0.0;
-        const SynthParamInfo& info = g.params[p];
-        values[p] = std::clamp(static_cast<float>(cyclesOf(values[p]) * perCycle), info.lo, info.hi);
-        return values[p];
-    };
     for (const LayerData& L : g.layers) {
-        const LayerPlan& plan = L.shape->plan;
-        std::vector<int> paramOfK(plan.kCount, -1);
-        for (const auto& [kIdx, param] : L.feeds) paramOfK[kIdx] = param;
-        for (const NodePlan& nd : plan.nodes) {
-            const bool constFreq = !nd.slots.empty() && !nd.slots[0].wired();
+        ConstFolder cf(g, L, values);
+        // Snap one slot onto whole cycles of hz = f(slot); returns the value it lands on (0: not snapped).
+        auto snapSlot = [&](const SlotPlan& s, double scale) -> double {
+            float cur;
+            if (!cf.value(s, cur) || !(cur > 0.0f)) return 0.0;
+            const double hz = cur * scale;
+            const double target = cyclesOf(hz) * perCycle / scale;
+            if (!s.wired() || std::fabs(cur - target) > 1e-6 * target) cf.set(s, target);
+            float now = 0.0f;
+            cf.value(s, now);
+            return now;
+        };
+        for (const NodePlan& nd : L.shape->plan.nodes) {
+            if (nd.slots.empty()) continue;
             if (nd.kind == SynthKind::Osc || nd.kind == SynthKind::Impulses) {
-                if (constFreq) snapParam(paramOfK[nd.slots[0].k]);
-            } else if (nd.kind == SynthKind::Fm && constFreq) {
-                const double fc = snapParam(paramOfK[nd.slots[0].k]);
-                const int pr = nd.slots[1].wired() ? -1 : paramOfK[nd.slots[1].k];
-                if (fc > 0.0 && pr >= 0 && values[pr] > 0.0f) {
-                    const double fm = cyclesOf(fc * values[pr]) * perCycle;
-                    const SynthParamInfo& info = g.params[pr];
-                    values[pr] = std::clamp(static_cast<float>(fm / fc), info.lo, info.hi);
-                }
+                snapSlot(nd.slots[0], 1.0);
+            } else if (nd.kind == SynthKind::Fm) {
+                const double fc = snapSlot(nd.slots[0], 1.0);
+                if (fc > 0.0) snapSlot(nd.slots[1], fc);
             }
         }
     }
 }
 
-void SynthVoiceData::init(const SynthGraphData& g, int sampleRate, const SynthTrigger& t, int64_t snapFrames)
+void SynthVoiceData::resolve(const SynthGraphData& g, int sampleRate, const SynthTrigger& t, int64_t snapFrames)
 {
     SynthVoiceData& v = *this;
     v.fs = sampleRate > 0 ? sampleRate : 48000;
-    const double fs = v.fs;
 
     // Parameters: declared value (or override), then jitter, then the range.
     v.values.resize(g.params.size());
@@ -271,6 +367,13 @@ void SynthVoiceData::init(const SynthGraphData& g, int sampleRate, const SynthTr
         v.values[i] = std::clamp(x, p.lo, p.hi);
     }
     if (snapFrames > 0) v.snap(g, snapFrames);
+}
+
+void SynthVoiceData::init(const SynthGraphData& g, int sampleRate, const SynthTrigger& t, int64_t snapFrames)
+{
+    SynthVoiceData& v = *this;
+    v.resolve(g, sampleRate, t, snapFrames);
+    const double fs = v.fs;
     if (g.duration >= 0) v.duration = std::max<int64_t>(1, v.frames(g.duration));
     v.ampPending = g.ampEnvs;
 
@@ -353,6 +456,25 @@ void SynthVoiceData::init(const SynthGraphData& g, int sampleRate, const SynthTr
             v.advance(lr, e, 0);
         }
     }
+}
+
+void SynthVoiceData::renderLayers(float* const* outs, int n, bool compiled)
+{
+    if (n <= 0) return;
+    FpModeGuard fpMode;
+    for (size_t l = 0; l < layers.size(); ++l) {
+        std::fill(outs[l], outs[l] + n, 0.0f);
+        runLayer(layers[l], outs[l], n, compiled);
+    }
+    pos += n;
+}
+
+void mixSynthLayers(const float* const* ins, int layers, float* out, int n)
+{
+    FpModeGuard fpMode;
+    std::fill(out, out + n, 0.0f);
+    for (int l = 0; l < layers; ++l)
+        for (int i = 0; i < n; ++i) out[i] = out[i] + ins[l][i];
 }
 
 void SynthVoiceData::releaseAll()
@@ -527,6 +649,14 @@ int SynthGraph::paramIndex(std::string_view name) const noexcept
 {
     auto it = data_->paramIndex.find(std::string(name));
     return it == data_->paramIndex.end() ? -1 : it->second;
+}
+
+std::vector<float> SynthGraph::values(const SynthTrigger& trigger, int sampleRate, const SynthLoopOptions& loop) const
+{
+    SynthVoiceData d;
+    const int fs = sampleRate > 0 ? sampleRate : 48000;
+    d.resolve(*data_, fs, trigger, loop.enabled() && loop.snap ? synthLoopFrames(loop, fs) : 0);
+    return std::move(d.values);
 }
 
 int SynthGraph::layerCount() const noexcept { return static_cast<int>(data_->layers.size()); }

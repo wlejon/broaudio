@@ -59,8 +59,14 @@ struct SynthVoiceData {
     // Resolve the trigger's values (snapped to whole cycles over
     // `snapFrames` when > 0) and build every layer's state.
     void init(const SynthGraphData& g, int sampleRate, const SynthTrigger& t, int64_t snapFrames);
+    // The values alone (init's first half: no layer state).
+    void resolve(const SynthGraphData& g, int sampleRate, const SynthTrigger& t, int64_t snapFrames);
     // The next n frames into out (overwriting), as SynthVoice::render.
     bool render(float* out, int n, bool compiled);
+    // An endless voice's next n frames layer by layer: layer l into outs[l]
+    // (overwriting). mixSynthLayers of them is bit for bit what render()
+    // gives for the same frames.
+    void renderLayers(float* const* outs, int n, bool compiled);
     // Note-off for every envelope, at each layer's current time.
     void releaseAll();
     // An independent copy (its delay lines its own) that continues exactly
@@ -91,6 +97,10 @@ struct SynthLoopData {
     int64_t end = -1;
     bool done = false;
 };
+
+// out[i] = sum of ins[0..layers)[i], added in layer order in the voice's FP
+// mode: what a voice's render sums its layers to.
+void mixSynthLayers(const float* const* ins, int layers, float* out, int n);
 
 // Cut the loop from `v` (initialised with snapFrames = the loop's length when
 // snapping, not yet rendered); `v` is left spent.

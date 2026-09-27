@@ -182,7 +182,8 @@ struct FitOptions {
     bool compiled = true;
     // Enabled: every candidate renders one period of this loop
     // (SynthRenderOptions::loop) instead of a one-shot; maxDuration is
-    // unused.
+    // unused. With snap, the search is over pre-snap values (the objective
+    // is flat between whole-cycle steps); the result reports snapped ones.
     SynthLoopOptions loop;
 };
 
@@ -222,7 +223,10 @@ struct FitHistoryEntry {
 
 struct FitResult {
     std::vector<FitParamInfo> params;  // the searched parameters
-    std::vector<double> values;        // best value per searched parameter (as rendered: float)
+    // Best value per searched parameter, as rendered (float); with a snapped
+    // `loop` (and jitter off) the snapped value the loop actually used, and
+    // `overrides` carry the snapped values too.
+    std::vector<double> values;
     // Every override that reproduces `clip`: the searched values and the
     // fixed ones. SynthRenderOptions{trigger: {seeds[0], jitter, overrides}}
     // renders the same samples.

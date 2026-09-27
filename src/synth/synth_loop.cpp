@@ -4,7 +4,9 @@
 // The voice runs without an end for start + length + crossfade frames. The
 // loop is its frames [start, start + length); over the first `crossfade` of
 // them the continuation [start + length, ...) fades out as the loop's own
-// start fades in. Loop sample 0 is therefore exactly voice sample
+// start fades in, layer by layer (each layer with the curve its own halves'
+// correlation calls for), the blended layers then summed exactly as the
+// voice sums them. Loop sample 0 is therefore exactly voice sample
 // start + length: the seam (last loop sample, then the first) is two
 // consecutive samples of the voice, and every filter, resonator and comb
 // state is continuous across it by construction. A copy of the voice taken
@@ -81,33 +83,55 @@ std::unique_ptr<SynthLoopData> buildSynthLoop(SynthVoiceData& v, const SynthGrap
     v.duration = -1;
     run(v, start, nullptr, compiled);
     L->loop.assign(static_cast<size_t>(len), 0.0f);
-    run(v, len, L->loop.data(), compiled);
+    // The crossfaded stretches are rendered layer by layer (own: the loop's
+    // first `fade` frames; cont: the frames after its end) so each layer
+    // fades with the curve its own halves call for; the rest is the mix.
+    const int layers = static_cast<int>(v.layers.size());
+    std::vector<std::vector<float>> own(layers, std::vector<float>(static_cast<size_t>(fade)));
+    std::vector<std::vector<float>> cont = own;
+    auto runLayers = [&](std::vector<std::vector<float>>& dst) {
+        std::vector<float*> ptr(layers);
+        for (int64_t done = 0; done < fade;) {
+            const int m = static_cast<int>(std::min<int64_t>(fade - done, kBlock));
+            for (int l = 0; l < layers; ++l) ptr[l] = dst[l].data() + done;
+            v.renderLayers(ptr.data(), m, compiled);
+            done += m;
+        }
+    };
+    runLayers(own);
+    run(v, len - fade, L->loop.data() + fade, compiled);
     // The voice at the seam: the release tail starts here.
     std::unique_ptr<SynthVoiceData> tail = v.clone();
-    std::vector<float> cont(static_cast<size_t>(fade));
-    run(v, fade, cont.data(), compiled);
+    runLayers(cont);
 
-    // The crossfade: loop[i] = own[i] * in(t) + continuation[i] * out(t),
-    // t = i / fade, so loop[0] is the continuation's first sample exactly.
+    // The crossfade, per layer: blend[i] = own[i] * in(t) + cont[i] * out(t),
+    // t = i / fade, then the layers summed as the voice sums them, so
+    // loop[0] is the continuation's first sample exactly. 'auto' corrects
+    // each layer's equal-power gains for that layer's correlation.
     if (fade > 0) {
-        double r = 0.0;
-        if (o.curve == SynthLoopCurve::Auto) r = correlation(L->loop.data(), cont.data(), fade);
-        for (int64_t i = 0; i < fade; ++i) {
-            const double t = static_cast<double>(i) / static_cast<double>(fade);
-            double gin, gout;
-            if (o.curve == SynthLoopCurve::Linear) {
-                gin = t;
-                gout = 1.0 - t;
-            } else {
-                gin = std::sin(kHalfPi * t);
-                gout = std::cos(kHalfPi * t);
-                const double norm = std::sqrt(1.0 + 2.0 * r * gin * gout);
-                gin /= norm;
-                gout /= norm;
+        std::vector<std::vector<float>> blend = own;
+        for (int l = 0; l < layers; ++l) {
+            const double r = o.curve == SynthLoopCurve::Auto ? correlation(own[l].data(), cont[l].data(), fade) : 0.0;
+            for (int64_t i = 0; i < fade; ++i) {
+                const double t = static_cast<double>(i) / static_cast<double>(fade);
+                double gin, gout;
+                if (o.curve == SynthLoopCurve::Linear) {
+                    gin = t;
+                    gout = 1.0 - t;
+                } else {
+                    gin = std::sin(kHalfPi * t);
+                    gout = std::cos(kHalfPi * t);
+                    const double norm = std::sqrt(1.0 + 2.0 * r * gin * gout);
+                    gin /= norm;
+                    gout /= norm;
+                }
+                blend[l][i] = static_cast<float>(static_cast<double>(own[l][i]) * gin +
+                                                 static_cast<double>(cont[l][i]) * gout);
             }
-            L->loop[i] = static_cast<float>(static_cast<double>(L->loop[i]) * gin +
-                                            static_cast<double>(cont[i]) * gout);
         }
+        std::vector<const float*> ptr(layers);
+        for (int l = 0; l < layers; ++l) ptr[l] = blend[l].data();
+        mixSynthLayers(ptr.data(), layers, L->loop.data(), static_cast<int>(fade));
     }
 
     // The release: the voice from the seam with its envelopes released,

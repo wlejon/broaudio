@@ -363,6 +363,18 @@ FitResult fit(const std::shared_ptr<const SynthGraph>& graph, const FitOptions& 
 
     if (!bestX.empty()) {
         r.overrides = overridesFor(bestX, &r.values);
+        // A snapped loop rendered the searched values snapped: report those
+        // (they round-trip, snapping being idempotent). With jitter the snap
+        // happens after each seed's jitter, so the pre-jitter values stay.
+        if (o.loop.enabled() && o.loop.snap && !o.jitter) {
+            SynthTrigger t;
+            t.seed = o.seeds[0];
+            t.jitter = false;
+            t.overrides = r.overrides;
+            const std::vector<float> snapped = graph->values(t, r.sampleRate, o.loop);
+            for (auto& [idx, v] : r.overrides) v = snapped[idx];
+            for (size_t i = 0; i < pl.params.size(); ++i) r.values[i] = snapped[pl.params[i].index];
+        }
         fitDistance(r.clip, o, &r.terms);
         r.terms.scorer = bestScorer;
     } else {

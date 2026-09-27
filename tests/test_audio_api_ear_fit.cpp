@@ -141,6 +141,14 @@ static void test_loop_and_loudness() {
         expect(r.clip.samples.length === rate / 4, "one period per candidate: " + r.clip.samples.length);
         expect(r.render.loop && r.render.loop.length === 0.25 && r.render.loop.crossfade === 0.02, "render.loop");
         expect(same(hum.render(r.render).getChannelData(0), r.clip.samples), "render(result.render) is the loop");
+        // A searched fundamental comes back snapped (0.25 s: multiples of 4 Hz)
+        // and round-trips through result.render and values().
+        const sf = bro.ear.fit(hum, { params: ["s.freq"], measures: { partialHz: 131 }, loop,
+                                      sampleRate: rate, maxEvaluations: 60 });
+        const hz = sf.params["s.freq"];
+        expect(Math.abs(hz / 4 - Math.round(hz / 4)) < 1e-4, "snapped fundamental: " + hz);
+        expect(same(hum.render(sf.render).getChannelData(0), sf.clip.samples), "snapped values render the clip");
+        expect(hum.values(sf.render)["s.freq"] === hz, "values(result.render) reports it");
         expect((() => { try { bro.ear.fit(hum, { measures: { centroidHz: 400 }, loop: { length: 0 } }); }
                         catch (e) { return e instanceof RangeError && e.message.indexOf("loop.length") >= 0; }
                         return false; })(), "a bad loop is a RangeError naming loop.length");

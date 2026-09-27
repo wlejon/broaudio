@@ -245,6 +245,28 @@ static void test_loops_and_impulses() {
         const lin = rattle.render({ seed: 4, loop: { length: 0.25, curve: "linear", snap: false } });
         expect(lin.length === a.length && !same(a.getChannelData(0), lin.getChannelData(0)), "loop options apply");
 
+        // values(): what a trigger resolves to; with a loop, snapped (a mix
+        // of numbers counts as a number).
+        const drone = new SynthGraph({ nodes: {
+            f: { type: "mix", inputs: [40, 15.3] },
+            s: { type: "osc", wave: "saw", freq: "f" },
+            t: { type: "impulses", rate: 7.3 },
+            out: { type: "mix", inputs: ["s", "t"] } }, output: "out" });
+        const plainV = drone.values({ jitter: false });
+        expect(plainV["f.inputs.0"] === 40 && Math.abs(plainV["t.rate"] - 7.3) < 1e-5, "values without a loop");
+        const snapV = drone.values({ jitter: false, loop: { length: 0.5 }, sampleRate: 48000 });
+        expect(Math.abs(snapV["f.inputs.0"] + snapV["f.inputs.1"] - 56) < 1e-4, "mix snapped: " + snapV["f.inputs.0"]);
+        expect(snapV["t.rate"] === 8, "rate snapped: " + snapV["t.rate"]);
+        const again = drone.values({ jitter: false, loop: { length: 0.5 }, sampleRate: 48000, params: snapV });
+        expect(Object.keys(snapV).every(k => again[k] === snapV[k]), "snapped values round-trip");
+        expect(same(drone.render({ jitter: false, loop: { length: 0.5 }, sampleRate: 48000 }).getChannelData(0),
+                    drone.render({ jitter: false, loop: { length: 0.5 }, sampleRate: 48000, params: snapV })
+                        .getChannelData(0)), "snapped values render the same loop");
+        const bf = new SynthGraph(bell).values({ seed: 3 })["bell.freq"];
+        expect(bf !== 880 && Math.abs(bf / 880 - 1) <= 0.01, "values carry the seed's jitter: " + bf);
+        throws(() => drone.values({ loop: { length: 0 } }), RangeError, "values: loop.length", "values loop");
+        throws(() => drone.values({ nope: 1 }), TypeError, "unknown option 'nope'", "values key");
+
         throws(() => rattle.render({ loop: 1 }), TypeError, "loop must be an object", "loop type");
         throws(() => rattle.render({ loop: {} }), TypeError, "loop.length: required", "loop length");
         throws(() => rattle.render({ loop: { length: 120 } }), RangeError, "loop.length", "loop too long");

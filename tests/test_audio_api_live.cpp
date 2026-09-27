@@ -205,7 +205,7 @@ static void test_biquad_detune() {
         // Automated detune reaches it too.
         f.frequency.value = 500;
         out = ctx.renderBlock(4096);
-        near(peak(out, 2048, 4096), low, low * 0.1 + 1e-6, "closed again");
+        near(peak(out, 2048, 4096), low, 0.01, "closed again");
         f.detune.setValueAtTime(2400, ctx.currentTime + 2048 / sr);
         out = ctx.renderBlock(4096);
         expect(peak(out, 256, 1792) < open * 0.5, "closed before the scheduled detune");

@@ -18,10 +18,6 @@
 #include <brass/codegen/kernel_jit.hpp>
 #endif
 
-#if defined(_M_X64) || defined(__x86_64__)
-#include <immintrin.h>
-#endif
-
 namespace broaudio {
 
 namespace {
@@ -33,20 +29,6 @@ inline void delayWindow(const PropagationDelayBuffer& buf, float maxDelay, float
 }
 
 inline int channelsOf(const VoiceChainParams& p) { return p.channels == 2 ? 2 : 1; }
-
-// brass returns from a kernel that used 256-bit registers without a
-// vzeroupper, and the chain kernels and the rest of the mixer are legacy-SSE
-// code: with the upper halves dirty every one of their instructions pays a
-// merge dependency (measured: the chain kernels ran 2.5x slower after the air
-// kernel). The air kernel ran AVX instructions, so AVX is there.
-#if defined(_M_X64) || defined(__x86_64__)
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((target("avx")))
-#endif
-inline void clearUpperVectorState() { _mm256_zeroupper(); }
-#else
-inline void clearUpperVectorState() {}
-#endif
 
 } // namespace
 
@@ -121,7 +103,6 @@ void runAirLanesJit(AirJitFn fn, const VoiceJitJob* jobs, int count, float* x, i
         for (int i = 0; i < n; ++i) x[i * kAirLanes + l] = src[i];
     }
     fn(x, &sec[0].p[0], n);
-    clearUpperVectorState();
     for (int l = 0; l < used; ++l) {
         float* dst = lanes[l].ch;
         for (int i = 0; i < n; ++i) dst[i] = x[i * kAirLanes + l];

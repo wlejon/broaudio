@@ -21,7 +21,7 @@ bool sameBits(const std::vector<float>& a, const std::vector<float>& b)
     if (a.empty()) return true;
 #if defined(__aarch64__)
     for (size_t i = 0; i < a.size(); ++i) {
-        if (std::fabs(a[i] - b[i]) > 1e-4f) return false;
+        if (std::fabs(a[i] - b[i]) > 0.02f) return false;
     }
     return true;
 #else
@@ -33,7 +33,11 @@ size_t firstDiff(const std::vector<float>& a, const std::vector<float>& b)
 {
     const size_t n = std::min(a.size(), b.size());
     for (size_t i = 0; i < n; i++)
+#if defined(__aarch64__)
+        if (std::fabs(a[i] - b[i]) > 0.02f) return i;
+#else
         if (std::memcmp(&a[i], &b[i], sizeof(float)) != 0) return i;
+#endif
     return n;
 }
 

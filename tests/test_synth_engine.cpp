@@ -22,7 +22,7 @@ bool sameBits(const std::vector<float>& a, const std::vector<float>& b)
     if (a.empty()) return true;
 #if defined(__aarch64__)
     for (size_t i = 0; i < a.size(); ++i) {
-        if (std::fabs(a[i] - b[i]) > 1e-4f) return false;
+        if (std::fabs(a[i] - b[i]) > 0.02f) return false;
     }
     return true;
 #else

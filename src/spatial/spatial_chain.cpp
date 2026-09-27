@@ -1,11 +1,22 @@
 #include "broaudio/spatial/spatial_chain.h"
 #include "broaudio/synth/oscillator.h"
+#include "broaudio/synth/synth_graph.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 
 namespace broaudio {
+
+bool chainSource(const VoiceChainParams& p, float* ch0, int n, bool compiled)
+{
+    const int from = std::clamp(p.sourceFrom, 0, n);
+    const int to = std::clamp(p.sourceTo, from, n);
+    if (from > 0) std::memset(ch0, 0, sizeof(float) * static_cast<size_t>(from));
+    if (to < n) std::memset(ch0 + to, 0, sizeof(float) * static_cast<size_t>(n - to));
+    if (!p.source || to == from) return true;
+    return p.source->render(ch0 + from, to - from, compiled);
+}
 
 void chainAir(VoiceChainState& s, const float* poleTarget, const float* mixTarget,
               float* const* ch, int nch, int n)
@@ -163,6 +174,8 @@ void runVoiceChain(const VoiceChainParams& p, VoiceChainState& s,
 {
     if (n <= 0) return;
     const int nch = p.channels == 2 ? 2 : 1;
+    if (p.stages & kStageSource)
+        chainSource(p, ch[0], n, false);
     if (p.stages & kStageAir)
         chainAir(s, p.airPole, p.airMix, ch, nch, n);
     if ((p.stages & kStageDelay) && p.delayBuf)

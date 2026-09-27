@@ -6,6 +6,7 @@
 #include "broaudio/spatial/voice_jit.h"
 #include "broaudio/synth/oscillator.h"
 #include "voice_jit_builder.h"
+#include "../synth/synth_plan.h"
 
 #include <algorithm>
 #include <bit>
@@ -56,7 +57,6 @@ int voiceJitAirLanes(const VoiceChainParams& p)
 
 int voiceJitShape(const VoiceChainParams& p, const VoiceChainState& s)
 {
-    if (p.stages & kStageSource) return -1;
     VoiceJitTopology t;
     t.stereo = p.channels == 2;
     if ((p.stages & kStageDelay) && p.delayBuf) {
@@ -242,6 +242,12 @@ int runVoiceBatch(VoiceJitCache& cache, const VoiceJitJob* jobs, int count,
 {
     if (n <= 0 || count <= 0) return 0;
     count = std::min(count, kAirLanes);
+    // Synthesis sources first: every later stage reads their block.
+    bool sourceCompiled[kAirLanes];
+    for (int j = 0; j < count; ++j) {
+        const VoiceChainParams& p = *jobs[j].p;
+        sourceCompiled[j] = !(p.stages & kStageSource) || chainSource(p, jobs[j].ch[0], n, true);
+    }
     int shapes[kAirLanes];
     VoiceJitJob airJobs[kAirLanes];
     bool inLanes[kAirLanes] = {};
@@ -268,7 +274,9 @@ int runVoiceBatch(VoiceJitCache& cache, const VoiceJitJob* jobs, int count,
         VoiceChainState& s = *jobs[j].s;
         float* ch[2] = {jobs[j].ch[0], jobs[j].ch[1] ? jobs[j].ch[1] : jobs[j].ch[0]};
         if (shapes[j] < 0) {
-            runVoiceChain(p, s, ch, L, R, n);
+            VoiceChainParams rest = p;
+            rest.stages &= ~static_cast<uint32_t>(kStageSource);
+            runVoiceChain(rest, s, ch, L, R, n);
             continue;
         }
         const bool hasAir = (p.stages & kStageAir) != 0;
@@ -276,10 +284,10 @@ int runVoiceBatch(VoiceJitCache& cache, const VoiceJitJob* jobs, int count,
         if (hasAir && !airCompiled) chainAir(s, p.airPole, p.airMix, ch, channelsOf(p), n);
         if (VoiceJitFn fn = cache.lookup(static_cast<uint32_t>(shapes[j]))) {
             runVoiceChainJit(fn, p, s, ch, scratch.traj, n);
-            if (!hasAir || airCompiled) ++compiled;
+            if ((!hasAir || airCompiled) && sourceCompiled[j]) ++compiled;
         } else {
             VoiceChainParams rest = p;
-            rest.stages &= ~static_cast<uint32_t>(kStageAir);
+            rest.stages &= ~static_cast<uint32_t>(kStageAir | kStageSource);
             runVoiceChain(rest, s, ch, L, R, n);
         }
     }
@@ -405,6 +413,11 @@ void VoiceJitCache::workerLoop()
                 lock.lock();
             }
         }
+        // Synthesis layer kernels (process-wide, requested by any engine's
+        // audio thread or by a graph as it is played).
+        lock.unlock();
+        compilePendingSynthKernels();
+        lock.lock();
     }
 }
 

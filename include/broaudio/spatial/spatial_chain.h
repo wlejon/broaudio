@@ -22,11 +22,16 @@ namespace broaudio {
 // runVoiceChain bit for bit. A change to any stage below must be mirrored in
 // src/spatial/voice_jit_builder.cpp.
 //
-// The source stage slot is reserved: today the mixer's clip and stream readers
-// fill the input buffers before the chain runs; a generator or per-voice
-// source DSP would become the stage at the head.
+// The source stage: a playback driven by a synthesis graph (synth/
+// synth_graph.h) renders its voice into ch[0] at the head of the chain (mono).
+// Clip and stream playbacks have no source stage; the mixer's readers fill
+// the input buffers before the chain runs. The synthesis layers have their
+// own compiled kernels (one per layer shape), so the chain kernel of a shape
+// with a source is the one of the same shape without it.
+class SynthVoice;
+
 enum SpatialStage : uint32_t {
-    kStageSource = 1u << 0,   // reserved, see above
+    kStageSource = 1u << 0,   // synthesis voice, see above
     kStageAir    = 1u << 1,   // ISO 9613-1 air absorption (AirFilterTable)
     kStageDelay  = 1u << 2,   // propagation delay line (Doppler falls out of it)
     kStageHead   = 1u << 3,   // head shadow ILD + lowpass, and occlusion
@@ -49,6 +54,12 @@ struct PropagationDelayBuffer {
 struct VoiceChainParams {
     uint32_t stages = 0;
     int channels = 1;                   // source channels, 1 or 2
+
+    // Source: the voice renders block frames [sourceFrom, sourceTo) (a
+    // scheduled start or stop inside the block); the rest is silence.
+    SynthVoice* source = nullptr;
+    int sourceFrom = 0;
+    int sourceTo = 0;
 
     // Air: section pole and mix targets (AirFilterTable::lookup).
     float airPole[kAirSections] = {};
@@ -99,6 +110,10 @@ struct VoiceChainState {
 };
 
 // --- Stages. `ch` are the planar source channels (1 or 2), processed in place.
+
+// The source stage into ch0 (n frames). `compiled`: the voice's layers run
+// their kernels where published. Returns whether every layer ran compiled.
+bool chainSource(const VoiceChainParams& p, float* ch0, int n, bool compiled);
 
 // Poles and mixes move linearly from the previous block's values to these.
 void chainAir(VoiceChainState& s, const float* poleTarget, const float* mixTarget,

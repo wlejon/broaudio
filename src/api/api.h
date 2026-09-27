@@ -23,6 +23,13 @@ void installMic();
 /// a worker realm. File paths resolve through setPathResolver below.
 void installEar();
 
+/// Mount the global `SynthGraph` class (synthesis graphs: construct from a
+/// plain-object description, render offline to an AudioBuffer). installAudio
+/// calls it; it needs no engine, so a worker realm may call it alone.
+/// AudioContext's createSynthGraph / playSynth / releaseSynth come with
+/// installAudio.
+void installSynthGraph();
+
 /// Drain pending microphone audio chunks into JS onChunk callback, and settle
 /// the background work the AudioContext started (tickAsyncJobs below).
 /// Safe and recommended to invoke once per frame / tick from the main JS thread.

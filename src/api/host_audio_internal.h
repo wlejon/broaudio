@@ -875,6 +875,10 @@ Value makeAnalyserNodeValue();
 void decorateAudioBufferProto(ObjectBuilder& b);
 void decorateAudioBufferSourceNodeProto(ObjectBuilder& b);
 Value makeAudioBufferValue(int channels, int length, int sampleRate);
+// The global AudioBuffer class on the calling thread, once. installAudio
+// mounts it with the rest of Web Audio; installSynthGraph mounts it alone so
+// render() works in a worker realm, which has no AudioContext.
+void installAudioBufferClass();
 Value makeAudioBufferSourceNodeValue();
 
 // Context creators & decorators (host_audio_context.cpp)

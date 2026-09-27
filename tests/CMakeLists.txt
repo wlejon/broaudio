@@ -51,6 +51,9 @@ set(BROAUDIO_TESTS
     test_spatial_chain_cost
     test_voice_jit
     test_voice_jit_cost
+    test_synth_graph
+    test_synth_engine
+    test_synth_graph_cost
 )
 
 foreach(test ${BROAUDIO_TESTS})
@@ -193,8 +196,24 @@ if(TARGET broaudio_api)
         )
     endif()
 
+    # Synthesis graphs: SynthGraph construction and validation errors,
+    # render() determinism, bro.ear on a render, playSynth / releaseSynth.
+    add_executable(broaudio_test_api_synth test_audio_api_synth.cpp)
+    target_link_libraries(broaudio_test_api_synth PRIVATE broaudio_api bronze_runtime_shared)
+    if(WIN32)
+        add_custom_command(TARGET broaudio_test_api_synth POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:bronze_runtime_shared>
+                $<TARGET_FILE_DIR:broaudio_test_api_synth>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_LINKER_FILE:bronze_runtime_shared>
+                $<TARGET_FILE_DIR:broaudio_test_api_synth>
+        )
+    endif()
+
     if(BRASS_HOST_BACKEND)
-        foreach(plain_test broaudio_test_api_gc broaudio_test_api_live broaudio_test_api_contract)
+        foreach(plain_test broaudio_test_api_gc broaudio_test_api_live broaudio_test_api_contract
+                           broaudio_test_api_synth)
             add_test(NAME ${plain_test} COMMAND ${plain_test})
             if(WIN32)
                 set_tests_properties(${plain_test} PROPERTIES
@@ -208,7 +227,8 @@ if(TARGET broaudio_api)
         # here instead of passing by luck.
         foreach(api_test broaudio_test_api broaudio_test_api_drift
                          broaudio_test_destination broaudio_test_api_gc
-                         broaudio_test_api_live broaudio_test_api_contract)
+                         broaudio_test_api_live broaudio_test_api_contract
+                         broaudio_test_api_synth)
             add_test(NAME ${api_test}_gcstress COMMAND ${api_test})
             if(WIN32)
                 set_tests_properties(${api_test}_gcstress PROPERTIES

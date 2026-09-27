@@ -40,6 +40,7 @@ void shutdownAudio() {
 
 void installAudio() {
     installAudioGlobals();
+    installSynthGraph();
 }
 
 } // namespace broaudio::api

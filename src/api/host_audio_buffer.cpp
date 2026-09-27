@@ -257,6 +257,32 @@ Value makeAudioBufferValue(int channels, int length, int sampleRate) {
     return g_audioBufferClass.make(h, hostAudioBufferDtor, ev::Finalize::Deferred);
 }
 
+void installAudioBufferClass() {
+    if (g_audioBufferClass.installed()) return;
+    g_audioBufferClass.install(
+        "AudioBuffer", 1,
+        [](Value, std::span<const Value> a) -> Value {
+            // The rate defaults to a running engine's, but a buffer never
+            // starts one: the engine is process-global and this constructor
+            // also runs in worker realms.
+            auto* eng = existingAudioEngine();
+            int length = 0, channels = 1, sampleRate = eng ? eng->sampleRate() : 44100;
+            if (!a.empty() && ev::isObject(a[0])) {
+                // Read the options off a[0] (rooted) each time: a getProperty
+                // may move the object.
+                Value lenV = ev::getProperty(a[0], "length");
+                if (!ev::isUndefined(lenV) && !ev::isObject(lenV)) length = saturateI32(ev::toDouble(lenV));
+                Value chV = ev::getProperty(a[0], "numberOfChannels");
+                if (!ev::isUndefined(chV) && !ev::isObject(chV)) channels = saturateI32(ev::toDouble(chV));
+                Value srV = ev::getProperty(a[0], "sampleRate");
+                if (!ev::isUndefined(srV) && !ev::isObject(srV)) sampleRate = saturateI32(ev::toDouble(srV));
+            }
+            if (length <= 0) return ev::throwTypeError("AudioBuffer: length must be positive");
+            return makeAudioBufferValue(channels, length, sampleRate);
+        },
+        decorateAudioBufferProto);
+}
+
 void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
     b.accessor("buffer",
                [](Value self_, std::span<const Value>) {

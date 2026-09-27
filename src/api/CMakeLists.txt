@@ -20,6 +20,7 @@ set(BROAUDIO_API_SOURCES
     host_audio_presets.cpp
     host_audio_io.cpp
     host_audio_ear.cpp
+    host_audio_synth_graph.cpp
     native_mic.cpp
 )
 

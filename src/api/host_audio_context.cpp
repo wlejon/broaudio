@@ -1,4 +1,5 @@
 #include "host_audio_internal.h"
+#include "host_audio_synth_graph.h"
 #include <broaudio/dsp/resampler.h>
 #include <broaudio/io/audio_file.h>
 
@@ -712,6 +713,7 @@ void decorateAudioContextProto(ObjectBuilder& b) {
     registerAudioContextBusFx(b);
     registerAudioContextSynthExt(b);
     registerAudioContextPresets(b);
+    registerAudioContextSynthGraph(b);
 }
 
 void installAudioGlobals() {
@@ -744,25 +746,7 @@ void installAudioGlobals() {
     g_oscillatorNodeClass.inherit(g_audioNodeClass);
 
     // 5. AudioBuffer
-    g_audioBufferClass.install(
-        "AudioBuffer", 1,
-        [](Value, std::span<const Value> a) -> Value {
-            auto* eng = getAudioEngine();
-            int length = 0, channels = 1, sampleRate = eng ? eng->sampleRate() : 44100;
-            if (!a.empty() && ev::isObject(a[0])) {
-                // Read the options off a[0] (rooted) each time: a getProperty
-                // may move the object.
-                Value lenV = ev::getProperty(a[0], "length");
-                if (!ev::isUndefined(lenV) && !ev::isObject(lenV)) length = saturateI32(ev::toDouble(lenV));
-                Value chV = ev::getProperty(a[0], "numberOfChannels");
-                if (!ev::isUndefined(chV) && !ev::isObject(chV)) channels = saturateI32(ev::toDouble(chV));
-                Value srV = ev::getProperty(a[0], "sampleRate");
-                if (!ev::isUndefined(srV) && !ev::isObject(srV)) sampleRate = saturateI32(ev::toDouble(srV));
-            }
-            if (length <= 0) return ev::throwTypeError("AudioBuffer: length must be positive");
-            return makeAudioBufferValue(channels, length, sampleRate);
-        },
-        decorateAudioBufferProto);
+    installAudioBufferClass();
 
     // 6. AudioBufferSourceNode
     g_audioBufferSourceNodeClass.install("AudioBufferSourceNode", 0,

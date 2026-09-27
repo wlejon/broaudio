@@ -40,10 +40,10 @@ namespace broaudio {
 //
 //   [source] -> air -> delay -> gain/pan -> head+occlusion -> bus / send taps
 //
-// Gain/pan and the bus tap always exist. The source slot is reserved for
-// runtime synthesis at the head of the chain; no kernel has one yet. Air runs
-// in the lane kernel, so the chain kernel of a shape is the one of the same
-// shape without air (chainKey()).
+// Gain/pan and the bus tap always exist. The source stage is a synthesis
+// voice (synth/synth_graph.h) whose layers run their own kernels, one per
+// layer shape; air runs in the lane kernel. So the chain kernel of a shape is
+// the one of the same shape without source and air (chainKey()).
 struct VoiceJitTopology {
     enum class Delay : uint8_t {
         None,
@@ -56,7 +56,7 @@ struct VoiceJitTopology {
         Interpolated,
     };
 
-    bool source = false;    // reserved
+    bool source = false;    // synthesis source stage
     bool stereo = false;    // two source channels (balance pan), else mono
     bool air = false;
     Delay delay = Delay::None;
@@ -78,7 +78,7 @@ struct VoiceJitTopology {
         return k;
     }
     // The key of the chain kernel that runs this shape.
-    uint32_t chainKey() const noexcept { return key() & ~(1u << 1); }
+    uint32_t chainKey() const noexcept { return key() & ~3u; }
 
     static VoiceJitTopology fromKey(uint32_t k) noexcept {
         VoiceJitTopology t;
@@ -162,9 +162,9 @@ constexpr int kVoiceBatchPlanes = 2 * kAirLanes + kAirLanes + 4;
 // hold at most kAirLanes channels between them.
 int voiceJitAirLanes(const VoiceChainParams& p);
 
-// The chain-kernel key this block runs as (air excluded, it runs in the lane
-// kernel), or -1 when it has to run interpreted (a reserved source stage, a
-// stereo source on a mono delay line).
+// The chain-kernel key this block runs as (the source stage and air excluded:
+// they run before it, in their own kernels), or -1 when it has to run
+// interpreted (a stereo source on a mono delay line).
 int voiceJitShape(const VoiceChainParams& p, const VoiceChainState& s);
 
 // The air stage of up to kAirLanes channels' worth of jobs (jobs without air
@@ -182,8 +182,9 @@ class VoiceJitCache;
 
 // A batch of voices in order, each exactly as runVoiceChain would run it
 // (so buses accumulate in the same order): compiled kernels where published,
-// interpreted stages where not (requesting the missing kernels). Returns the
-// number of jobs that ran fully compiled.
+// interpreted stages where not (requesting the missing kernels). Synthesis
+// sources render first, through their layer kernels. Returns the number of
+// jobs that ran fully compiled.
 int runVoiceBatch(VoiceJitCache& cache, const VoiceJitJob* jobs, int count,
                   const VoiceJitScratch& scratch, int n);
 

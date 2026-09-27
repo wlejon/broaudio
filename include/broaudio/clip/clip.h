@@ -5,6 +5,7 @@
 #include "broaudio/spatial/spatial_chain.h"
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace broaudio {
@@ -139,6 +140,10 @@ struct ClipPlayback {
     // until the propagation delay has drained (audio thread only).
     bool sourceEnded = false;
     int tailRemaining = 0;
+
+    // A synthesis playback (Engine::playSynth): the voice is the source
+    // stage, and there is no clip (clipId 0). Set before publication.
+    std::shared_ptr<SynthVoice> synth;
 
     ClipPlayback() = default;
     ClipPlayback(const ClipPlayback&) = delete;

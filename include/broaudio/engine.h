@@ -13,6 +13,7 @@
 #include "broaudio/synth/modulation.h"
 #include "broaudio/synth/voice.h"
 #include "broaudio/synth/wavetable.h"
+#include "broaudio/synth/synth_graph.h"
 #include "broaudio/clip/clip.h"
 #include "broaudio/mic_tap.h"
 #include "broaudio/spatial/listener.h"
@@ -447,6 +448,26 @@ public:
         double durationFrames = -1.0; // content to play before ending; < 0 = no limit
     };
     int playClip(int clipId, const ClipPlayOptions& opts);
+
+    // A playback whose source is a synthesis graph (synth/synth_graph.h)
+    // instead of a clip: mono, one trigger (seed, overrides) per call, and
+    // every setPlayback* control applies as for a clip (gain, pan, bus,
+    // send, spatial, stop). Doppler comes only from propagation delay; rate,
+    // region, loop and seek do not apply. The voice is built (its memory
+    // allocated) here; it finishes by itself (synth/synth_graph.h). Returns
+    // the playback id, or -1 without a graph.
+    struct SynthPlayOptions {
+        SynthTrigger trigger;
+        float gain = 1.0f;
+        double when = 0.0;            // engine seconds; <= now plays immediately
+        float pan = 0.0f;
+        int busId = 0;
+        bool spatial = false;         // set before the first block: spatialized at `position`
+        float position[3] = {0.0f, 0.0f, 0.0f};
+    };
+    int playSynth(std::shared_ptr<const SynthGraph> graph, const SynthPlayOptions& opts);
+    // Note-off: the voice's holding envelopes move on to their release.
+    void releaseSynth(int instanceId);
 
     // Move a playback's loop window while it plays (Web Audio lets loopStart /
     // loopEnd change mid-playback). Frames relative to the region start; an

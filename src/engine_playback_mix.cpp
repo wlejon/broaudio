@@ -71,7 +71,7 @@ void Engine::mixPlaybacks(int numFrames, const BusList& buses)
     struct Pending {
         ClipPlayback* pb;
         VoiceChainParams P;
-        bool ended, delayOn, wasPrimed;
+        bool ended, synthStop, delayOn, wasPrimed;
         float delayBefore;
     };
     Pending pending[kAirLanes];
@@ -90,6 +90,8 @@ void Engine::mixPlaybacks(int numFrames, const BusList& buses)
         for (int j = 0; j < count; ++j) {
             Pending& q = pending[j];
             ClipPlayback& pb = *q.pb;
+            // A synthesis voice ends by itself (known once it has rendered).
+            if (pb.synth && !pb.sourceEnded && (q.synthStop || pb.synth->finished())) q.ended = true;
             if (q.delayOn) {
                 // The delay line's effective pitch ratio over the block.
                 const float dd = q.wasPrimed ? pb.chain.delayOut - q.delayBefore : 0.0f;
@@ -119,10 +121,12 @@ void Engine::mixPlaybacks(int numFrames, const BusList& buses)
         if (!pb.playing.load(std::memory_order_relaxed)) continue;
 
         AudioClip* clip = nullptr;
-        for (auto& cl : *currentClips) {
-            if (cl->id == pb.clipId) { clip = cl.get(); break; }
+        if (!pb.synth) {
+            for (auto& cl : *currentClips) {
+                if (cl->id == pb.clipId) { clip = cl.get(); break; }
+            }
+            if (!clip) continue;
         }
-        if (!clip) continue;
 
         const int targetBusId = pb.busId.load(std::memory_order_relaxed);
         float* targetBuf = nullptr;
@@ -133,7 +137,7 @@ void Engine::mixPlaybacks(int numFrames, const BusList& buses)
         if (!targetBuf) continue;
 
         VoiceChainParams P;
-        P.channels = clip->channels == 2 ? 2 : 1;
+        P.channels = clip && clip->channels == 2 ? 2 : 1;
         P.bus = targetBuf;
         float rate = pb.rate.load(std::memory_order_relaxed);
         P.pan = pb.pan.load(std::memory_order_relaxed);
@@ -194,10 +198,37 @@ void Engine::mixPlaybacks(int numFrames, const BusList& buses)
         float* srcR = srcL + stride;
 
         // --- Source stage ---
-        bool ended = false;
+        bool ended = false, synthStop = false;
         if (pb.sourceEnded) {
             std::memset(srcL, 0, static_cast<size_t>(numFrames) * sizeof(float));
             std::memset(srcR, 0, static_cast<size_t>(numFrames) * sizeof(float));
+        } else if (pb.synth) {
+            // The synthesis voice is the chain's source stage, rendered when
+            // the batch runs; here only its window in the block, from a
+            // scheduled start and stop on the audio clock (as sourceClip).
+            const uint64_t blockEndS = blockStart + static_cast<uint64_t>(numFrames);
+            const uint64_t stopS = pb.stopSample.load(std::memory_order_relaxed);
+            const uint64_t startS = pb.startSample.load(std::memory_order_relaxed);
+            int from = 0, to = numFrames;
+            if (stopS < blockEndS && stopS <= std::max(blockStart, startS)) {
+                ended = true;
+                to = 0;
+            } else {
+                if (startS > blockStart)
+                    from = static_cast<int>(std::min<uint64_t>(startS - blockStart, static_cast<uint64_t>(numFrames)));
+                if (stopS < blockEndS) {
+                    to = static_cast<int>(stopS - blockStart);
+                    synthStop = true;
+                }
+            }
+            if (from < to) {
+                P.stages |= kStageSource;
+                P.source = pb.synth.get();
+                P.sourceFrom = from;
+                P.sourceTo = to;
+            } else {
+                std::memset(srcL, 0, static_cast<size_t>(numFrames) * sizeof(float));
+            }
         } else if (clip->streaming) {
             sourceStream(&pb, clip, rate, numFrames, srcL, srcR);
         } else {
@@ -209,6 +240,7 @@ void Engine::mixPlaybacks(int numFrames, const BusList& buses)
         q.pb = &pb;
         q.P = P;
         q.ended = ended;
+        q.synthStop = synthStop;
         q.delayOn = (P.stages & kStageDelay) != 0;
         q.wasPrimed = pb.chain.delayPrimed && pb.chain.delayBufSeen == P.delayBuf;
         q.delayBefore = pb.chain.delayOut;

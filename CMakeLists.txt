@@ -145,6 +145,10 @@ add_library(broaudio STATIC
     src/synth/voice.cpp
     src/synth/wavetable.cpp
     src/synth/voice_allocator.cpp
+    src/synth/synth_parse.cpp
+    src/synth/synth_voice.cpp
+    src/synth/synth_interp.cpp
+    src/synth/synth_jit.cpp
     src/clip/clip.cpp
     src/clip/file_stream.cpp
     src/sequencer/automation.cpp
@@ -162,6 +166,7 @@ add_library(broaudio STATIC
     src/engine_bus_fx.cpp
     src/engine_distance.cpp
     src/engine_playback_mix.cpp
+    src/engine_synth.cpp
     src/log.cpp
     src/mic_tap.cpp
     src/rcu.cpp

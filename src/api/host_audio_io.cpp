@@ -14,6 +14,7 @@
 // Persistent promise, and the two meet only through an atomic flag.
 
 #include "host_audio_internal.h"
+#include "host_audio_ear.h"
 
 #include <atomic>
 #include <filesystem>
@@ -130,6 +131,8 @@ void tickAsyncJobs() {
     // Scheduled param automation reaches playing sources, and finished
     // buffer sources get their `onended` (host_audio_live.cpp).
     tickLiveParams();
+    // bro.ear.fit's async jobs: scoring requests, progress, completion.
+    tickEarFitJobs();
     auto& v = jobs();
     if (v.empty()) return;
     // Take the finished jobs out first: settling allocates and may run user
@@ -147,6 +150,7 @@ void tickAsyncJobs() {
 }
 
 void shutdownAsyncJobs() {
+    shutdownEarFitJobs();
     auto& v = jobs();
     std::vector<std::unique_ptr<ClipLoadJob>> all;
     all.swap(v);

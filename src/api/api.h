@@ -16,7 +16,8 @@ void installAudio();
 void installMic();
 
 /// Mount `bro.ear` (measure / compare / spectrogram: offline analysis of a
-/// finished clip, include/broaudio/ear/ear.h) into the current Bronze realm.
+/// finished clip, include/broaudio/ear/ear.h; fit: a SynthGraph parameter
+/// search against them, ear/fit.h) into the current Bronze realm.
 /// Creates `bro` and `bro.ear` when absent and otherwise adds to them, so
 /// another library's members of `bro.ear` (brosoundml's `loadClap`) survive
 /// in either install order. Needs no audio engine: pure computation, safe in
@@ -35,9 +36,10 @@ void installSynthGraph();
 /// Safe and recommended to invoke once per frame / tick from the main JS thread.
 void drainMicChunks();
 
-/// Settle background work the JS API started on worker threads — today
+/// Settle background work the JS API started on worker threads —
 /// `createClipFromFileAsync`, which decodes and resamples off the JS thread
-/// and resolves its promise here. Also the control-rate tick of AudioParam
+/// and resolves its promise here, and the async `bro.ear.fit`, whose scorer
+/// calls, onProgress and onDone run here. Also the control-rate tick of AudioParam
 /// automation: scheduled ramps and curves are evaluated here and written to
 /// the sources already playing, and a finished AudioBufferSourceNode's
 /// `onended` handler runs here. Joins the finished jobs and resolves or

@@ -44,6 +44,7 @@ set(BROAUDIO_TESTS
     test_loopback_capture
     test_midi_input
     test_ear
+    test_ear_fit
     test_air_absorption
     test_propagation_delay
     test_param_ramps
@@ -211,9 +212,24 @@ if(TARGET broaudio_api)
         )
     endif()
 
+    # bro.ear.fit: parameter recovery, measurement targets, determinism, a
+    # JS scorer and a CLAP-shaped model, onProgress, the async form.
+    add_executable(broaudio_test_api_ear_fit test_audio_api_ear_fit.cpp)
+    target_link_libraries(broaudio_test_api_ear_fit PRIVATE broaudio_api bronze_runtime_shared)
+    if(WIN32)
+        add_custom_command(TARGET broaudio_test_api_ear_fit POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:bronze_runtime_shared>
+                $<TARGET_FILE_DIR:broaudio_test_api_ear_fit>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_LINKER_FILE:bronze_runtime_shared>
+                $<TARGET_FILE_DIR:broaudio_test_api_ear_fit>
+        )
+    endif()
+
     if(BRASS_HOST_BACKEND)
         foreach(plain_test broaudio_test_api_gc broaudio_test_api_live broaudio_test_api_contract
-                           broaudio_test_api_synth)
+                           broaudio_test_api_synth broaudio_test_api_ear_fit)
             add_test(NAME ${plain_test} COMMAND ${plain_test})
             if(WIN32)
                 set_tests_properties(${plain_test} PROPERTIES
@@ -228,7 +244,7 @@ if(TARGET broaudio_api)
         foreach(api_test broaudio_test_api broaudio_test_api_drift
                          broaudio_test_destination broaudio_test_api_gc
                          broaudio_test_api_live broaudio_test_api_contract
-                         broaudio_test_api_synth)
+                         broaudio_test_api_synth broaudio_test_api_ear_fit)
             add_test(NAME ${api_test}_gcstress COMMAND ${api_test})
             if(WIN32)
                 set_tests_properties(${api_test}_gcstress PROPERTIES

@@ -180,6 +180,9 @@ add_library(broaudio STATIC
     src/ear/ear_spectrogram.cpp
     src/ear/ear_font.cpp
     src/ear/ear_png.cpp
+    src/ear/ear_cmaes.cpp
+    src/ear/ear_fit.cpp
+    src/ear/ear_fit_objective.cpp
 )
 
 # Loopback / process-audio capture: Windows uses WASAPI, macOS uses CoreAudio

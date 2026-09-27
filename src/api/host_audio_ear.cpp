@@ -1,6 +1,7 @@
 // `bro.ear`: offline analysis of a finished clip (include/broaudio/ear/ear.h)
 // for scripts that judge a sound from numbers and pictures: measure(),
-// compare() and spectrogram().
+// compare() and spectrogram(); fit() (host_audio_ear_fit.cpp) searches a
+// SynthGraph's parameters against them.
 //
 // A clip argument is any of
 //   - a path string, decoded with loadAudioFile and resolved like every
@@ -17,6 +18,7 @@
 // an existing `bro.ear` instead of replacing it.
 
 #include "host_audio_internal.h"
+#include "host_audio_ear.h"
 
 #include <broaudio/ear/ear.h>
 
@@ -240,7 +242,12 @@ Value compareFn(Value, std::span<const Value> a) {
             if (numberProp(w.get(), "tonality", d)) o.tonalityWeight = d;
         }
     }
-    const ear::Comparison r = ear::compare(c.clip, ref.clip, o);
+    return earComparisonValue(ear::compare(c.clip, ref.clip, o));
+}
+
+} // namespace
+
+Value earComparisonValue(const ear::Comparison& r) {
     ObjectBuilder out;
     setNum(out, "score", r.score);
     setNum(out, "envelope", r.envelope);
@@ -259,6 +266,28 @@ Value compareFn(Value, std::span<const Value> a) {
     out.set("durationDiff", r.durationDiff);
     return out.get();
 }
+
+Value earClipValue(const ear::Clip& c) {
+    ev::Persistent data(ev::createTypedArray(ev::elements::Float32, static_cast<uint32_t>(c.samples.size())));
+    if (!c.samples.empty()) {
+        ev::fillTypedArray(data.get(), std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(c.samples.data()),
+                                                                c.samples.size() * sizeof(float)));
+    }
+    ObjectBuilder o;
+    o.set("samples", data.get());
+    o.set("sampleRate", static_cast<double>(c.sampleRate));
+    o.set("channels", 1.0);
+    return o.get();
+}
+
+bool readEarClip(Value v, double fallbackRate, const char* who, ear::Clip& out) {
+    ClipArg c;
+    if (!readClip(v, fallbackRate, who, c)) return false;
+    out = std::move(c.clip);
+    return true;
+}
+
+namespace {
 
 // A single clip, or an array-like of clips?
 bool isClipList(Value v) {
@@ -404,6 +433,7 @@ void installEar() {
     earObj.def("measure", 2, measureFn);
     earObj.def("compare", 3, compareFn);
     earObj.def("spectrogram", 2, spectrogramFn);
+    registerEarFit(earObj);
     broObj.set("ear", earObj.get());
     ev::setGlobalValue("bro", broObj.get());
 }

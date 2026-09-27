@@ -302,6 +302,12 @@ Value playSynthFn(Value, std::span<const Value> a) {
 
 } // namespace
 
+std::shared_ptr<const SynthGraph> synthGraphFromValue(Value v) {
+    ev::Persistent root(v);
+    HostSynthGraph* host = nullptr;
+    return graphArg(root.get(), &host);
+}
+
 void installSynthGraphClass() {
     g_synthGraphClass.install(
         "SynthGraph", 1,

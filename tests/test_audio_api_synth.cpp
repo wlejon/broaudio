@@ -225,6 +225,60 @@ static void test_play() {
     )JS"));
 }
 
+static void test_loops_and_impulses() {
+    runScript("loops, impulses and short-clip loudness", withPrelude(R"JS(
+        const rattle = new SynthGraph({ nodes: {
+            r: { type: "impulses", shape: "decay", rate: 14, jitter: 0.5, length: 0.004, ampJitter: 0.4 },
+            res: { type: "resonator", input: "r", freq: 1400, modes: [{ ratio: 1, decay: 0.06, gain: 0.3 }] }
+        }, output: "res" });
+        for (const n of ["r.rate", "r.jitter", "r.length", "r.ampJitter"])
+            expect(rattle.paramNames.indexOf(n) >= 0, "impulses parameter " + n);
+        throws(() => new SynthGraph({ nodes: { r: { type: "impulses", shape: "square" } }, output: "r" }),
+               TypeError, "nodes.r.shape", "bad shape");
+
+        const loop = { length: 0.25, crossfade: 0.03, start: 0.1 };
+        const a = rattle.render({ seed: 4, loop });
+        expect(a.length === Math.round(ctx.sampleRate * 0.25), "one period: " + a.length);
+        expect(same(a.getChannelData(0), rattle.render({ seed: 4, loop, compiled: false }).getChannelData(0)),
+               "compiled loop == interpreted loop");
+        expect(!same(a.getChannelData(0), rattle.render({ seed: 5, loop }).getChannelData(0)), "seeded");
+        const lin = rattle.render({ seed: 4, loop: { length: 0.25, curve: "linear", snap: false } });
+        expect(lin.length === a.length && !same(a.getChannelData(0), lin.getChannelData(0)), "loop options apply");
+
+        throws(() => rattle.render({ loop: 1 }), TypeError, "loop must be an object", "loop type");
+        throws(() => rattle.render({ loop: {} }), TypeError, "loop.length: required", "loop length");
+        throws(() => rattle.render({ loop: { length: 120 } }), RangeError, "loop.length", "loop too long");
+        throws(() => rattle.render({ loop: { length: 1, curve: "cubic" } }), TypeError, "loop.curve", "loop curve");
+        throws(() => rattle.render({ loop: { length: 1, fade: 1 } }), TypeError, "unknown option 'fade'", "loop key");
+        throws(() => ctx.playSynth(rattle, { loop: { length: -1 } }), RangeError, "loop.length", "play loop");
+
+        // A looping playback keeps going until released.
+        ctx.renderBlock(1024);
+        const id = ctx.playSynth(pad, { loop: { length: 0.2 } });
+        let out;
+        for (let k = 0; k < 40; k++) out = ctx.renderBlock(4096);   // > 3 s: far past the loop
+        expect(peak(out, 0, 4096) > 1e-3, "still looping: " + peak(out, 0, 4096));
+        ctx.releaseSynth(id);
+        for (let k = 0; k < 6; k++) out = ctx.renderBlock(4096);
+        expect(peak(out, 0, 4096) < 1e-5, "released and gone");
+
+        if (typeof bro !== "undefined" && bro.ear) {
+            const click = new SynthGraph({ nodes: {
+                n: { type: "noise", gain: "e" },
+                e: { type: "env", attack: 0.001, decay: 0.02, sustain: 0, release: 0.005 } }, output: "n" });
+            const c = click.render({ seed: 1 });
+            const m = bro.ear.measure(c);
+            expect(m.duration < 0.4 && typeof m.lufsShort === "number" && m.loudness === m.lufsShort,
+                   "short-clip loudness: " + m.lufsShort + " / " + m.loudness);
+            const q = click.render({ seed: 1, params: { "e.peak": 0.5 } });
+            const cmp = bro.ear.compare(q, c);
+            expect(cmp.loudnessScale === "lufsShort" && Math.abs(cmp.loudnessDiffDb + 6.02) < 0.05,
+                   "compare on lufsShort: " + cmp.loudnessScale + " " + cmp.loudnessDiffDb);
+        }
+        return "SUCCESS";
+    )JS"));
+}
+
 int main() {
     std::cout << "Running broaudio API synth-graph tests..." << std::endl;
     const char* stress = std::getenv("BRONZE_GC_STRESS");
@@ -243,6 +297,7 @@ int main() {
         test_errors();
         test_render();
         test_play();
+        test_loops_and_impulses();
         broaudio::api::shutdownAudio();
     }
     ev::destroyRealm(realm);

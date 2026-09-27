@@ -127,13 +127,18 @@ Comparison compare(const Clip& clip, const Clip& reference, const CompareOptions
     Clip b = resampled(reference, rate);
 
     // 2. Loudness.
-    const double la = integratedLufs(a), lb = integratedLufs(b);
+    // One scale for both: the blend weight of the shorter clip.
+    const double shorter = std::min(a.duration(), b.duration());
+    const double w = loudnessLufsWeight(shorter);
+    const double la = clipLoudness(a).at(shorter), lb = clipLoudness(b).at(shorter);
     const double msA = meanSquare(a), msB = meanSquare(b);
+    r.loudnessScale = w >= 1.0 ? "lufs" : w <= 0.0 ? "lufsShort" : "blend";
     if (!std::isnan(la) && !std::isnan(lb)) {
         r.loudnessDiffDb = la - lb;
         scale(a, std::pow(10.0, (-23.0 - la) / 20.0));
         scale(b, std::pow(10.0, (-23.0 - lb) / 20.0));
     } else {
+        r.loudnessScale = "rms";
         r.loudnessDiffDb = powerDb(msA) - powerDb(msB);
         if (msA > 1e-20) scale(a, std::pow(10.0, -23.0 / 20.0) / std::sqrt(msA));
         if (msB > 1e-20) scale(b, std::pow(10.0, -23.0 / 20.0) / std::sqrt(msB));

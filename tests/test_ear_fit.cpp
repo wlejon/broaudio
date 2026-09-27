@@ -189,6 +189,52 @@ TEST(meets_measurement_and_band_targets)
     PASS();
 }
 
+TEST(short_click_loudness_and_loops)
+{
+    // A 25 ms noise click whose level is e.peak: lufsShort moves by the
+    // level, and fitting `loudness` (= lufsShort under 400 ms) lands on it.
+    auto g = SynthGraph::fromJson(R"({"nodes": {
+        "n": {"type": "noise", "gain": "e"},
+        "e": {"type": "env", "attack": 0.001, "decay": 0.02, "sustain": 0, "release": 0.005, "peak": 0.2},
+        "f": {"type": "filter", "mode": "bandpass", "input": "n", "cutoff": 2500, "q": 1}
+      }, "output": "f"})");
+    const int iPeak = g->paramIndex("e.peak");
+    const ear::Measurement m1 = ear::measure(render(g, {{iPeak, 0.1f}}, 1, false, 48000));
+    const ear::Measurement m2 = ear::measure(render(g, {{iPeak, 0.4f}}, 1, false, 48000));
+    ASSERT_LT(m2.duration, 0.4);
+    ASSERT_NEAR(m2.lufsShort - m1.lufsShort, 12.04, 0.01);
+    ASSERT_TRUE(m2.loudness == m2.lufsShort);
+
+    ear::FitOptions o;
+    o.params = {{"e.peak", 0.01, 1.0, ear::FitScale::Log}};
+    o.measures = {{"loudness", -34.0}};
+    o.maxEvaluations = 200;
+    o.seed = 3;
+    const ear::FitResult r = ear::fit(g, o);
+    printFit("click to loudness -34", r);
+    ASSERT_LT(r.clip.duration(), 0.4);
+    ASSERT_NEAR(ear::measure(r.clip).loudness, -34.0, 0.1);
+    ASSERT_NEAR(r.terms.measures[0].measured, ear::measure(r.clip).lufsShort, 1e-9);
+
+    // A loop fit: every candidate renders one period.
+    auto hum = SynthGraph::fromJson(R"({"nodes": {
+        "s": {"type": "osc", "wave": "saw", "freq": 90},
+        "lp": {"type": "filter", "input": "s", "cutoff": 800}}, "output": "lp"})");
+    ear::FitOptions lo;
+    lo.params = {{"lp.cutoff"}};
+    lo.measures = {{"centroidHz", 400.0}};
+    lo.loop.length = 0.25;
+    lo.maxEvaluations = 60;
+    const ear::FitResult lr = ear::fit(hum, lo);
+    ASSERT_EQ(lr.clip.samples.size(), size_t(12000));
+    SynthRenderOptions ro;
+    ro.trigger.overrides = lr.overrides;
+    ro.trigger.jitter = false;
+    ro.loop = lo.loop;
+    ASSERT_TRUE(sameBits(renderSynth(hum, ro), lr.clip.samples));
+    PASS();
+}
+
 TEST(deterministic_across_thread_counts)
 {
     auto g = SynthGraph::fromJson(kHiss);

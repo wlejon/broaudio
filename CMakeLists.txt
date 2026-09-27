@@ -147,6 +147,7 @@ add_library(broaudio STATIC
     src/synth/voice_allocator.cpp
     src/synth/synth_parse.cpp
     src/synth/synth_voice.cpp
+    src/synth/synth_loop.cpp
     src/synth/synth_interp.cpp
     src/synth/synth_jit.cpp
     src/clip/clip.cpp

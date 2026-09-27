@@ -454,8 +454,11 @@ public:
     // every setPlayback* control applies as for a clip (gain, pan, bus,
     // send, spatial, stop). Doppler comes only from propagation delay; rate,
     // region, loop and seek do not apply. The voice is built (its memory
-    // allocated) here; it finishes by itself (synth/synth_graph.h). Returns
-    // the playback id, or -1 without a graph.
+    // allocated) here; it finishes by itself (synth/synth_graph.h). With
+    // `loop` enabled the voice is a looping one: its loop and release tail
+    // are rendered here, on the calling thread, and it plays the loop until
+    // releaseSynth (then its release) or a stop. Returns the playback id, or
+    // -1 without a graph.
     struct SynthPlayOptions {
         SynthTrigger trigger;
         float gain = 1.0f;
@@ -464,9 +467,11 @@ public:
         int busId = 0;
         bool spatial = false;         // set before the first block: spatialized at `position`
         float position[3] = {0.0f, 0.0f, 0.0f};
+        SynthLoopOptions loop;
     };
     int playSynth(std::shared_ptr<const SynthGraph> graph, const SynthPlayOptions& opts);
-    // Note-off: the voice's holding envelopes move on to their release.
+    // Note-off: the voice's holding envelopes move on to their release (a
+    // looping voice crossfades into its release tail).
     void releaseSynth(int instanceId);
 
     // Move a playback's loop window while it plays (Web Audio lets loopStart /

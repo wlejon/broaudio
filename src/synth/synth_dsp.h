@@ -96,6 +96,14 @@ void filterCoefs(typename O::F cutoff, typename O::F q, typename O::F invFs, typ
     out[3] = g * a2;
 }
 
+// An impulse generator's per-sample event-phase increment: rate / fs, at most
+// one event every other sample.
+template <class O>
+typename O::F impulseIncrement(typename O::F rate, typename O::F invFs)
+{
+    return O::min(O::max(rate * invFs, O::c(0.0f)), O::c(0.5f));
+}
+
 template <class O, class Cx>
 typename O::F slot(const SlotPlan& s, Cx& cx, const typename O::F* sig)
 {
@@ -130,6 +138,9 @@ void prepNode(const NodePlan& nd, int j, Cx& cx)
             filterCoefs<O>(cx.k(nd.slots[1].k), cx.k(nd.slots[2].k), invFs, v);
             for (int q = 0; q < 4; ++q) cx.pre(j, q) = v[q];
         }
+        break;
+    case SynthKind::Impulses:
+        if (!nd.slots[0].wired()) cx.pre(j, 0) = impulseIncrement<O>(cx.k(nd.slots[0].k), invFs);
         break;
     default:
         break;
@@ -309,6 +320,54 @@ typename O::F stepNode(const NodePlan& nd, int j, Cx& cx, const typename O::F* s
         y = x + cx.k(nd.kBase + 1) * lp;
         O::store(buf, w, y);
         cx.i(s) = (w + O::ic(1)) & mask;
+        break;
+    }
+    case SynthKind::Impulses: {
+        // Stochastic events: an event phase advances by rate / fs and an event
+        // fires when it reaches the threshold, which each event redraws as
+        // 1 + jitter * u (u uniform in [-1, 1), floored at 0.05), so the mean
+        // interval stays 1 / rate. Each event draws its amplitude
+        // 1 - ampJitter * u' (u' in [0, 1)) and restarts the grain. The rng
+        // steps twice every frame whether or not an event fires, so the
+        // stream depends only on the frame count. Words start at 0: the first
+        // event fires on the first frame.
+        const F inc = nd.slots[0].wired() ? impulseIncrement<O>(sig[nd.slots[0].node], cx.k(LayerPlan::kInvFs))
+                                          : cx.pre(j, 0);
+        I r1 = cx.i(s) * O::ic(1664525) + O::ic(1013904223);
+        I r2 = r1 * O::ic(1664525) + O::ic(1013904223);
+        cx.i(s) = r2;
+        F u1 = O::itof(O::ashr8(r1)) * kNoiseScale;
+        F u2 = O::itof(O::ashr8(r2)) * kNoiseScale;
+        F ph = cx.f(s + 1) + inc;
+        F thr = cx.f(s + 2);
+        auto wait = O::lt(ph, thr);   // no event this frame
+        F nthr = O::max(1.0f + cx.k(nd.kBase) * u1, O::c(0.05f));
+        cx.f(s + 1) = O::sel(wait, ph, ph - thr);
+        cx.f(s + 2) = O::sel(wait, thr, nthr);
+        F na = 1.0f - cx.k(nd.kBase + 1) * (u2 * 0.5f + 0.5f);
+        F a = O::sel(wait, cx.f(s + 4), na);
+        F pos = O::sel(wait, cx.f(s + 3) + cx.k(nd.kBase + 2), O::c(0.0f));
+        cx.f(s + 3) = pos;
+        cx.f(s + 4) = a;
+        switch (static_cast<ImpulseShape>(nd.variant)) {
+        case ImpulseShape::Impulse:
+            y = O::sel(wait, O::c(0.0f), a);
+            break;
+        case ImpulseShape::Rect:
+            y = O::sel(O::lt(pos, O::c(1.0f)), a, O::c(0.0f));
+            break;
+        case ImpulseShape::Hann: {
+            F h = sin01<O>(pos * 0.5f);   // sin(pi pos)
+            y = O::sel(O::lt(pos, O::c(1.0f)), a * (h * h), O::c(0.0f));
+            break;
+        }
+        case ImpulseShape::Decay: {
+            F e = O::sel(wait, cx.f(s + 5) * cx.k(nd.kBase + 3), a);
+            cx.f(s + 5) = e;
+            y = e;
+            break;
+        }
+        }
         break;
     }
     case SynthKind::Mul:

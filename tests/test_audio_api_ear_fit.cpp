@@ -130,6 +130,33 @@ static void test_measures_fixed_determinism() {
     )JS"));
 }
 
+static void test_loop_and_loudness() {
+    runScript("a loop fit and a short click's loudness target", withPrelude(R"JS(
+        const hum = new SynthGraph({ nodes: {
+            s: { type: "osc", wave: "saw", freq: 90 },
+            lp: { type: "filter", input: "s", cutoff: 800 } }, output: "lp" });
+        const loop = { length: 0.25, crossfade: 0.02 };
+        const r = bro.ear.fit(hum, { params: ["lp.cutoff"], measures: { centroidHz: 400 }, loop,
+                                     sampleRate: rate, maxEvaluations: 40 });
+        expect(r.clip.samples.length === rate / 4, "one period per candidate: " + r.clip.samples.length);
+        expect(r.render.loop && r.render.loop.length === 0.25 && r.render.loop.crossfade === 0.02, "render.loop");
+        expect(same(hum.render(r.render).getChannelData(0), r.clip.samples), "render(result.render) is the loop");
+        expect((() => { try { bro.ear.fit(hum, { measures: { centroidHz: 400 }, loop: { length: 0 } }); }
+                        catch (e) { return e instanceof RangeError && e.message.indexOf("loop.length") >= 0; }
+                        return false; })(), "a bad loop is a RangeError naming loop.length");
+
+        const click = new SynthGraph({ nodes: {
+            n: { type: "noise", gain: "e" },
+            e: { type: "env", attack: 0.001, decay: 0.02, sustain: 0, release: 0.005, peak: 0.2 } }, output: "n" });
+        const f = bro.ear.fit(click, { params: { "e.peak": { min: 0.01, max: 1, scale: "log" } },
+                                       measures: { loudness: -20 }, sampleRate: rate, maxEvaluations: 150 });
+        const m = bro.ear.measure(f.clip);
+        expect(m.duration < 0.4 && Math.abs(m.loudness + 20) < 0.1, "fit to loudness: " + m.loudness);
+        expect(f.terms.measures.loudness.measured === m.lufsShort, "the loudness term is lufsShort");
+        return "SUCCESS";
+    )JS"));
+}
+
 static void test_scorers() {
     runScript("a JS scorer and a CLAP-shaped model score whole generations", withPrelude(R"JS(
         const g = new SynthGraph(pluck);
@@ -262,7 +289,7 @@ static void test_errors() {
                "params.o.freq: the range", "inverted range");
         throws(() => bro.ear.fit(g, { reference: ref, params: { "o.freq": { scale: "cubic" } } }), TypeError,
                "params.o.freq.scale", "bad scale");
-        throws(() => bro.ear.fit(g, { measures: { loudness: -20 } }), TypeError, "measures.loudness", "measure");
+        throws(() => bro.ear.fit(g, { measures: { volume: -20 } }), TypeError, "measures.volume", "measure");
         throws(() => bro.ear.fit(g, { reference: ref, compare: { weights: { env: 1 } } }), TypeError,
                "compare.weights: unknown option 'env'", "compare weights");
         throws(() => bro.ear.fit(g, { reference: ref, seeds: 0 }), RangeError, "seeds", "seeds");
@@ -289,6 +316,7 @@ int main() {
         broaudio::api::installEar();
         test_recover();
         test_measures_fixed_determinism();
+        test_loop_and_loudness();
         test_scorers();
         test_progress();
         test_async();

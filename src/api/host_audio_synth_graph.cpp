@@ -5,8 +5,9 @@
 //
 //   const g = new SynthGraph(desc)          // or ctx.createSynthGraph(desc)
 //   g.params / g.paramNames / g.layers / g.compiled / g.precompile()
-//   g.render({sampleRate, seed, params, jitter, maxDuration, compiled})
-//   ctx.playSynth(g, {seed, params, jitter, gain, when, pan, bus, position})
+//   g.render({sampleRate, seed, params, jitter, maxDuration, compiled, loop})
+//   ctx.playSynth(g, {seed, params, jitter, gain, when, pan, bus, position, loop})
+//     loop: {length, crossfade, start, snap, curve, releaseFade}
 //   ctx.releaseSynth(id)
 //
 // The description crosses as JSON.stringify of the object (a string is taken
@@ -151,6 +152,14 @@ void readTrigger(const Opts& o, const SynthGraph& g, SynthTrigger& t) {
     if (!err.empty()) throwSynth(o.who + ": " + err, range);   // err names "params.<name>"
 }
 
+// `loop` of an options object into `out` (throws with the caller's prefix).
+void readLoop(const Opts& o, SynthLoopOptions& out) {
+    if (!o.has("loop")) return;
+    bool range = false;
+    const std::string err = readSynthLoopOptions(ev::getProperty(o.obj.get(), "loop"), out, range);
+    if (!err.empty()) throwSynth(o.who + ": " + err, range);
+}
+
 std::shared_ptr<const SynthGraph> parseGraph(Value desc) {
     const std::string json = jsonOf(desc, "the description");
     std::string err;
@@ -184,7 +193,7 @@ HostSynthGraph* thisGraph(Value self, const char* what) {
 Value renderFn(Value self, std::span<const Value> a) {
     HostSynthGraph* h = thisGraph(self, "render");
     const std::shared_ptr<const SynthGraph> g = h->graph;
-    Opts o = readOpts(a, 0, "render", {"sampleRate", "seed", "params", "jitter", "maxDuration", "compiled"});
+    Opts o = readOpts(a, 0, "render", {"sampleRate", "seed", "params", "jitter", "maxDuration", "compiled", "loop"});
     SynthRenderOptions ro;
     Engine* eng = existingAudioEngine();
     ro.sampleRate = eng && eng->sampleRate() > 0 ? eng->sampleRate() : 48000;
@@ -193,6 +202,7 @@ Value renderFn(Value self, std::span<const Value> a) {
     if (o.number("maxDuration", d, 0.0, 600.0)) ro.maxSeconds = d;
     o.boolean("compiled", ro.compiled);
     readTrigger(o, *g, ro.trigger);
+    readLoop(o, ro.loop);
 
     const std::vector<float> samples = renderSynth(g, ro);
     ev::Persistent buf(makeAudioBufferValue(1, static_cast<int>(samples.size()), ro.sampleRate));
@@ -268,13 +278,15 @@ Value playSynthFn(Value, std::span<const Value> a) {
     ev::Persistent graphV(a[0]);
     HostSynthGraph* host = nullptr;
     const std::shared_ptr<const SynthGraph> g = graphArg(graphV.get(), &host);
-    Opts o = readOpts(a, 1, "playSynth", {"seed", "params", "jitter", "gain", "when", "pan", "bus", "position"});
+    Opts o = readOpts(a, 1, "playSynth",
+                      {"seed", "params", "jitter", "gain", "when", "pan", "bus", "position", "loop"});
     Engine::SynthPlayOptions po;
     if (!o.seed(po.trigger.seed)) {
         po.trigger.seed = host ? host->nextSeed.fetch_add(1, std::memory_order_relaxed)
                                : g_descSeed.fetch_add(1, std::memory_order_relaxed);
     }
     readTrigger(o, *g, po.trigger);
+    readLoop(o, po.loop);
     double d = 0;
     if (o.number("gain", d, 0.0, 1000.0)) po.gain = static_cast<float>(d);
     if (o.number("when", d, 0.0, 1e9)) po.when = d;
@@ -306,6 +318,76 @@ std::shared_ptr<const SynthGraph> synthGraphFromValue(Value v) {
     ev::Persistent root(v);
     HostSynthGraph* host = nullptr;
     return graphArg(root.get(), &host);
+}
+
+std::string readSynthLoopOptions(Value v, SynthLoopOptions& out, bool& range) {
+    range = false;
+    ev::Persistent obj(v);
+    if (!ev::isObject(obj.get()) || ev::isFunction(obj.get()))
+        return "loop must be an object {length, crossfade, start, snap, curve, releaseFade}";
+    static const char* const kKeys[] = {"length", "crossfade", "start", "snap", "curve", "releaseFade"};
+    {
+        ev::Persistent keys(callGlobal("Object", "keys", obj.get()));
+        const uint32_t n = saturateU32(ev::toDouble(ev::getProperty(keys.get(), "length")));
+        for (uint32_t i = 0; i < n; ++i) {
+            const std::string k = ev::toUtf8(ev::getElement(keys.get(), i));
+            bool ok = false;
+            for (const char* a : kKeys) ok = ok || k == a;
+            if (!ok) return "loop: unknown option '" + k + "' (expected length, crossfade, start, snap, curve, releaseFade)";
+        }
+    }
+    SynthLoopOptions o;
+    std::string err;
+    auto num = [&](const char* name, double& dst, double lo, double hi, bool required) {
+        if (!err.empty()) return;
+        Value x = ev::getProperty(obj.get(), name);
+        if (ev::isUndefined(x)) {
+            if (required) err = std::string("loop.") + name + ": required";
+            return;
+        }
+        if (!ev::isNumber(x)) { err = std::string("loop.") + name + " must be a number"; return; }
+        const double d = ev::toDouble(x);
+        if (!(d >= lo && d <= hi)) {
+            err = std::string("loop.") + name + " is " + std::to_string(d) + ", outside [" + std::to_string(lo) +
+                  ", " + std::to_string(hi) + "]";
+            range = true;
+            return;
+        }
+        dst = d;
+    };
+    num("length", o.length, 0.001, 60.0, true);
+    num("crossfade", o.crossfade, 0.0, 30.0, false);
+    num("start", o.start, 0.0, 600.0, false);
+    num("releaseFade", o.releaseFade, 0.0, 10.0, false);
+    if (!err.empty()) return err;
+    Value snap = ev::getProperty(obj.get(), "snap");
+    if (!ev::isUndefined(snap)) {
+        if (!ev::isBool(snap)) return "loop.snap must be a boolean";
+        o.snap = ev::toBool(snap);
+    }
+    Value curve = ev::getProperty(obj.get(), "curve");
+    if (!ev::isUndefined(curve)) {
+        const std::string c = ev::isString(curve) ? ev::toUtf8(curve) : std::string();
+        if (c == "auto") o.curve = SynthLoopCurve::Auto;
+        else if (c == "power") o.curve = SynthLoopCurve::Power;
+        else if (c == "linear") o.curve = SynthLoopCurve::Linear;
+        else return "loop.curve must be 'auto', 'power' or 'linear'";
+    }
+    out = o;
+    return {};
+}
+
+Value synthLoopOptionsValue(const SynthLoopOptions& o) {
+    ObjectBuilder b;
+    b.set("length", o.length);
+    b.set("crossfade", o.crossfade);
+    b.set("start", o.start);
+    b.set("snap", o.snap);
+    b.set("curve", std::string(o.curve == SynthLoopCurve::Power    ? "power"
+                               : o.curve == SynthLoopCurve::Linear ? "linear"
+                                                                   : "auto"));
+    b.set("releaseFade", o.releaseFade);
+    return b.get();
 }
 
 void installSynthGraphClass() {

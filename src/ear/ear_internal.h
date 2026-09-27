@@ -59,6 +59,22 @@ Stft computeStft(const Clip& clip, int nfft, int hop);
 // the -70 LUFS absolute gate.
 double integratedLufs(const Clip& clip);
 
+// Every loudness of a clip (ear.h's Measurement::lufs / lufsShort /
+// loudness), from one K-weighting pass.
+struct Loudness {
+    double lufs = NAN;
+    double lufsShort = NAN;
+    double duration = 0;
+    // The blend of lufsShort (weight 1 - w) and lufs (w) in dB, w from
+    // `duration` (0 under 400 ms, 1 from 800 ms); whichever is defined when
+    // the other is not.
+    double at(double duration) const;
+    double loudness() const { return at(duration); }
+};
+Loudness clipLoudness(const Clip& clip);
+// The blend weight of lufs for a clip `duration` seconds long.
+double loudnessLufsWeight(double duration);
+
 // Spectral centroid and flatness of one power spectrum.
 double spectralCentroid(const double* power, int bins, double binHz);
 double spectralFlatness(const double* power, int bins, double binHz);

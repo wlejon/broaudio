@@ -76,6 +76,7 @@ struct PNode {
     EnvDef env;
     ResDef res;
     CombDef comb;
+    ImpDef imp;
     int count = 0;
 };
 
@@ -215,7 +216,7 @@ void Parser::node(PNode& n, const json& obj)
     if (!obj.is_object()) fail(n.path, "a node must be an object, not " + typeName(obj));
     if (!obj.contains("type") || !obj["type"].is_string())
         fail(n.path + ".type", "required: 'osc', 'fm', 'noise', 'filter', 'env', 'sweep', 'shaper', "
-                               "'resonator', 'comb', 'mul' or 'mix'");
+                               "'resonator', 'comb', 'impulses', 'mul' or 'mix'");
     const std::string type = obj["type"].get<std::string>();
     auto gain = [&]() { return slot(obj, n, "gain", 1.0f, kAny); };
     if (type == "osc") {
@@ -293,6 +294,13 @@ void Parser::node(PNode& n, const json& obj)
         n.comb.freq = field(obj, n, "freq", 220.0f, {1.0f, 1e5f});
         n.comb.feedback = field(obj, n, "feedback", 0.7f, {-0.9999f, 0.9999f});
         n.comb.damp = field(obj, n, "damp", 0.0f, {0.0f, 1.0f});
+    } else if (type == "impulses") {
+        allowOnly(obj, n.path, "impulses", {"shape", "rate", "jitter", "length", "ampJitter", "gain"});
+        n.kind = SynthKind::Impulses;
+        n.variant = variant(obj, n, "shape", {"impulse", "rect", "hann", "decay"});
+        n.slots = {slot(obj, n, "rate", 10.0f, {0.0f, 24000.0f}), gain()};
+        n.kParams = {field(obj, n, "jitter", 0.0f, {0.0f, 1.0f}), field(obj, n, "ampJitter", 0.0f, {0.0f, 1.0f})};
+        n.imp.length = field(obj, n, "length", 0.005f, {1e-4f, 10.0f});
     } else if (type == "mul") {
         allowOnly(obj, n.path, "mul", {"a", "b", "gain"});
         n.kind = SynthKind::Mul;
@@ -334,7 +342,7 @@ void Parser::node(PNode& n, const json& obj)
         n.slots.push_back(gain());
     } else {
         fail(n.path + ".type", "unknown type '" + type + "' (osc, fm, noise, filter, env, sweep, shaper, "
-                                                         "resonator, comb, mul, mix)");
+                                                         "resonator, comb, impulses, mul, mix)");
     }
 }
 
@@ -505,6 +513,10 @@ void Parser::layer(LayerData& L, const std::string& id, const json& nodes, const
             L.combs.push_back(c);
         } else if (n.kind == SynthKind::Noise) {
             L.rngWords.push_back(nd.sBase);
+        } else if (n.kind == SynthKind::Impulses) {
+            ImpDef d = n.imp;
+            d.node = ni;
+            L.impulses.push_back(d);
         }
     }
     L.shape = internSynthShape(std::move(plan));
@@ -613,6 +625,12 @@ void layoutSynthPlan(LayerPlan& plan)
             break;
         case SynthKind::Mul: break;
         case SynthKind::Mix: n.kBase = k; k += n.count; break;
+        case SynthKind::Impulses:
+            n.kBase = k;
+            k += 4;
+            word(true);
+            for (int i = 0; i < 5; ++i) word(false);
+            break;
         }
         n.sCount = words - n.sBase;
     }

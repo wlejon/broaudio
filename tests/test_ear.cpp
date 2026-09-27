@@ -245,6 +245,79 @@ TEST(spectrogram_shape_and_pixels) {
     PASS();
 }
 
+// A UI click: a Hann-windowed 2 kHz burst `ms` long at `amp`, `lead` seconds
+// of silence before it and `trail` after.
+Clip click(double ms, double amp, double trail = 0.0, double lead = 0.0) {
+    const size_t n = static_cast<size_t>(ms * 0.001 * kRate);
+    const size_t pre = static_cast<size_t>(lead * kRate);
+    std::vector<float> s(pre + n + static_cast<size_t>(trail * kRate), 0.0f);
+    for (size_t i = 0; i < n; ++i) {
+        const double w = 0.5 - 0.5 * std::cos(2.0 * std::numbers::pi * i / n);
+        s[pre + i] = static_cast<float>(amp * w * std::sin(2.0 * std::numbers::pi * 2000.0 * i / kRate));
+    }
+    return makeClip(std::move(s));
+}
+
+TEST(short_clip_loudness) {
+    // Silence around a click moves BS.1770's single block, not lufsShort.
+    const Measurement bare = measure(click(30, 0.5));
+    const Measurement padded = measure(click(30, 0.5, 0.25, 0.05));
+    ASSERT_NEAR(padded.lufsShort, bare.lufsShort, 0.01);
+    ASSERT_GT(bare.lufs - padded.lufs, 8.0);   // 30 ms vs 330 ms of energy average
+    // Shorter than 400 ms: loudness is lufsShort.
+    ASSERT_TRUE(bare.loudness == bare.lufsShort && padded.loudness == padded.lufsShort);
+
+    // Level: exactly 20 log10 of the gain, monotone.
+    const double ref20 = measure(click(20, 0.5, 0.1)).lufsShort;
+    double prev = -1e9;
+    for (double amp : {0.01, 0.03, 0.1, 0.2, 0.5, 1.0}) {
+        const Measurement m = measure(click(20, amp, 0.1));
+        ASSERT_NEAR(m.lufsShort - ref20, 20.0 * std::log10(amp / 0.5), 1e-4);
+        ASSERT_GT(m.lufsShort, prev + 1.0);
+        prev = m.lufsShort;
+    }
+    // Duration: longer clicks at one level read louder, by their energy
+    // (a doubling ~ +3 dB) up to the 100 ms window.
+    prev = -1e9;
+    for (double ms : {5.0, 10.0, 20.0, 40.0, 80.0}) {
+        const double l = measure(click(ms, 0.5, 0.1)).lufsShort;
+        if (prev > -1e8) ASSERT_NEAR(l - prev, 3.01, 0.3);
+        prev = l;
+    }
+    // A steady tone reads its integrated loudness at any length.
+    const Measurement tone = measure(tones({{1000.0, 1.0, 1e9}}, 0.3));
+    ASSERT_NEAR(tone.lufsShort, -3.01, 0.1);
+    const Measurement longTone = measure(tones({{1000.0, 1.0, 1e9}}, 3.0));
+    ASSERT_NEAR(longTone.lufsShort, longTone.lufs, 0.05);
+    ASSERT_TRUE(longTone.loudness == longTone.lufs);
+    // The blend is continuous in duration: a decaying tone cut at 399, 401,
+    // 799 and 801 ms.
+    const Clip decay = tones({{800.0, 0.8, 0.15}}, 1.0);
+    double last = NAN;
+    for (double ms : {399.0, 401.0, 600.0, 799.0, 801.0}) {
+        Clip c = decay;
+        c.samples.resize(static_cast<size_t>(ms * 0.001 * kRate));
+        const Measurement m = measure(c);
+        ASSERT_TRUE(m.loudness <= std::max(m.lufs, m.lufsShort) + 1e-9);
+        ASSERT_TRUE(m.loudness >= std::min(m.lufs, m.lufsShort) - 1e-9);
+        if (!std::isnan(last) && (ms == 401.0 || ms == 801.0)) ASSERT_LT(std::fabs(m.loudness - last), 0.2);
+        last = m.loudness;
+    }
+    // Silence: undefined.
+    ASSERT_TRUE(std::isnan(measure(makeClip(std::vector<float>(4800, 0.0f))).lufsShort));
+
+    // compare(): a short click and itself with silence after it are equally
+    // loud; a quarter-level copy is 12 dB down.
+    const Comparison same = compare(click(30, 0.5, 0.25), click(30, 0.5));
+    ASSERT_TRUE(same.loudnessScale == "lufsShort");
+    ASSERT_NEAR(same.loudnessDiffDb, 0.0, 0.01);
+    const Comparison quiet = compare(click(30, 0.125, 0.1), click(30, 0.5, 0.1));
+    ASSERT_NEAR(quiet.loudnessDiffDb, -12.04, 0.01);
+    ASSERT_LT(quiet.score, 0.005);
+    ASSERT_TRUE(compare(tones({{330.0, 0.6, 0.3}}, 1.5), tones({{330.0, 0.6, 0.3}}, 1.0)).loudnessScale == "lufs");
+    PASS();
+}
+
 TEST(deterministic) {
     const Clip a = tones({{523.0, 0.5, 0.8}, {1441.0, 0.3, 0.5}}, 1.0);
     Clip n = whiteNoise(1.0, 0.05);

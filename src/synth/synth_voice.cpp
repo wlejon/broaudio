@@ -10,7 +10,7 @@
 // produces do not depend on how its renders are sized: an offline render and
 // the engine's voice agree bit for bit.
 
-#include "synth_plan.h"
+#include "synth_voice_data.h"
 
 #include <algorithm>
 #include <climits>
@@ -77,57 +77,10 @@ inline void setWordF(uint32_t* w, int i, float f) { std::memcpy(&w[i], &f, sizeo
 
 } // namespace
 
-struct SynthEnvRun {
-    const EnvDef* def = nullptr;
-    int word = 0;        // y
-    int kBase = 0;       // m, c
-    int seg = 0;
-    int64_t remaining = 0;
-    int64_t gateAt = -1;
-    bool holding = false;
-    bool done = false;
-    bool released = false;
-};
-
-struct SynthLayerRun {
-    const LayerData* L = nullptr;
-    const SynthShape* shape = nullptr;
-    std::vector<float> k;
-    std::vector<int32_t> ki;
-    std::vector<uint32_t> words;
-    std::vector<std::vector<float>> bufMem;
-    std::vector<float*> bufs;
-    std::vector<SynthEnvRun> envs;
-    int64_t offset = 0;
-    int64_t time = 0;
-    bool started = false;
-};
-
-struct SynthVoiceData {
-    int fs = 48000;
-    std::vector<float> values;
-    std::vector<SynthLayerRun> layers;
-    int64_t pos = 0;
-    int64_t end = -1;
-    int64_t duration = -1;
-    bool done = false;
-    int ampPending = 0;
-    bool ampDone = false;
-    int64_t ampDoneAt = -1;
-    float winPeak = 0.0f;
-    int winFill = 0;
-
-    float level(int param) const { return param >= 0 ? values[param] : 0.0f; }
-    int64_t frames(int param) const {
-        return static_cast<int64_t>(std::llround(static_cast<double>(std::max(0.0f, values[param])) * fs));
-    }
-
-    void finish(SynthLayerRun& lr, SynthEnvRun& e, int64_t lt);
-    void enter(SynthLayerRun& lr, SynthEnvRun& e, int s, int64_t lt);
-    void release(SynthLayerRun& lr, SynthEnvRun& e, int64_t lt);
-    void advance(SynthLayerRun& lr, SynthEnvRun& e, int64_t lt);
-    bool runLayer(SynthLayerRun& lr, float* out, int n, bool compiled);
-};
+int64_t SynthVoiceData::frames(int param) const
+{
+    return static_cast<int64_t>(std::llround(static_cast<double>(std::max(0.0f, values[param])) * fs));
+}
 
 void SynthVoiceData::finish(SynthLayerRun& lr, SynthEnvRun& e, int64_t lt)
 {
@@ -262,13 +215,43 @@ bool SynthVoiceData::runLayer(SynthLayerRun& lr, float* out, int n, bool compile
     return allCompiled;
 }
 
-// --- SynthVoice ---------------------------------------------------------------
-
-SynthVoice::SynthVoice(std::shared_ptr<const SynthGraph> graph, int sampleRate, const SynthTrigger& t)
-    : graph_(std::move(graph)), d_(std::make_unique<SynthVoiceData>())
+// Whole cycles over the loop for every constant periodic rate: oscillator
+// and FM carrier frequencies (the ratio following, so the modulator is whole
+// too) and impulse rates. At least one cycle; clamped into the range.
+void SynthVoiceData::snap(const SynthGraphData& g, int64_t loopFrames)
 {
-    const SynthGraphData& g = graph_->data();
-    SynthVoiceData& v = *d_;
+    const double perCycle = static_cast<double>(fs) / static_cast<double>(loopFrames);   // Hz of one cycle
+    auto cyclesOf = [&](double hz) { return std::max<double>(1.0, std::round(hz / perCycle)); };
+    auto snapParam = [&](int p) -> double {
+        if (p < 0 || !(values[p] > 0.0f)) return 0.0;
+        const SynthParamInfo& info = g.params[p];
+        values[p] = std::clamp(static_cast<float>(cyclesOf(values[p]) * perCycle), info.lo, info.hi);
+        return values[p];
+    };
+    for (const LayerData& L : g.layers) {
+        const LayerPlan& plan = L.shape->plan;
+        std::vector<int> paramOfK(plan.kCount, -1);
+        for (const auto& [kIdx, param] : L.feeds) paramOfK[kIdx] = param;
+        for (const NodePlan& nd : plan.nodes) {
+            const bool constFreq = !nd.slots.empty() && !nd.slots[0].wired();
+            if (nd.kind == SynthKind::Osc || nd.kind == SynthKind::Impulses) {
+                if (constFreq) snapParam(paramOfK[nd.slots[0].k]);
+            } else if (nd.kind == SynthKind::Fm && constFreq) {
+                const double fc = snapParam(paramOfK[nd.slots[0].k]);
+                const int pr = nd.slots[1].wired() ? -1 : paramOfK[nd.slots[1].k];
+                if (fc > 0.0 && pr >= 0 && values[pr] > 0.0f) {
+                    const double fm = cyclesOf(fc * values[pr]) * perCycle;
+                    const SynthParamInfo& info = g.params[pr];
+                    values[pr] = std::clamp(static_cast<float>(fm / fc), info.lo, info.hi);
+                }
+            }
+        }
+    }
+}
+
+void SynthVoiceData::init(const SynthGraphData& g, int sampleRate, const SynthTrigger& t, int64_t snapFrames)
+{
+    SynthVoiceData& v = *this;
     v.fs = sampleRate > 0 ? sampleRate : 48000;
     const double fs = v.fs;
 
@@ -287,6 +270,7 @@ SynthVoice::SynthVoice(std::shared_ptr<const SynthGraph> graph, int sampleRate, 
         }
         v.values[i] = std::clamp(x, p.lo, p.hi);
     }
+    if (snapFrames > 0) v.snap(g, snapFrames);
     if (g.duration >= 0) v.duration = std::max<int64_t>(1, v.frames(g.duration));
     v.ampPending = g.ampEnvs;
 
@@ -340,6 +324,16 @@ SynthVoice::SynthVoice(std::shared_ptr<const SynthGraph> graph, int sampleRate, 
             lr.k[nd.kBase + 1] = v.values[c.feedback];
             lr.k[nd.kBase + 2] = 1.0f - v.values[c.damp];
         }
+        for (size_t q = 0; q < L.impulses.size(); ++q) {
+            const ImpDef& d = L.impulses[q];
+            const NodePlan& nd = plan.nodes[d.node];
+            const double len = std::max(1.0, static_cast<double>(v.values[d.length]) * fs);   // frames
+            lr.k[nd.kBase + 2] = static_cast<float>(1.0 / len);
+            lr.k[nd.kBase + 3] = static_cast<float>(std::exp(-6.907755278982137 / len));
+            const uint32_t s = mix32(t.seed ^ mix32(0xA511E9B3u + static_cast<uint32_t>(li) * 977u +
+                                                    static_cast<uint32_t>(q) * 131u));
+            lr.words[nd.sBase] = s | 1u;
+        }
         for (size_t q = 0; q < L.rngWords.size(); ++q) {
             const uint32_t s = mix32(t.seed ^ mix32(0x51ED270Bu + static_cast<uint32_t>(li) * 977u +
                                                     static_cast<uint32_t>(q) * 131u));
@@ -361,21 +355,34 @@ SynthVoice::SynthVoice(std::shared_ptr<const SynthGraph> graph, int sampleRate, 
     }
 }
 
-SynthVoice::~SynthVoice() = default;
+void SynthVoiceData::releaseAll()
+{
+    for (SynthLayerRun& lr : layers)
+        for (SynthEnvRun& e : lr.envs) release(lr, e, lr.time);
+}
 
-bool SynthVoice::render(float* out, int n, bool compiled)
+std::unique_ptr<SynthVoiceData> SynthVoiceData::clone() const
+{
+    auto c = std::make_unique<SynthVoiceData>(*this);
+    for (SynthLayerRun& lr : c->layers)
+        for (size_t b = 0; b < lr.bufMem.size(); ++b)
+            if (!lr.bufMem[b].empty()) lr.bufs[b] = lr.bufMem[b].data();
+    return c;
+}
+
+bool SynthVoiceData::render(float* out, int n, bool compiled)
 {
     if (n <= 0) return true;
     std::fill(out, out + n, 0.0f);
-    SynthVoiceData& v = *d_;
+    SynthVoiceData& v = *this;
     if (v.done) return true;
     FpModeGuard fpMode;
-    if (releaseRequested_.exchange(false, std::memory_order_relaxed)) {
-        for (SynthLayerRun& lr : v.layers)
-            for (SynthEnvRun& e : lr.envs) v.release(lr, e, lr.time);
-    }
     bool allCompiled = true;
     for (SynthLayerRun& lr : v.layers) allCompiled = v.runLayer(lr, out, n, compiled) && allCompiled;
+    if (v.endless) {
+        v.pos += n;
+        return allCompiled;
+    }
 
     // The end: a duration, or the amplitude envelopes done and a whole tail
     // window (aligned to voice time) under the floor.
@@ -409,10 +416,100 @@ bool SynthVoice::render(float* out, int n, bool compiled)
     return allCompiled;
 }
 
-bool SynthVoice::finished() const noexcept { return d_->done; }
-int64_t SynthVoice::endSample() const noexcept { return d_->end; }
-int64_t SynthVoice::position() const noexcept { return d_->pos; }
+// --- SynthVoice ---------------------------------------------------------------
+
+SynthVoice::SynthVoice(std::shared_ptr<const SynthGraph> graph, int sampleRate, const SynthTrigger& t)
+    : graph_(std::move(graph)), d_(std::make_unique<SynthVoiceData>())
+{
+    d_->init(graph_->data(), sampleRate, t, 0);
+}
+
+SynthVoice::SynthVoice(std::shared_ptr<const SynthGraph> graph, int sampleRate, const SynthTrigger& t,
+                       const SynthLoopOptions& loop, bool compiled)
+    : graph_(std::move(graph)), d_(std::make_unique<SynthVoiceData>())
+{
+    if (!loop.enabled()) {
+        d_->init(graph_->data(), sampleRate, t, 0);
+        return;
+    }
+    const int fs = sampleRate > 0 ? sampleRate : 48000;
+    d_->init(graph_->data(), fs, t, loop.snap ? synthLoopFrames(loop, fs) : 0);
+    loop_ = buildSynthLoop(*d_, graph_->data(), loop, compiled);
+    // Only the values outlive the cut: the loop plays from memory.
+    d_->layers.clear();
+    d_->layers.shrink_to_fit();
+}
+
+SynthVoice::~SynthVoice() = default;
+
+bool SynthVoice::render(float* out, int n, bool compiled)
+{
+    if (loop_) return renderLoop(out, n);
+    if (n > 0 && !d_->done && releaseRequested_.exchange(false, std::memory_order_relaxed)) {
+        FpModeGuard fpMode;
+        d_->releaseAll();
+    }
+    return d_->render(out, n, compiled);
+}
+
+bool SynthVoice::renderLoop(float* out, int n)
+{
+    if (n <= 0) return true;
+    SynthLoopData& L = *loop_;
+    if (L.done) {
+        std::fill(out, out + n, 0.0f);
+        L.played += n;
+        return true;
+    }
+    if (releaseRequested_.exchange(false, std::memory_order_relaxed) && L.rel < 0) {
+        L.rel = 0;
+        L.relFrom = L.pos;
+    }
+    const int64_t len = static_cast<int64_t>(L.loop.size());
+    const int64_t fade = static_cast<int64_t>(L.fadeIn.size());
+    const int64_t relEnd = std::max(fade, static_cast<int64_t>(L.tail.size()));
+    int i = 0;
+    for (; i < n; ++i) {
+        if (L.rel < 0) {
+            out[i] = L.loop[L.pos];
+            if (++L.pos == len) L.pos = 0;
+            continue;
+        }
+        if (L.rel >= relEnd) {
+            L.done = true;
+            L.end = L.played + i;
+            break;
+        }
+        const int64_t k = L.rel++;
+        float s = k < static_cast<int64_t>(L.tail.size()) ? L.tail[k] : 0.0f;
+        if (k < fade) s = L.loop[(L.relFrom + k) % len] * L.fadeOut[k] + s * L.fadeIn[k];
+        out[i] = s;
+    }
+    if (!L.done && L.rel >= relEnd) {
+        L.done = true;
+        L.end = L.played + i;
+    }
+    std::fill(out + i, out + n, 0.0f);
+    L.played += n;
+    return true;
+}
+
+bool SynthVoice::finished() const noexcept { return loop_ ? loop_->done : d_->done; }
+int64_t SynthVoice::endSample() const noexcept { return loop_ ? loop_->end : d_->end; }
+int64_t SynthVoice::position() const noexcept { return loop_ ? loop_->played : d_->pos; }
 const std::vector<float>& SynthVoice::values() const noexcept { return d_->values; }
+
+const std::vector<float>& SynthVoice::loopSamples() const noexcept
+{
+    static const std::vector<float> kEmpty;
+    return loop_ ? loop_->loop : kEmpty;
+}
+
+const std::vector<float>& SynthVoice::releaseTail() const noexcept
+{
+    static const std::vector<float> kEmpty;
+    return loop_ ? loop_->tail : kEmpty;
+}
 
 // --- SynthGraph ---------------------------------------------------------------
 
@@ -470,6 +567,10 @@ std::vector<float> renderSynth(const std::shared_ptr<const SynthGraph>& graph, c
     std::vector<float> out;
     if (!graph) return out;
     const bool compiled = o.compiled && graph->precompile();
+    if (o.loop.enabled()) {
+        SynthVoice voice(graph, o.sampleRate, o.trigger, o.loop, compiled);
+        return voice.loopSamples();
+    }
     SynthVoice voice(graph, o.sampleRate, o.trigger);
     const int64_t maxFrames =
         std::max<int64_t>(0, static_cast<int64_t>(std::llround(std::max(0.0, o.maxSeconds) * o.sampleRate)));

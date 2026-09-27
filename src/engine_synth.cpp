@@ -15,7 +15,11 @@ int Engine::playSynth(std::shared_ptr<const SynthGraph> graph, const SynthPlayOp
     graph->requestKernels();
     // The voice and its memory (delay lines, state) are allocated here, off
     // the audio thread and outside the lock.
-    auto voice = std::make_shared<SynthVoice>(graph, sampleRate_, opts.trigger);
+    // A looping voice renders its loop here, through whatever kernels are
+    // already published (the samples do not depend on it).
+    auto voice = opts.loop.enabled()
+                     ? std::make_shared<SynthVoice>(graph, sampleRate_, opts.trigger, opts.loop, true)
+                     : std::make_shared<SynthVoice>(graph, sampleRate_, opts.trigger);
 
     uint64_t startSample = 0;
     const double s = opts.when * static_cast<double>(sampleRate_);

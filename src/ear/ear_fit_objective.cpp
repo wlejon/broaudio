@@ -45,6 +45,8 @@ const MeasureField kFields[] = {
     {"envelopePeakDb", Kind::Db, [](const Measurement& m) { return m.envelopePeakDb; }},
     {"rmsDb", Kind::Db, [](const Measurement& m) { return m.rmsDb; }},
     {"lufs", Kind::Db, [](const Measurement& m) { return m.lufs; }},
+    {"lufsShort", Kind::Db, [](const Measurement& m) { return m.lufsShort; }},
+    {"loudness", Kind::Db, [](const Measurement& m) { return m.loudness; }},
     {"flatness", Kind::Fraction, [](const Measurement& m) { return m.flatness; }},
     {"tonality", Kind::Fraction, [](const Measurement& m) { return m.tonality; }},
     {"inharmonicity", Kind::Fraction, [](const Measurement& m) { return m.ringing.inharmonicity; }},

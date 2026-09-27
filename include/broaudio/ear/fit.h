@@ -42,6 +42,7 @@
 // Not for the audio thread: it allocates, spawns threads and blocks.
 
 #include "broaudio/ear/ear.h"
+#include "broaudio/synth/synth_graph.h"
 
 #include <cmath>
 #include <cstdint>
@@ -94,7 +95,11 @@ struct FitParamInfo {
 //     attackTime, onsetTime, envelopePeakTime, peakTime, tailTime, t60,
 //     weightedRingTime, strongestRingTime
 //   dB/s (|log2((|measured| + 1) / (|target| + 1))|): decayRate
-//   dB (|measured - target| / 10): peakDb, envelopePeakDb, rmsDb, lufs
+//   dB (|measured - target| / 10): peakDb, envelopePeakDb, rmsDb, lufs,
+//     lufsShort, loudness. For a cue that may render shorter than 400 ms,
+//     target `loudness` (or `lufsShort`): BS.1770's `lufs` of a sub-block
+//     clip is its energy over its own length, so a fit to it trades level
+//     against decay and trailing silence (ear.h, Measurement::lufsShort).
 //   0..1 fractions (|measured - target| / 0.25): flatness, tonality,
 //     inharmonicity, ringScore, sparsity
 // `scale` (NaN = the default above: 1, 1, 1, 10, 0.25) divides the raw
@@ -175,6 +180,10 @@ struct FitOptions {
     int sampleRate = 0;              // 0 = the reference's, else 48000
     double maxDuration = 0;          // 0 = 2 x the reference + 0.25 s, else 10 s
     bool compiled = true;
+    // Enabled: every candidate renders one period of this loop
+    // (SynthRenderOptions::loop) instead of a one-shot; maxDuration is
+    // unused.
+    SynthLoopOptions loop;
 };
 
 struct FitMeasureResult {

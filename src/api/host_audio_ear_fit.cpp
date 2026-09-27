@@ -368,7 +368,7 @@ Value fitFn(Value, std::span<const Value> a) {
     Obj o(optsV.get(), "");
     o.allow({"params", "fixed", "reference", "compare", "measures", "bands", "scorer", "clap", "weights",
              "maxEvaluations", "maxSeconds", "stopAt", "population", "sigma", "seed", "threads", "restarts",
-             "jitter", "seeds", "sampleRate", "maxDuration", "compiled", "onProgress", "onDone"});
+             "jitter", "seeds", "sampleRate", "maxDuration", "compiled", "loop", "onProgress", "onDone"});
     ear::FitOptions& fo = req->options;
     if (o.has("params")) readParams(o.get("params"), fo);
     if (o.has("fixed")) readFixed(o.get("fixed"), *req->graph, fo);
@@ -392,6 +392,11 @@ Value fitFn(Value, std::span<const Value> a) {
     readSeeds(o, fo);
     o.number("maxDuration", fo.maxDuration, 0.0, 600.0);
     o.boolean("compiled", fo.compiled);
+    if (o.has("loop")) {
+        bool loopRange = false;
+        const std::string loopErr = readSynthLoopOptions(o.get("loop"), fo.loop, loopRange);
+        if (!loopErr.empty()) fail(loopErr, loopRange);
+    }
     ev::Persistent onDone(o.get("onDone")), onProgress(o.get("onProgress"));
     if (!ev::isUndefined(onDone.get()) && !ev::isFunction(onDone.get())) fail("onDone must be a function");
     if (!ev::isUndefined(onProgress.get()) && !ev::isFunction(onProgress.get())) fail("onProgress must be a function");
@@ -556,6 +561,10 @@ Value fitResultValue(const ear::FitResult& r, const FitRequest& req) {
         rr.set("jitter", req.options.jitter);
         rr.set("sampleRate", static_cast<double>(r.sampleRate));
         rr.set("maxDuration", r.maxDuration);
+        if (req.options.loop.enabled()) {
+            ev::Persistent loop(synthLoopOptionsValue(req.options.loop));
+            rr.set("loop", loop.get());
+        }
         out.set("render", rr.get());
     }
     return out.get();

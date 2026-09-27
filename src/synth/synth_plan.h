@@ -32,10 +32,11 @@
 namespace broaudio {
 
 enum class SynthKind : uint8_t {
-    Osc, Fm, Noise, Filter, Env, Shaper, Resonator, Comb, Mul, Mix,
+    Osc, Fm, Noise, Filter, Env, Shaper, Resonator, Comb, Mul, Mix, Impulses,
 };
 
 enum class OscWave : uint8_t { Sine, Saw, Square, Triangle };
+enum class ImpulseShape : uint8_t { Impulse, Rect, Hann, Decay };
 enum class NoiseColor : uint8_t { White, Pink, Brown };
 enum class FilterMode : uint8_t { Lowpass, Highpass, Bandpass, Notch };
 enum class ShaperMode : uint8_t { Tanh, Clip, Fold };
@@ -71,6 +72,8 @@ struct SlotPlan {
 //   Comb      input, gain                      kBase: frac, feedback, damp; ki: delay, mask; buf
 //   Mul       a, b, gain
 //   Mix       in 0..N-1, gain                  kBase: N weights
+//   Impulses  rate, gain                       kBase: jitter, ampJitter, grain step, decay multiplier
+//                                              words: rng (int), phase, threshold, grain pos, amp, decay
 struct NodePlan {
     SynthKind kind = SynthKind::Mul;
     uint8_t variant = 0;
@@ -169,6 +172,11 @@ struct CombDef {
     int freq = -1, feedback = -1, damp = -1;
 };
 
+struct ImpDef {
+    int node = 0;
+    int length = -1;     // param: grain length (seconds)
+};
+
 struct LayerData {
     std::string id;
     const SynthShape* shape = nullptr;
@@ -177,6 +185,7 @@ struct LayerData {
     std::vector<EnvDef> envs;
     std::vector<ResDef> res;
     std::vector<CombDef> combs;
+    std::vector<ImpDef> impulses;
     std::vector<int> rngWords;                // noise generators' rng state words
 };
 

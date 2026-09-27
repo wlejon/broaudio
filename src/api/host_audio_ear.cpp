@@ -157,6 +157,8 @@ Value measurementValue(const ear::Measurement& m) {
     r.set("envelopePeakDb", m.envelopePeakDb);
     r.set("rmsDb", m.rmsDb);
     setNum(r, "lufs", m.lufs);
+    setNum(r, "lufsShort", m.lufsShort);
+    setNum(r, "loudness", m.loudness);
     r.set("centroidHz", m.centroidHz);
     r.set("flatness", m.flatness);
     r.set("tonality", m.tonality);
@@ -256,6 +258,7 @@ Value earComparisonValue(const ear::Comparison& r) {
     out.set("sampleRate", static_cast<double>(r.sampleRate));
     out.set("offsetTime", r.offsetTime);
     out.set("loudnessDiffDb", r.loudnessDiffDb);
+    out.set("loudnessScale", r.loudnessScale);
     out.set("envelopeDb", r.envelopeDb);
     out.set("spectrogramDb", r.spectrogramDb);
     out.set("ltasDb", r.ltasDb);

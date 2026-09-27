@@ -5,7 +5,8 @@
 // listening. Three entry points:
 //
 //   measure()      a report on one clip: timing (peak, attack, tail, decay),
-//                  loudness (peak, RMS, BS.1770 integrated LUFS), spectral
+//                  loudness (peak, RMS, BS.1770 integrated LUFS and a
+//                  short-clip K-weighted window loudness), spectral
 //                  centroid and flatness, tonality, and the strongest pure
 //                  partials with how long each rings.
 //   compare()      how far a clip is from a reference recording, overall and
@@ -133,6 +134,21 @@ struct Measurement {
     double lufs = NAN;             // BS.1770-4 integrated loudness of the mono clip (K-weighted, 400 ms blocks,
                                    // -70 LUFS absolute and -10 LU relative gates; one block when shorter than 400 ms);
                                    // NaN when nothing passes the absolute gate
+    // BS.1770's 400 ms blocks cannot resolve a clip shorter than a block: its
+    // one block is the clip's energy over however long the clip happens to
+    // run (trailing silence lowers it). lufsShort is meaningful at any
+    // length: the loudest 100 ms window of the K-weighted signal (a clip
+    // shorter than 100 ms counts as zero-padded to 100 ms), in LUFS units,
+    // so it does not depend on silence around the sound, it scales exactly
+    // with level (+6.02 dB per doubling), a steady sound reads its lufs, and
+    // clicks shorter than 100 ms read by their energy, as the ear integrates
+    // them. NaN under the -70 LUFS absolute gate.
+    double lufsShort = NAN;
+    // The loudness the ear judges by (compare's normalisation, fit's
+    // `loudness` target): lufsShort for a clip shorter than 400 ms, lufs from
+    // 800 ms, and between the two a blend in dB weighted by the duration, so
+    // it is continuous in the clip's length. NaN when both are.
+    double loudness = NAN;
 
     // Spectrum, of the energy-weighted long-term average power spectrum.
     double centroidHz = 0;
@@ -158,7 +174,10 @@ struct CompareOptions {
 };
 
 // compare(): both clips are brought to the lower of their two sample rates,
-// loudness-normalised (each to -23 LUFS, or by RMS when LUFS is undefined),
+// loudness-normalised (each to -23 on one scale for both: the
+// Measurement::loudness blend of lufsShort and lufs weighted by the *shorter*
+// clip's duration, so when either clip is under 400 ms both are judged by
+// lufsShort, and from 800 ms by lufs; or by RMS when that is undefined),
 // and onset-aligned; lengths may differ (the missing part of the shorter one
 // counts as silence). Components are dimensionless, ~0 for a match and ~1 for
 // "very different" (they can exceed 1).
@@ -170,7 +189,9 @@ struct Comparison {
 
     int sampleRate = 0;         // the rate the comparison ran at
     double offsetTime = 0;      // how much later the clip starts than the reference (s)
-    double loudnessDiffDb = 0;  // clip LUFS - reference LUFS (before normalisation; RMS when LUFS is undefined)
+    double loudnessDiffDb = 0;  // clip loudness - reference loudness (before normalisation; RMS when undefined)
+    std::string loudnessScale = "lufs";  // what loudnessDiffDb and the normalisation used: "lufs" (both clips 800 ms
+                                         // or longer), "lufsShort" (either under 400 ms), "blend" (between) or "rms"
     double envelopeDb = 0;      // mean |difference| of the peak-relative envelopes, floored at -60 dB, over frames either is above the floor
     double spectrogramDb = 0;   // mean |difference| of 40-band mel spectrograms (dB, floored 80 dB under the louder), over frames either is within 60 dB of its peak
     double ltasDb = 0;          // mean |difference| of the 40-band long-term spectra, each normalised to its total power

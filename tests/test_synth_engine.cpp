@@ -152,6 +152,93 @@ TEST(a_synth_playback_behaves_like_a_clip_playback)
     PASS();
 }
 
+TEST(a_looping_voice_is_the_offline_loop_in_the_engine)
+{
+    // The source stage (compiled batch and interpreted chain) plays the
+    // offline loop period after period.
+    VoiceJitCache cache;
+    const bool jit = voiceJitBackendAvailable() && cache.compileAllSync() > 0;
+    constexpr int kSr = 44100;
+    auto g = SynthGraph::fromJson(R"({"nodes": {
+        "o":  {"type": "osc", "wave": "saw", "freq": 97, "gain": "e"},
+        "t":  {"type": "impulses", "shape": "hann", "rate": 11, "length": 0.02, "jitter": 0.3},
+        "n":  {"type": "noise", "color": "pink"},
+        "tn": {"type": "mul", "a": "n", "b": "t", "gain": 0.5},
+        "m":  {"type": "mix", "inputs": ["o", "tn"]},
+        "e":  {"type": "env", "attack": 0.02, "decay": 0.1, "sustain": 0.7, "release": 0.2},
+        "lp": {"type": "filter", "input": "m", "cutoff": 1500, "q": 1.5}}, "output": "lp"})");
+    SynthLoopOptions loop;
+    loop.length = 0.3;
+    loop.crossfade = 0.04;
+    SynthRenderOptions o;
+    o.sampleRate = kSr;
+    o.trigger.seed = 8;
+    o.loop = loop;
+    const std::vector<float> offline = renderSynth(g, o);
+    ASSERT_EQ(static_cast<int>(offline.size()), static_cast<int>(0.3 * kSr + 0.5));
+
+    SynthVoice va(g, kSr, o.trigger, loop), vb(g, kSr, o.trigger, loop);
+    VoiceChainState sa, sb;
+    for (VoiceChainState* s : {&sa, &sb}) {
+        s->gain.init(kSr); s->distanceGain.init(kSr); s->pan.init(kSr); s->send.init(kSr);
+        s->gain.snap(1.0f);
+    }
+    std::vector<float> outA, outB, bus(2 * 512), work(2 * kAirLanes * 512), lanes(kAirLanes * 512), traj(4 * 512);
+    const int sizes[] = {128, 64, 441, 1, 300};
+    for (int b = 0; outA.size() < 4 * offline.size(); b++) {
+        const int n = sizes[b % 5];
+        VoiceChainParams P;
+        P.stages = kStageSource;
+        P.bus = bus.data();
+        P.sourceFrom = 0;
+        P.sourceTo = n;
+        P.source = &va;
+        VoiceJitJob job;
+        job.p = &P;
+        job.s = &sa;
+        job.ch[0] = work.data();
+        job.ch[1] = work.data() + 512;
+        if (jit) runVoiceBatch(cache, &job, 1, VoiceJitScratch{lanes.data(), traj.data(), 512}, n);
+        else runVoiceChain(P, sa, job.ch, traj.data(), traj.data() + 512, n);
+        outA.insert(outA.end(), work.begin(), work.begin() + n);
+        P.source = &vb;
+        float* ch[2] = {work.data(), work.data() + 512};
+        runVoiceChain(P, sb, ch, traj.data(), traj.data() + 512, n);
+        outB.insert(outB.end(), work.begin(), work.begin() + n);
+    }
+    for (size_t i = 0; i < outA.size(); i++) {
+        ASSERT_TRUE(std::memcmp(&outA[i], &offline[i % offline.size()], sizeof(float)) == 0);
+        ASSERT_TRUE(std::memcmp(&outB[i], &offline[i % offline.size()], sizeof(float)) == 0);
+    }
+
+    // Through the engine: periodic until releaseSynth, then it ends.
+    Engine e;
+    ASSERT_TRUE(e.initHeadless());
+    e.setMasterGain(0.25f);
+    const int sr = e.sampleRate();
+    Engine::SynthPlayOptions po;
+    po.trigger.seed = 8;
+    po.loop = loop;
+    const int pb = e.playSynth(g, po);
+    const int period = static_cast<int>(std::llround(0.3 * sr));
+    auto rec = dtest::record(e, period * 5, 512);
+    ASSERT_TRUE(e.getPlaybackState(pb) == Engine::PlaybackState::Playing);
+    ASSERT_GT(dtest::rms(rec, 0, static_cast<int>(rec.size())), 1e-3);
+    // Periods 3 and 4 (gains long settled) are the same samples.
+    std::vector<float> p3(rec.begin() + 2 * 3 * period, rec.begin() + 2 * 4 * period);
+    std::vector<float> p4(rec.begin() + 2 * 4 * period, rec.begin() + 2 * 5 * period);
+    ASSERT_TRUE(sameBits(p3, p4));
+    e.releaseSynth(pb);
+    int frames = 0;
+    while (e.getPlaybackState(pb) == Engine::PlaybackState::Playing && frames < sr * 3) {
+        e.renderBlock(512);
+        frames += 512;
+    }
+    ASSERT_TRUE(frames > sr / 10 && frames < sr);   // the 0.2 s release, not the loop
+    e.shutdown();
+    PASS();
+}
+
 namespace {
 
 // Synth voices of every kind: spatial ones with air, delay and a send,

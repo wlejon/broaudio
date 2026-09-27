@@ -61,7 +61,8 @@ struct SynthParamInfo {
 };
 
 struct SynthGraphData;   // src/synth/synth_plan.h
-struct SynthVoiceData;
+struct SynthVoiceData;   // src/synth/synth_voice_data.h
+struct SynthLoopData;
 
 // What makes one trigger of a graph: the seed of its jitter and noise, and
 // overrides of declared parameter values (applied before jitter).
@@ -69,6 +70,46 @@ struct SynthTrigger {
     uint32_t seed = 0;
     bool jitter = true;                               // false: every u is 0
     std::vector<std::pair<int, float>> overrides;     // (param index, value)
+};
+
+// A seamless loop cut from a voice (renderSynth with `loop`, or a looping
+// SynthVoice / Engine::playSynth with `loop`).
+//
+// The voice is rendered past `start` (the warm-up: the attack is over and
+// filters, resonators and combs have settled) for length + crossfade frames,
+// with no end: `duration`, the end of the envelopes and the silence floor
+// are ignored. Loop sample i is voice sample start + i, except the first
+// `crossfade` frames, where the voice's continuation past the loop's end
+// (start + length + i) fades out as the start fades in. So the seam is the
+// voice itself: the sample after the loop's last one is the next sample the
+// voice produced, with every filter, resonator and comb state carried across
+// it, and the blend sits inside the loop where both halves are the same
+// sound.
+//
+// `snap` moves every periodic rate onto a whole number of cycles over the
+// loop (at least one): constant oscillator and FM carrier frequencies (the
+// FM ratio follows so the modulator is whole too) and constant impulse
+// rates. A frequency that is a signal (a sweep, a mix) is not snapped. The
+// voice's values() report the snapped numbers.
+enum class SynthLoopCurve : uint8_t {
+    Auto,     // equal power, corrected for the halves' correlation (r = 1: equal gain)
+    Power,    // equal power (uncorrelated halves: noise)
+    Linear,   // equal gain (identical halves: snapped, settled tones)
+};
+
+struct SynthLoopOptions {
+    double length = 0.0;       // seconds; > 0 makes a loop (at most 60 s)
+    double crossfade = 0.05;   // seconds, clamped to [0, length / 2]
+    double start = 0.25;       // seconds of the voice before the loop
+    bool snap = true;
+    SynthLoopCurve curve = SynthLoopCurve::Auto;
+    // A looping voice's note-off: the loop crossfades (equal power, this
+    // long) into the voice's natural release, rendered from the loop's seam
+    // with its envelopes released. A graph without an amplitude envelope has
+    // no release: the loop fades out over this time instead.
+    double releaseFade = 0.02;
+
+    bool enabled() const noexcept { return length > 0.0; }
 };
 
 class SynthGraph {
@@ -115,6 +156,13 @@ private:
 class SynthVoice {
 public:
     SynthVoice(std::shared_ptr<const SynthGraph> graph, int sampleRate, const SynthTrigger& trigger);
+    // A looping voice (`loop.enabled()`; otherwise the voice above). The loop
+    // and its release tail are rendered here, on the calling thread, through
+    // the published kernels when `compiled` (the samples are the same
+    // either way); render() then plays the loop over and over until
+    // release(), crossfades into the tail and finishes when the tail ends.
+    SynthVoice(std::shared_ptr<const SynthGraph> graph, int sampleRate, const SynthTrigger& trigger,
+               const SynthLoopOptions& loop, bool compiled = true);
     ~SynthVoice();
     SynthVoice(const SynthVoice&) = delete;
     SynthVoice& operator=(const SynthVoice&) = delete;
@@ -142,24 +190,35 @@ public:
     const std::vector<float>& values() const noexcept;
     const SynthGraph& graph() const noexcept { return *graph_; }
 
+    bool looping() const noexcept { return loop_ != nullptr; }
+    // A looping voice's loop (one period, what renderSynth with `loop`
+    // returns) and its release tail; empty for a voice that does not loop.
+    const std::vector<float>& loopSamples() const noexcept;
+    const std::vector<float>& releaseTail() const noexcept;
+
 private:
+    bool renderLoop(float* out, int n);
+
     std::shared_ptr<const SynthGraph> graph_;
     std::unique_ptr<SynthVoiceData> d_;
+    std::unique_ptr<SynthLoopData> loop_;
     std::atomic<bool> releaseRequested_{false};
 };
 
 struct SynthRenderOptions {
     int sampleRate = 48000;
     SynthTrigger trigger;
-    double maxSeconds = 10.0;   // a voice that never finishes is cut here
+    double maxSeconds = 10.0;   // a voice that never finishes is cut here (not a loop)
     bool compiled = true;       // compile the kernels (blocking, first time) and use them
     int blockSize = 1024;       // any size gives the same samples
+    SynthLoopOptions loop;      // enabled: the result is one period of the loop
 };
 
 // Renders one trigger of `graph` offline: mono samples up to the voice's end
-// (or maxSeconds). Deterministic, and bit-identical to the voice in the
-// engine before its distance chain. Thread-safe: any number of renders of
-// one graph may run at once.
+// (or maxSeconds), or with `loop` one period of the loop. Deterministic, and
+// bit-identical to the voice in the engine before its distance chain (a
+// looping voice plays exactly these samples, period after period). Thread-
+// safe: any number of renders of one graph may run at once.
 std::vector<float> renderSynth(const std::shared_ptr<const SynthGraph>& graph,
                                const SynthRenderOptions& options);
 

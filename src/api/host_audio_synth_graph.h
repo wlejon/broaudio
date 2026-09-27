@@ -6,12 +6,22 @@
 #include "object_builder.h"
 
 #include <memory>
+#include <string>
 
 namespace broaudio {
 class SynthGraph;
+struct SynthLoopOptions;
 }
 
 namespace broaudio::api {
+
+// A `loop` option ({length, crossfade, start, snap, curve, releaseFade}) into
+// `out`. Returns "" when it is valid, else the message (starting with
+// "loop" and the field), with `range` set for a number out of range; the
+// caller throws it with its own prefix.
+std::string readSynthLoopOptions(Value v, SynthLoopOptions& out, bool& range);
+// The object readSynthLoopOptions reads back to `o`.
+Value synthLoopOptionsValue(const SynthLoopOptions& o);
 
 // The graph a SynthGraph argument names: an instance, or a description
 // (a plain object or its JSON) parsed on the spot; a bad description throws

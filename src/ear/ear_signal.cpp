@@ -159,11 +159,9 @@ void kWeighting(int fs, Biquad& shelf, Biquad& hp) {
     hp = {1.0, -2.0, 1.0, 2.0 * (K * K - 1.0) / a0, (1.0 - K / Q + K * K) / a0};
 }
 
-} // namespace
-
-double integratedLufs(const Clip& clip) {
+// Prefix sums of the K-weighted signal's squares.
+std::vector<double> kWeightedEnergy(const Clip& clip) {
     const size_t n = clip.samples.size();
-    if (n == 0 || clip.sampleRate <= 0) return NAN;
     Biquad shelf{}, hp{};
     kWeighting(clip.sampleRate, shelf, hp);
     std::vector<double> prefix(n + 1, 0.0);
@@ -171,8 +169,17 @@ double integratedLufs(const Clip& clip) {
         const double y = hp.run(shelf.run(clip.samples[i]));
         prefix[i + 1] = prefix[i] + y * y;
     }
-    const size_t blockLen = static_cast<size_t>(std::lround(clip.sampleRate * 0.4));
-    const size_t step = std::max<size_t>(1, static_cast<size_t>(std::lround(clip.sampleRate * 0.1)));
+    return prefix;
+}
+
+double lufsOfMeanSquare(double ms) { return -0.691 + 10.0 * std::log10(ms); }
+const double kAbsGate = std::pow(10.0, (-70.0 + 0.691) / 10.0);
+
+// BS.1770-4 integrated loudness: 400 ms blocks every 100 ms, gated.
+double integratedFromPrefix(const std::vector<double>& prefix, int sampleRate) {
+    const size_t n = prefix.size() - 1;
+    const size_t blockLen = static_cast<size_t>(std::lround(sampleRate * 0.4));
+    const size_t step = std::max<size_t>(1, static_cast<size_t>(std::lround(sampleRate * 0.1)));
     std::vector<double> z;
     if (n < blockLen) {
         z.push_back(prefix[n] / static_cast<double>(n));
@@ -181,22 +188,60 @@ double integratedLufs(const Clip& clip) {
             z.push_back((prefix[start + blockLen] - prefix[start]) / static_cast<double>(blockLen));
         }
     }
-    auto loud = [](double ms) { return -0.691 + 10.0 * std::log10(ms); };
-    const double absGate = std::pow(10.0, (-70.0 + 0.691) / 10.0);
     double sum = 0.0;
     int count = 0;
     for (double v : z) {
-        if (v > absGate) { sum += v; ++count; }
+        if (v > kAbsGate) { sum += v; ++count; }
     }
     if (count == 0) return NAN;
-    const double relGate = std::pow(10.0, (loud(sum / count) - 10.0 + 0.691) / 10.0);
+    const double relGate = std::pow(10.0, (lufsOfMeanSquare(sum / count) - 10.0 + 0.691) / 10.0);
     double sum2 = 0.0;
     int count2 = 0;
     for (double v : z) {
-        if (v > absGate && v > relGate) { sum2 += v; ++count2; }
+        if (v > kAbsGate && v > relGate) { sum2 += v; ++count2; }
     }
     if (count2 == 0) return NAN;
-    return loud(sum2 / count2);
+    return lufsOfMeanSquare(sum2 / count2);
+}
+
+// The loudest 100 ms window (a shorter clip zero-padded to one window).
+double shortFromPrefix(const std::vector<double>& prefix, int sampleRate) {
+    const size_t n = prefix.size() - 1;
+    const size_t win = std::max<size_t>(1, static_cast<size_t>(std::lround(sampleRate * 0.1)));
+    double best = 0.0;
+    if (n <= win) {
+        best = prefix[n];
+    } else {
+        for (size_t s = 0; s + win <= n; ++s) best = std::max(best, prefix[s + win] - prefix[s]);
+    }
+    const double ms = best / static_cast<double>(win);
+    return ms > kAbsGate ? lufsOfMeanSquare(ms) : NAN;
+}
+
+} // namespace
+
+double loudnessLufsWeight(double duration) { return std::clamp((duration - 0.4) / 0.4, 0.0, 1.0); }
+
+double Loudness::at(double d) const {
+    const double w = loudnessLufsWeight(d);
+    if (std::isnan(lufs) || w <= 0.0) return w >= 1.0 ? lufs : lufsShort;
+    if (std::isnan(lufsShort) || w >= 1.0) return lufs;
+    return (1.0 - w) * lufsShort + w * lufs;
+}
+
+Loudness clipLoudness(const Clip& clip) {
+    Loudness l;
+    l.duration = clip.duration();
+    if (clip.samples.empty() || clip.sampleRate <= 0) return l;
+    const std::vector<double> prefix = kWeightedEnergy(clip);
+    l.lufs = integratedFromPrefix(prefix, clip.sampleRate);
+    l.lufsShort = shortFromPrefix(prefix, clip.sampleRate);
+    return l;
+}
+
+double integratedLufs(const Clip& clip) {
+    if (clip.samples.empty() || clip.sampleRate <= 0) return NAN;
+    return integratedFromPrefix(kWeightedEnergy(clip), clip.sampleRate);
 }
 
 double spectralCentroid(const double* power, int bins, double binHz) {

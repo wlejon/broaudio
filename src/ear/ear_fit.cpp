@@ -272,6 +272,7 @@ FitResult fit(const std::shared_ptr<const SynthGraph>& graph, const FitOptions& 
             ro.sampleRate = r.sampleRate;
             ro.maxSeconds = maxDuration;
             ro.compiled = o.compiled;
+            ro.loop = o.loop;
             ro.trigger.seed = o.seeds[s];
             ro.trigger.jitter = o.jitter;
             ro.trigger.overrides = overridesFor(xs[k], nullptr);

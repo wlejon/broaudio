@@ -53,6 +53,8 @@ set(BROAUDIO_TESTS
     test_voice_jit
     test_voice_jit_cost
     test_synth_graph
+    test_synth_impulses
+    test_synth_loop
     test_synth_engine
     test_synth_graph_cost
 )

@@ -327,7 +327,10 @@ Measurement measure(const Clip& clip, const MeasureOptions& opts) {
     m.peakDb = ampDb(peak);
     m.peakTime = static_cast<double>(peakI) / clip.sampleRate;
     m.rmsDb = powerDb(ss / static_cast<double>(clip.samples.size()));
-    m.lufs = integratedLufs(clip);
+    const Loudness loud = clipLoudness(clip);
+    m.lufs = loud.lufs;
+    m.lufsShort = loud.lufsShort;
+    m.loudness = loud.loudness();
 
     const Envelope env = computeEnvelope(clip);
     measureTiming(clip, env, opts, m);

@@ -190,6 +190,13 @@ static void test_graph_script() {
             ctx.setBusGain(bus, 0.5);
             ctx.deleteBus(bus);
 
+            if (!ctx.isVoiceJitEnabled()) throw new Error("voice JIT should be enabled by default");
+            ctx.setVoiceJitEnabled(false);
+            if (ctx.isVoiceJitEnabled()) throw new Error("voice JIT should be off after setVoiceJitEnabled(false)");
+            ctx.setVoiceJitEnabled(true);
+            if (typeof ctx.isVoiceJitAvailable() !== "boolean") throw new Error("isVoiceJitAvailable not boolean");
+            if (ctx.getVoiceJitActiveVoices() !== 0) throw new Error("no voice has been mixed yet");
+
             const buf = new AudioBuffer({ length: 64, numberOfChannels: 2, sampleRate: 48000 });
             if (buf.length !== 64 || buf.numberOfChannels !== 2) throw new Error("AudioBuffer shape");
             const src = ctx.createBufferSource();

@@ -12,7 +12,7 @@ namespace broaudio {
 
 void Engine::initDistanceState(int maxFrames)
 {
-    chainScratch_.assign(static_cast<size_t>(maxFrames) * 4, 0.0f);
+    chainScratch_.assign(static_cast<size_t>(maxFrames) * kVoiceBatchPlanes, 0.0f);
 }
 
 void Engine::ensureAirTable()

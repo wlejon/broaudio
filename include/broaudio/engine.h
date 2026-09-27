@@ -17,6 +17,7 @@
 #include "broaudio/mic_tap.h"
 #include "broaudio/spatial/listener.h"
 #include "broaudio/spatial/air_absorption.h"
+#include "broaudio/spatial/voice_jit.h"
 #include "broaudio/io/audio_file.h"
 #include "broaudio/io/serialization.h"
 #include "broaudio/dsp/jit/jit_compiler.h"
@@ -671,6 +672,24 @@ public:
     float spatialMaxPropagationDelay() const { return maxPropagationDelay_.load(std::memory_order_relaxed); }
     void setPlaybackSpatialPropagationDelay(int instanceId, bool enabled);
 
+    // Compiled voice chains (spatial/voice_jit.h). Each playback's per-voice
+    // chain runs through a brass kernel shared by every voice of its shape
+    // once that kernel is compiled (off the audio thread, requested the first
+    // time the mixer meets the shape), and interpreted until then or when the
+    // build has no brass backend. Both paths produce identical samples.
+    //  setVoiceJitEnabled: default on; off forces the interpreted chain (A/B).
+    //  isVoiceJitAvailable: the build can compile kernels at all.
+    //  voiceJitActiveVoices: voices the last mixed block ran compiled.
+    //  precompileVoiceJit: compile and publish every shape now, blocking
+    //    (tens of ms per shape the process has not compiled before; kernels
+    //    are shared by all engines). Returns the number published. Optional:
+    //    for deterministic offline renders, benches and tests.
+    void setVoiceJitEnabled(bool enabled) { voiceJitEnabled_.store(enabled, std::memory_order_relaxed); }
+    bool isVoiceJitEnabled() const { return voiceJitEnabled_.load(std::memory_order_relaxed); }
+    bool isVoiceJitAvailable() const { return voiceJitBackendAvailable(); }
+    int voiceJitActiveVoices() const { return voiceJitVoices_.load(std::memory_order_relaxed); }
+    int precompileVoiceJit() { return voiceJit_.compileAllSync(); }
+
     // --- Audio file I/O ---
 
     // Create a clip by loading an audio file (WAV, FLAC, MP3, Ogg Vorbis;
@@ -839,6 +858,10 @@ private:
     // Planar source scratch (2 x MAX) and the chain's stereo scratch (2 x MAX),
     // pre-sized at init; audio thread only.
     std::vector<float> chainScratch_;
+    // Compiled voice chains: per-shape kernel slots + their compile worker.
+    VoiceJitCache voiceJit_;
+    std::atomic<bool> voiceJitEnabled_{true};
+    std::atomic<int> voiceJitVoices_{0};
 
     SDL_AudioStream* stream_ = nullptr;
     SDL_AudioStream* micStream_ = nullptr;

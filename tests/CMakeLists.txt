@@ -49,6 +49,8 @@ set(BROAUDIO_TESTS
     test_param_ramps
     test_partitioned_convolver
     test_spatial_chain_cost
+    test_voice_jit
+    test_voice_jit_cost
 )
 
 foreach(test ${BROAUDIO_TESTS})

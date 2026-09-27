@@ -46,16 +46,72 @@ void Engine::mixPlaybacks(int numFrames, const BusList& buses)
     // reference, so this copy never frees the table on the audio thread.
     const std::shared_ptr<const AirFilterTable> air = airTable_.load();
 
-    const size_t stride = static_cast<size_t>(chainScratch_.size() / 4);
-    float* srcL = chainScratch_.data();
-    float* srcR = srcL + stride;
-    float* outL = srcR + stride;
-    float* outR = outL + stride;
+    // Scratch (initDistanceState): each batched voice's two source planes, the
+    // air lane block and the trajectory / L-R planes.
+    const size_t stride = chainScratch_.size() / kVoiceBatchPlanes;
+    float* const scratch = chainScratch_.data();
+    VoiceJitScratch jitScratch;
+    jitScratch.lanes = scratch + 2 * kAirLanes * stride;
+    jitScratch.traj = jitScratch.lanes + kAirLanes * stride;
+    jitScratch.maxFrames = static_cast<int>(stride);
 
     float* masterBuf = nullptr;
     for (auto& bus : buses) {
         if (bus->id == MASTER_BUS_ID) { masterBuf = bus->buffer.data(); break; }
     }
+
+    // Compiled chains (spatial/voice_jit.h): voices are prepared (spatializer
+    // and source) into a batch of up to kAirLanes, which runs in playback
+    // order through the compiled kernels where they are published and the
+    // interpreted stages where not; same samples either way. Interpreted only,
+    // a batch is one voice.
+    const bool jitOn = voiceJitEnabled_.load(std::memory_order_relaxed);
+    int jitVoices = 0;
+
+    struct Pending {
+        ClipPlayback* pb;
+        VoiceChainParams P;
+        bool ended, delayOn, wasPrimed;
+        float delayBefore;
+    };
+    Pending pending[kAirLanes];
+    VoiceJitJob jobs[kAirLanes];
+    int count = 0, lanes = 0;
+
+    auto flush = [&]() {
+        if (count == 0) return;
+        if (jitOn) {
+            jitVoices += runVoiceBatch(voiceJit_, jobs, count, jitScratch, numFrames);
+        } else {
+            for (int j = 0; j < count; ++j)
+                runVoiceChain(*jobs[j].p, *jobs[j].s, jobs[j].ch, jitScratch.traj,
+                              jitScratch.traj + stride, numFrames);
+        }
+        for (int j = 0; j < count; ++j) {
+            Pending& q = pending[j];
+            ClipPlayback& pb = *q.pb;
+            if (q.delayOn) {
+                // The delay line's effective pitch ratio over the block.
+                const float dd = q.wasPrimed ? pb.chain.delayOut - q.delayBefore : 0.0f;
+                pb.spatial.lastDopplerRatio.store(std::clamp(1.0f - dd / static_cast<float>(numFrames), 0.5f, 2.0f),
+                                                  std::memory_order_relaxed);
+            }
+            // --- End of a one-shot: drain the delayed tail, then finish ---
+            if (q.ended && !pb.sourceEnded) {
+                if (q.delayOn) {
+                    pb.sourceEnded = true;
+                    pb.tailRemaining = static_cast<int>(std::ceil(pb.chain.delayOut)) + 8;
+                } else {
+                    deactivate(pb);
+                }
+            } else if (pb.sourceEnded) {
+                pb.tailRemaining -= numFrames;
+                if (pb.tailRemaining <= 0 || !q.delayOn) deactivate(pb);
+            }
+        }
+        count = 0;
+        lanes = 0;
+    };
 
     for (auto& pbPtr : *currentPlaybacks) {
         ClipPlayback& pb = *pbPtr;
@@ -131,6 +187,12 @@ void Engine::mixPlaybacks(int numFrames, const BusList& buses)
             if (P.send) P.stages |= kStageSend;
         }
 
+        // --- Batch slot ---
+        const int needLanes = voiceJitAirLanes(P);
+        if (count == kAirLanes || lanes + needLanes > kAirLanes) flush();
+        float* srcL = scratch + static_cast<size_t>(2 * count) * stride;
+        float* srcR = srcL + stride;
+
         // --- Source stage ---
         bool ended = false;
         if (pb.sourceEnded) {
@@ -142,32 +204,25 @@ void Engine::mixPlaybacks(int numFrames, const BusList& buses)
             ended = sourceClip(&pb, clip, rate, numFrames, blockStart, srcL, srcR);
         }
 
-        // --- Chain ---
-        const bool delayOn = (P.stages & kStageDelay) != 0;
-        const bool wasPrimed = pb.chain.delayPrimed && pb.chain.delayBufSeen == P.delayBuf;
-        const float delayBefore = pb.chain.delayOut;
-        float* ch[2] = {srcL, srcR};
-        runVoiceChain(P, pb.chain, ch, outL, outR, numFrames);
-        if (delayOn) {
-            // The delay line's effective pitch ratio over the block.
-            const float dd = wasPrimed ? pb.chain.delayOut - delayBefore : 0.0f;
-            pb.spatial.lastDopplerRatio.store(std::clamp(1.0f - dd / static_cast<float>(numFrames), 0.5f, 2.0f),
-                                              std::memory_order_relaxed);
-        }
-
-        // --- End of a one-shot: drain the delayed tail, then finish ---
-        if (ended && !pb.sourceEnded) {
-            if (delayOn) {
-                pb.sourceEnded = true;
-                pb.tailRemaining = static_cast<int>(std::ceil(pb.chain.delayOut)) + 8;
-            } else {
-                deactivate(pb);
-            }
-        } else if (pb.sourceEnded) {
-            pb.tailRemaining -= numFrames;
-            if (pb.tailRemaining <= 0 || !delayOn) deactivate(pb);
-        }
+        // --- Chain (run when the batch flushes) ---
+        Pending& q = pending[count];
+        q.pb = &pb;
+        q.P = P;
+        q.ended = ended;
+        q.delayOn = (P.stages & kStageDelay) != 0;
+        q.wasPrimed = pb.chain.delayPrimed && pb.chain.delayBufSeen == P.delayBuf;
+        q.delayBefore = pb.chain.delayOut;
+        VoiceJitJob& job = jobs[count];
+        job.p = &q.P;
+        job.s = &pb.chain;
+        job.ch[0] = srcL;
+        job.ch[1] = srcR;
+        ++count;
+        lanes += needLanes;
+        if (!jitOn) flush();
     }
+    flush();
+    voiceJitVoices_.store(jitVoices, std::memory_order_relaxed);
 }
 
 bool Engine::sourceClip(ClipPlayback* pb, AudioClip* clip, float rate, int numFrames,

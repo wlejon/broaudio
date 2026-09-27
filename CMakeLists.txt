@@ -138,6 +138,8 @@ add_library(broaudio STATIC
     src/dsp/reverb.cpp
     src/spatial/air_absorption.cpp
     src/spatial/spatial_chain.cpp
+    src/spatial/voice_jit.cpp
+    src/spatial/voice_jit_builder.cpp
     src/synth/oscillator.cpp
     src/synth/modulation.cpp
     src/synth/voice.cpp
@@ -151,6 +153,12 @@ add_library(broaudio STATIC
     src/io/audio_stream.cpp
     src/io/serialization.cpp
     src/engine.cpp
+    src/engine_buses.cpp
+    src/engine_bus_params.cpp
+    src/engine_voices.cpp
+    src/engine_capture.cpp
+    src/engine_clips.cpp
+    src/engine_presets.cpp
     src/engine_bus_fx.cpp
     src/engine_distance.cpp
     src/engine_playback_mix.cpp
@@ -220,8 +228,9 @@ target_include_directories(broaudio PRIVATE
 
 if(MSVC)
     target_compile_options(broaudio PRIVATE /MP /permissive- /utf-8)
-    # Work around MSVC ICE in Release with /O2 on engine.cpp
-    set_source_files_properties(src/engine.cpp PROPERTIES
+    # Work around MSVC ICE in Release with /O2 on engine.cpp. The mic-capture
+    # code split out into engine_capture.cpp still trips it at /O2.
+    set_source_files_properties(src/engine.cpp src/engine_capture.cpp PROPERTIES
         COMPILE_FLAGS "$<$<NOT:$<CONFIG:Debug>>:/O1>")
 endif()
 

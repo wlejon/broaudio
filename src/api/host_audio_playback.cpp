@@ -191,6 +191,30 @@ void registerAudioContextPlayback(ObjectBuilder& b) {
         return ev::undefined();
     });
 
+    // ---- Compiled voice chains ---------------------------------------------
+    // The per-voice chain runs as a brass kernel once its shape is compiled;
+    // same samples either way. Off forces the interpreted chain (A/B).
+    b.def("setVoiceJitEnabled", 1, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && !a.empty()) e->setVoiceJitEnabled(boolAt(a, 0));
+        return ev::undefined();
+    });
+
+    b.def("isVoiceJitEnabled", 0, [](Value, std::span<const Value>) {
+        auto* e = getAudioEngine();
+        return ev::fromBool(e ? e->isVoiceJitEnabled() : false);
+    });
+
+    b.def("isVoiceJitAvailable", 0, [](Value, std::span<const Value>) {
+        auto* e = getAudioEngine();
+        return ev::fromBool(e ? e->isVoiceJitAvailable() : false);
+    });
+
+    b.def("getVoiceJitActiveVoices", 0, [](Value, std::span<const Value>) {
+        auto* e = getAudioEngine();
+        return ev::fromDouble(e ? e->voiceJitActiveVoices() : 0);
+    });
+
     // ---- Streams -----------------------------------------------------------
     // createStream(channels = 1, ringFrames = 0) -> playbackId for a live PCM
     // source. ringFrames 0 lets the engine pick (~2 s at the engine rate).

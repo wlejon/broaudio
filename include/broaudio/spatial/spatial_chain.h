@@ -16,9 +16,11 @@ namespace broaudio {
 //
 // The spatializer (Engine, once per block per playback) fills a plain
 // VoiceChainParams; runVoiceChain walks the stages the `stages` mask names.
-// The mask is the chain's shape: a JIT kernel per shape, shared by every voice
-// of that shape, can take VoiceChainParams + VoiceChainState as its params
-// and state and replace runVoiceChain wholesale.
+// The mask is the chain's shape: compiled kernels (spatial/voice_jit.h), an
+// air kernel over batches of voices and a chain kernel per shape for the
+// stages after it, read and write VoiceChainState in place and replace
+// runVoiceChain bit for bit. A change to any stage below must be mirrored in
+// src/spatial/voice_jit_builder.cpp.
 //
 // The source stage slot is reserved: today the mixer's clip and stream readers
 // fill the input buffers before the chain runs; a generator or per-voice

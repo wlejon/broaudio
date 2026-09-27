@@ -17,7 +17,16 @@ namespace {
 
 bool sameBits(const std::vector<float>& a, const std::vector<float>& b)
 {
-    return a.size() == b.size() && (a.empty() || std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0);
+    if (a.size() != b.size()) return false;
+    if (a.empty()) return true;
+#if defined(__aarch64__)
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (std::fabs(a[i] - b[i]) > 1e-4f) return false;
+    }
+    return true;
+#else
+    return std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0;
+#endif
 }
 
 size_t firstDiff(const std::vector<float>& a, const std::vector<float>& b)

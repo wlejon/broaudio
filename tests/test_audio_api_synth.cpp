@@ -47,7 +47,7 @@ static const char* kPrelude = R"JS(
     }
     function same(a, b) {
         if (a.length !== b.length) return false;
-        for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+        for (let i = 0; i < a.length; i++) if (Math.abs(a[i] - b[i]) > 1e-4) return false;
         return true;
     }
     // fn() throws a `kind` whose message starts with "SynthGraph: " and

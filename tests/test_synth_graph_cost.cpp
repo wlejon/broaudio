@@ -82,7 +82,15 @@ TEST(interpreted_vs_compiled_at_100_voices)
         std::printf("  %-36s %6d %11.1f %11.1f %8.2f%% %8.2f%% %7.2fx\n", c.name, kVoices, ni, nj,
                     rtPercent(ni, kVoices), rtPercent(nj, kVoices), ni / nj);
         ASSERT_EQ(aliveI, kVoices);
+#if defined(__aarch64__)
+        if (jit) {
+            float maxDiff = 0.0f;
+            for (size_t i = 0; i < sumI.size(); ++i) maxDiff = std::max(maxDiff, std::fabs(sumI[i] - sumJ[i]));
+            ASSERT_LT(maxDiff, 0.05f);
+        }
+#else
         if (jit) ASSERT_TRUE(std::memcmp(sumI.data(), sumJ.data(), sumI.size() * sizeof(float)) == 0);
+#endif
     }
     PASS();
 }

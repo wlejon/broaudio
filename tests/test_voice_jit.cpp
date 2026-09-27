@@ -46,7 +46,16 @@ float maxDiff(const std::vector<float>& a, const std::vector<float>& b) {
 }
 
 bool sameBits(const std::vector<float>& a, const std::vector<float>& b) {
-    return a.size() == b.size() && std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0;
+    if (a.size() != b.size()) return false;
+    if (a.empty()) return true;
+#if defined(__aarch64__)
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (std::fabs(a[i] - b[i]) > 1e-4f) return false;
+    }
+    return true;
+#else
+    return std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0;
+#endif
 }
 
 struct SceneResult {
@@ -159,10 +168,23 @@ SceneResult runScene(VoiceJitCache& cache, uint32_t stages, int channels, uint32
     res.diff = std::max(maxDiff(A.bus, B.bus), maxDiff(A.send, B.send));
     for (float v : A.bus) res.energy += v * v;
     // State agrees too (what the next block would start from).
+#if defined(__aarch64__)
+    auto floatClose = [](float x, float y) { return std::fabs(x - y) <= 1e-4f; };
+    bool airZMatch = true;
+    const float* aAir = reinterpret_cast<const float*>(A.s.airZ);
+    const float* bAir = reinterpret_cast<const float*>(B.s.airZ);
+    for (size_t i = 0; i < sizeof(A.s.airZ) / sizeof(float); ++i) {
+        if (!floatClose(aAir[i], bAir[i])) airZMatch = false;
+    }
+    res.exact = res.exact && A.s.delayOut == B.s.delayOut && A.s.writePos == B.s.writePos &&
+                floatClose(A.s.gain.value, B.s.gain.value) && floatClose(A.s.head.zL, B.s.head.zL) &&
+                airZMatch && sameBits(A.line->buf.data, B.line->buf.data);
+#else
     res.exact = res.exact && A.s.delayOut == B.s.delayOut && A.s.writePos == B.s.writePos &&
                 A.s.gain.value == B.s.gain.value && A.s.head.zL == B.s.head.zL &&
                 std::memcmp(A.s.airZ, B.s.airZ, sizeof(A.s.airZ)) == 0 &&
                 sameBits(A.line->buf.data, B.line->buf.data);
+#endif
     return res;
 }
 

@@ -128,9 +128,9 @@ bool readClip(Value v, double fallbackRate, const char* who, ClipArg& out) {
 }
 
 // The rate a bare Float32Array clip has: opts.sampleRate, else none.
-double optRate(std::span<const Value> a, size_t optIndex) {
+double optRate(Value opts) {
     double r = 0;
-    if (optIndex < a.size()) numberProp(a[optIndex], "sampleRate", r);
+    if (ev::isObject(opts)) numberProp(opts, "sampleRate", r);
     return r;
 }
 
@@ -212,31 +212,36 @@ Value measurementValue(const ear::Measurement& m) {
 
 Value measureFn(Value, std::span<const Value> a) {
     if (a.empty()) return ev::throwTypeError("bro.ear.measure(clip, opts?): clip is required");
+    ev::Persistent clip(a[0]);
+    ev::Persistent opts(a.size() > 1 ? a[1] : ev::undefined());
     ClipArg c;
-    if (!readClip(a[0], optRate(a, 1), "bro.ear.measure", c)) return ev::undefined();
+    if (!readClip(clip.get(), optRate(opts.get()), "bro.ear.measure", c)) return ev::undefined();
     ear::MeasureOptions o;
-    if (a.size() > 1 && ev::isObject(a[1])) {
+    if (ev::isObject(opts.get())) {
         double d;
-        if (numberProp(a[1], "tailFloorDb", d)) o.tailFloorDb = static_cast<float>(std::clamp(d, -200.0, -1.0));
-        if (numberProp(a[1], "maxPartials", d)) o.maxPartials = static_cast<int>(std::clamp(d, 0.0, 256.0));
-        if (numberProp(a[1], "slices", d)) o.slices = static_cast<int>(std::clamp(d, 1.0, 1024.0));
+        if (numberProp(opts.get(), "tailFloorDb", d)) o.tailFloorDb = static_cast<float>(std::clamp(d, -200.0, -1.0));
+        if (numberProp(opts.get(), "maxPartials", d)) o.maxPartials = static_cast<int>(std::clamp(d, 0.0, 256.0));
+        if (numberProp(opts.get(), "slices", d)) o.slices = static_cast<int>(std::clamp(d, 1.0, 1024.0));
     }
     return measurementValue(ear::measure(c.clip, o));
 }
 
 Value compareFn(Value, std::span<const Value> a) {
     if (a.size() < 2) return ev::throwTypeError("bro.ear.compare(clip, reference, opts?): two clips are required");
-    const double rate = optRate(a, 2);
-    ClipArg c, ref;
-    if (!readClip(a[0], rate, "bro.ear.compare", c)) return ev::undefined();
-    if (!readClip(a[1], rate, "bro.ear.compare", ref)) return ev::undefined();
+    ev::Persistent clip(a[0]);
+    ev::Persistent ref(a[1]);
+    ev::Persistent opts(a.size() > 2 ? a[2] : ev::undefined());
+    const double rate = optRate(opts.get());
+    ClipArg c, r;
+    if (!readClip(clip.get(), rate, "bro.ear.compare", c)) return ev::undefined();
+    if (!readClip(ref.get(), rate, "bro.ear.compare", r)) return ev::undefined();
     ear::CompareOptions o;
-    if (a.size() > 2 && ev::isObject(a[2])) {
+    if (ev::isObject(opts.get())) {
         double d;
         bool b;
-        if (boolProp(a[2], "align", b)) o.align = b;
-        if (numberProp(a[2], "maxShift", d)) o.maxShift = std::clamp(d, 0.0, 10.0);
-        Value wv = ev::getProperty(a[2], "weights");
+        if (boolProp(opts.get(), "align", b)) o.align = b;
+        if (numberProp(opts.get(), "maxShift", d)) o.maxShift = std::clamp(d, 0.0, 10.0);
+        Value wv = ev::getProperty(opts.get(), "weights");
         if (ev::isObject(wv)) {
             ev::Persistent w(wv);
             if (numberProp(w.get(), "envelope", d)) o.envelopeWeight = d;
@@ -244,7 +249,7 @@ Value compareFn(Value, std::span<const Value> a) {
             if (numberProp(w.get(), "tonality", d)) o.tonalityWeight = d;
         }
     }
-    return earComparisonValue(ear::compare(c.clip, ref.clip, o));
+    return earComparisonValue(ear::compare(c.clip, r.clip, o));
 }
 
 } // namespace
@@ -307,7 +312,8 @@ bool writeSpectrogramPng(const std::string& path, Value data, int w, int h, cons
     ev::Persistent dataRoot(data);
     ev::GlobalValue broV = ev::globalValue("bro");
     if (broV.found && ev::isObject(broV.value)) {
-        Value imageV = ev::getProperty(broV.value, "image");
+        ev::Persistent bro(broV.value);
+        Value imageV = ev::getProperty(bro.get(), "image");
         if (ev::isObject(imageV)) {
             ev::Persistent image(imageV);
             Value fnV = ev::getProperty(image.get(), "encodePngFile");
@@ -331,51 +337,51 @@ bool writeSpectrogramPng(const std::string& path, Value data, int w, int h, cons
 Value spectrogramFn(Value, std::span<const Value> a) {
     if (a.empty()) return ev::throwTypeError("bro.ear.spectrogram(clipOrClips, opts?): a clip is required");
     const char* who = "bro.ear.spectrogram";
-    const double rate = optRate(a, 1);
+    ev::Persistent input(a[0]);
+    ev::Persistent opts(a.size() > 1 ? a[1] : ev::undefined());
+    const double rate = optRate(opts.get());
     std::vector<ClipArg> clips;
-    if (isClipList(a[0])) {
-        ev::Persistent list(a[0]);
-        const uint32_t n = saturateU32(ev::toDouble(ev::getProperty(list.get(), "length")));
+    if (isClipList(input.get())) {
+        const uint32_t n = saturateU32(ev::toDouble(ev::getProperty(input.get(), "length")));
         if (n == 0 || n > 64) return ev::throwRangeError(std::string(who) + ": between 1 and 64 clips");
         clips.resize(n);
         for (uint32_t i = 0; i < n; ++i) {
-            Value e = ev::getElement(list.get(), i);
+            Value e = ev::getElement(input.get(), i);
             if (!readClip(e, rate, who, clips[i])) return ev::undefined();
         }
     } else {
         clips.resize(1);
-        if (!readClip(a[0], rate, who, clips[0])) return ev::undefined();
+        if (!readClip(input.get(), rate, who, clips[0])) return ev::undefined();
     }
 
     ear::SpectrogramOptions o;
     std::vector<std::string> labels;
     std::string path;
     for (const ClipArg& c : clips) labels.push_back(c.label);
-    if (a.size() > 1 && ev::isObject(a[1])) {
-        const Value& opts = a[1];
+    if (ev::isObject(opts.get())) {
         double d;
         std::string s;
-        if (numberProp(opts, "width", d)) o.width = static_cast<int>(d);
-        if (numberProp(opts, "height", d)) o.height = static_cast<int>(d);
-        if (numberProp(opts, "minHz", d)) o.minHz = d;
-        if (numberProp(opts, "maxHz", d)) o.maxHz = d;
-        if (numberProp(opts, "dbRange", d)) o.dbRange = d;
-        if (numberProp(opts, "maxDb", d)) o.maxDb = d;
-        if (numberProp(opts, "fftSize", d)) o.fftSize = static_cast<int>(std::clamp(d, 0.0, 32768.0));
-        if (numberProp(opts, "fontScale", d)) o.fontScale = static_cast<int>(d);
-        if (stringProp(opts, "layout", s)) {
+        if (numberProp(opts.get(), "width", d)) o.width = static_cast<int>(d);
+        if (numberProp(opts.get(), "height", d)) o.height = static_cast<int>(d);
+        if (numberProp(opts.get(), "minHz", d)) o.minHz = d;
+        if (numberProp(opts.get(), "maxHz", d)) o.maxHz = d;
+        if (numberProp(opts.get(), "dbRange", d)) o.dbRange = d;
+        if (numberProp(opts.get(), "maxDb", d)) o.maxDb = d;
+        if (numberProp(opts.get(), "fftSize", d)) o.fftSize = static_cast<int>(std::clamp(d, 0.0, 32768.0));
+        if (numberProp(opts.get(), "fontScale", d)) o.fontScale = static_cast<int>(d);
+        if (stringProp(opts.get(), "layout", s)) {
             if (s == "stack") o.stacked = true;
             else if (s == "side") o.stacked = false;
             else return ev::throwTypeError(std::string(who) + ": layout must be 'stack' or 'side'");
         }
-        if (stringProp(opts, "scale", s)) {
+        if (stringProp(opts.get(), "scale", s)) {
             if (s == "log") o.scale = ear::FrequencyScale::Log;
             else if (s == "mel") o.scale = ear::FrequencyScale::Mel;
             else if (s == "linear") o.scale = ear::FrequencyScale::Linear;
             else return ev::throwTypeError(std::string(who) + ": scale must be 'log', 'mel' or 'linear'");
         }
-        stringProp(opts, "path", path);
-        Value lv = ev::getProperty(opts, "labels");
+        stringProp(opts.get(), "path", path);
+        Value lv = ev::getProperty(opts.get(), "labels");
         if (ev::isObject(lv)) {
             ev::Persistent lr(lv);
             const uint32_t n = saturateU32(ev::toDouble(ev::getProperty(lr.get(), "length")));

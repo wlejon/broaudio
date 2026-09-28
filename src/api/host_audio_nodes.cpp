@@ -269,13 +269,14 @@ static void driveMasterEffect(broaudio::Engine& eng, HostAudioNode* node, double
 void decorateAudioNodeProto(ObjectBuilder& b) {
     b.def("connect", 3, [](Value self_, std::span<const Value> a) -> Value {
         if (!hasArg(a, 0)) return ev::throwTypeError("AudioNode.connect: destination argument required");
-        if (!hostAudioNodeOf(a[0]) && !hostAudioParamOf(a[0])) {
+        ev::Persistent target(a[0]);
+        if (!hostAudioNodeOf(target.get()) && !hostAudioParamOf(target.get())) {
             return ev::throwTypeError("AudioNode.connect: destination must be an AudioNode or AudioParam");
         }
         ev::Persistent self(self_);
         HostAudioNode* node = hostAudioNodeOf(self.get());
         if (node) {
-            appendConnectTarget(self, ev::Persistent(a[0]));
+            appendConnectTarget(self, target);
             auto* eng = getAudioEngine();
             const double now = eng ? eng->currentTime() : 0.0;
             switch (node->nodeType) {
@@ -285,7 +286,7 @@ void decorateAudioNodeProto(ObjectBuilder& b) {
                 }
                 break;
             case AudioNodeType::MediaStreamSource:
-                if (HostAnalyserNode* analyser = analyserOf(a[0])) analyser->source = 1;
+                if (HostAnalyserNode* analyser = analyserOf(target.get())) analyser->source = 1;
                 break;
             default:
                 // Nothing for an analyser here. Sources play to the master
@@ -302,10 +303,10 @@ void decorateAudioNodeProto(ObjectBuilder& b) {
             // effect on.
             if (eng) {
                 driveMasterEffect(*eng, node, now);
-                if (HostAudioNode* destNode = hostAudioNodeOf(a[0])) driveMasterEffect(*eng, destNode, now);
+                if (HostAudioNode* destNode = hostAudioNodeOf(target.get())) driveMasterEffect(*eng, destNode, now);
             }
         }
-        return a[0];
+        return target.get();
     });
 
     b.def("disconnect", 1, [](Value self_, std::span<const Value> a) -> Value {
@@ -313,9 +314,10 @@ void decorateAudioNodeProto(ObjectBuilder& b) {
         HostAudioNode* node = hostAudioNodeOf(self.get());
         if (node) {
             const bool all = a.empty() || ev::isUndefined(a[0]);
+            ev::Persistent target(all ? ev::undefined() : a[0]);
             std::vector<ev::Persistent> kept;
             for (auto& t : connectTargetsOf(self.get())) {
-                if (all || sameNode(t.get(), a[0])) {
+                if (all || sameNode(t.get(), target.get())) {
                     if (HostAnalyserNode* an = analyserOf(t.get())) an->hasConnectedInput = false;
                 } else {
                     kept.push_back(std::move(t));

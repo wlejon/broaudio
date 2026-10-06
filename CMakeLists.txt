@@ -33,13 +33,26 @@ if(NOT TARGET SDL3::SDL3 AND NOT TARGET SDL3::SDL3-static)
     endif()
 endif()
 
-# bromath — header-only math library (sibling repo)
-set(BROMATH_DIR "${CMAKE_SOURCE_DIR}/../bromath" CACHE PATH "bromath sibling")
+# bromath — header-only math library (sibling repo). Resolves like every repo
+# in the bro ecosystem: an existing target (a parent project got there first)
+# wins; otherwise a checkout beside the top-level project (../bromath,
+# overridable with -DBROMATH_DIR=<path>); otherwise the top-level project's
+# third_party/bromath submodule (`git submodule update --init --recursive`).
 if(NOT TARGET bromath::bromath)
+    set(BROMATH_DIR "${CMAKE_SOURCE_DIR}/../bromath" CACHE PATH
+        "Path to standalone bromath repo (set to a missing path to force submodule fallback)")
     if(EXISTS "${BROMATH_DIR}/CMakeLists.txt")
+        message(STATUS "broaudio: bromath from ${BROMATH_DIR}")
         add_subdirectory("${BROMATH_DIR}" "${CMAKE_BINARY_DIR}/bromath" EXCLUDE_FROM_ALL)
+    elseif(EXISTS "${CMAKE_SOURCE_DIR}/third_party/bromath/CMakeLists.txt")
+        message(STATUS "broaudio: bromath from ${CMAKE_SOURCE_DIR}/third_party/bromath (submodule)")
+        add_subdirectory("${CMAKE_SOURCE_DIR}/third_party/bromath" "${CMAKE_BINARY_DIR}/bromath" EXCLUDE_FROM_ALL)
     else()
-        message(FATAL_ERROR "bromath not found at ${BROMATH_DIR}")
+        message(FATAL_ERROR
+            "broaudio needs bromath (math headers): not found at ${BROMATH_DIR} or "
+            "${CMAKE_SOURCE_DIR}/third_party/bromath. Clone https://github.com/wlejon/bromath next "
+            "to this repo, run `git submodule update --init --recursive`, or override with "
+            "-DBROMATH_DIR=...")
     endif()
 endif()
 
@@ -57,6 +70,10 @@ if(NOT TARGET bronze_runtime_shared)
         # Explicit BRONZE_DIR supplied
     elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../bronze/CMakeLists.txt")
         set(BRONZE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../bronze" CACHE PATH "bronze source tree")
+    elseif(EXISTS "${CMAKE_SOURCE_DIR}/../bronze/CMakeLists.txt")
+        # Beside the top-level project: this repo is a third_party/ submodule
+        # of the project being built.
+        set(BRONZE_DIR "${CMAKE_SOURCE_DIR}/../bronze" CACHE PATH "bronze source tree")
     endif()
 
     if(NOT BRONZE_DIR OR NOT EXISTS "${BRONZE_DIR}/CMakeLists.txt")

@@ -5,11 +5,16 @@
 - C++20 compiler (MSVC 2022, GCC 12+, Clang 15+)
 - CMake 3.24+
 - SDL3
-- [`bromath`](https://github.com/wlejon/bromath), a header-only sibling expected at `../bromath`, or
-  a `bromath::bromath` target already in the build
+- [`bromath`](https://github.com/wlejon/bromath), header-only: a `bromath::bromath` target already
+  in the build, else a checkout beside the top-level project at `../bromath` (override with
+  `-DBROMATH_DIR=<path>`), else the `third_party/bromath` submodule
+- [bronze](https://github.com/wlejon/bronze) and [brass](https://github.com/wlejon/brass) beside
+  this repository (or `-DBRONZE_DIR=<path>`), for the JavaScript binding. They compile inside the
+  build tree and have no submodule.
 
 MIDI support pulls in libremidi as a submodule under `third_party/`. Run
-`git submodule update --init` for the default MIDI-enabled build.
+`git submodule update --init --recursive` for the default MIDI-enabled build; it also fetches the
+bromath fallback.
 
 ## Standalone
 
@@ -27,7 +32,7 @@ target_link_libraries(your_app PRIVATE broaudio)
 
 The consumer must provide an SDL3 target (`SDL3::SDL3` or `SDL3::SDL3-static`) before adding the
 subdirectory. If a `bromath::bromath` target already exists it is reused; otherwise broaudio adds
-the `../bromath` sibling.
+`../bromath` beside the top-level project, or the top-level project's `third_party/bromath`.
 
 ## Options
 

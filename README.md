@@ -8,6 +8,20 @@ A real-time audio engine library in C++20, built on SDL3 with a lock-free, audio
 design. It covers synthesis, sample playback, streaming sources, effects, spatial audio, MIDI,
 audio-file decode and encode, system-audio capture, and a hierarchical mixing bus.
 
+broaudio is one of the engine libraries of the
+[bro ecosystem](https://github.com/wlejon/bro/blob/main/docs/ecosystem.md):
+[bro](https://github.com/wlejon/bro) links it under `BRO_WITH_AUDIO` and exposes it to apps as
+`AudioContext` through the JavaScript binding in `src/api/` (`broaudio_api`), and
+[brosoundml](https://github.com/wlejon/brosoundml) builds on it. It depends on
+[bromath](https://github.com/wlejon/bromath); the binding needs
+[bronze](https://github.com/wlejon/bronze) and [brass](https://github.com/wlejon/brass), and brass
+also JIT-compiles fused bus effect chains to native kernels.
+
+**Platforms.** Built and tested on Windows (MSVC), Linux (GCC and Clang) and macOS (arm64). Audio
+output goes through SDL3 on all three. System-audio capture is platform-specific: WASAPI loopback
+on Windows, CoreAudio process taps on macOS 14.2+, the PulseAudio monitor source on Linux (which
+covers pipewire-pulse; no per-application capture there). Everything runs on the CPU.
+
 ## Documentation
 
 | Document | Contents |
@@ -61,8 +75,12 @@ cmake --build build
 ctest --test-dir build
 ```
 
-Requires a C++20 compiler, CMake 3.24+, SDL3, and the header-only sibling
-[`bromath`](https://github.com/wlejon/bromath) at `../bromath`. To consume it from another project:
+Requires a C++20 compiler, CMake 3.24+, SDL3, bronze and brass beside this repository (or
+`-DBRONZE_DIR=<path>`; they have no submodule, because the binding has to be compiled against the
+same bronze as the program that loads it), and the header-only sibling
+[`bromath`](https://github.com/wlejon/bromath), which resolves the way every repo in the
+ecosystem resolves a sibling: an existing target, then `../bromath`, then the
+`third_party/bromath` submodule (`git clone --recursive`). To consume it from another project:
 
 ```cmake
 add_subdirectory(broaudio)
@@ -78,7 +96,8 @@ See [docs/building.md](docs/building.md) for options, optional dependencies, and
 | `include/broaudio/` | Public headers, mirroring `src/` |
 | `src/` | Implementation |
 | `tests/` | One executable per test, registered with CTest |
-| `third_party/` | Vendored dr_libs, stb_vorbis, nlohmann; libremidi as a submodule |
+| `third_party/` | Vendored dr_libs, stb_vorbis, nlohmann; libremidi and bromath as submodules |
+| `src/api/` | The bronze JavaScript binding (`broaudio_api`) |
 | `scripts/` | `coverage.ps1`, the Windows coverage report |
 | `docs/` | Feature list, architecture, build guide |
 

@@ -82,6 +82,48 @@ jobs:
           SDL_AUDIODRIVER: dummy
         run: ctest --test-dir build -C Release --output-on-failure
 
+  # ── Submodule fallback ────────────────────────────────────────────────────
+  #
+  # No sibling checkout: bromath comes from the third_party/ submodule at the
+  # commit this repo pins, as it does for a fresh `git clone --recursive`.
+  # bronze and brass are the documented exception (no submodule; the api has
+  # to compile against the bronze of the program that loads it) and are laid
+  # out beside the repo as in the other jobs. The configure step checks bromath
+  # really took the submodule path.
+  submodule:
+    name: Submodule fallback · ubuntu-24.04
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: broaudio
+          submodules: recursive
+
+      - uses: wlejon/bronze/.github/actions/checkout-toolchain@main
+
+      - name: Provision SDL3
+        uses: libsdl-org/setup-sdl@v1
+        with:
+          version: 3.4.12
+          build-type: Release
+          add-to-environment: true
+          install-linux-dependencies: true
+
+      - name: Configure
+        shell: bash
+        run: |
+          test ! -e bromath
+          cmake -S broaudio -B build -DCMAKE_BUILD_TYPE=Release | tee configure.log
+          grep -q "broaudio: bromath from .*third_party/bromath (submodule)" configure.log
+
+      - name: Build
+        run: cmake --build build --parallel 4
+
+      - name: Test
+        env:
+          SDL_AUDIODRIVER: dummy
+        run: ctest --test-dir build --output-on-failure
+
   # ── Coverage ──────────────────────────────────────────────────────────────
   #
   # Debug + --coverage on Linux. --filter scopes the numbers to broaudio's own

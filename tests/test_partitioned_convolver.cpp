@@ -177,7 +177,12 @@ TEST(three_second_stereo_tail_cost) {
                 conv->partitions(), prepMs, 100.0 * runMs / (seconds * 1000.0),
                 runMs * 1000.0 / (seconds * sr / 128.0));
     // A generous ceiling that still catches an accidental O(N^2) path.
+#if defined(BROAUDIO_COVERAGE_BUILD) || defined(__COVERAGE__)
+    // Coverage instrumentation slows the loop (measured ~0.30 of real time in CI).
+    ASSERT_LT(runMs / (seconds * 1000.0), 0.50);
+#else
     ASSERT_LT(runMs / (seconds * 1000.0), 0.25);
+#endif
     PASS();
 }
 

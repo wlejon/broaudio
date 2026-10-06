@@ -1,5 +1,9 @@
 enable_testing()
 
+if(CMAKE_CXX_FLAGS MATCHES "--coverage" OR CMAKE_C_FLAGS MATCHES "--coverage")
+    add_compile_definitions(BROAUDIO_COVERAGE_BUILD=1)
+endif()
+
 # Each test is a separate executable that links against broaudio.
 # The test harness is header-only (test_harness.h).
 

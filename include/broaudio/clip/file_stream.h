@@ -10,9 +10,9 @@
 #include <thread>
 #include <vector>
 
-struct SDL_AudioStream;
-
 namespace broaudio {
+
+class StreamResampler;   // private (src/device/stream_resampler.h)
 
 // Disk-streamed clip source (Engine::createStreamFromFile): a cold worker
 // thread pulls PCM from an AudioFileStream, resamples to the engine rate when
@@ -72,7 +72,7 @@ private:
     std::shared_ptr<AudioClip> clip_;
     std::shared_ptr<ClipPlayback> playback_;
     std::unique_ptr<AudioFileStream> decoder_;
-    SDL_AudioStream* resampler_ = nullptr;  // null when file rate == engine rate
+    std::unique_ptr<StreamResampler> resampler_;  // null when file rate == engine rate
     int engineRate_ = 0;
     int prebufferFrames_ = 0;
     int playbackId_ = 0;

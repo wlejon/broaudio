@@ -40,7 +40,7 @@ public:
           domain_(&domain) {}
 
     ~AtomicSharedPtr() {
-        // No readers can race at this point (engine has stopped SDL).
+        // No readers can race at this point (engine has stopped its device streams).
         delete head_.load(std::memory_order_relaxed);
     }
 

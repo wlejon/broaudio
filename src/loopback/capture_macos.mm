@@ -15,7 +15,7 @@
 // A tap is not itself readable; it is plumbed through a private aggregate device
 // whose only sub-node is the tap, and we run a HAL IOProc on that aggregate. The
 // tap delivers FP32 at the render device's native rate; we downmix to mono and
-// (optionally) resample with SDL exactly like the WASAPI path.
+// (optionally) resample exactly like the WASAPI path.
 //
 // Requires macOS 14.2+. On older systems (or an SDK without the tapping header)
 // LoopbackCapture reports unsupported and start() fails — the same graceful
@@ -37,7 +37,10 @@
 #include "broaudio/loopback_capture.h"
 #include "broaudio/log.h"
 
-#include <SDL3/SDL.h>
+#include "../device/stream_resampler.h"
+
+#include <algorithm>
+#include <memory>
 
 #import <Foundation/Foundation.h>
 #import <CoreAudio/CoreAudio.h>
@@ -121,7 +124,7 @@ struct LoopbackCapture::Impl {
     int  srcCh          = 0;
     bool nonInterleaved = false;   // tap may hand us planar (per-channel) buffers
 
-    SDL_AudioStream* resamp = nullptr;   // only when targetRate != srcRate
+    std::unique_ptr<StreamResampler> resamp;   // only when targetRate != srcRate
 
     // Delivered geometry (read by sampleRate()/channels()/stats()).
     std::atomic<int> deliveredRate{0};
@@ -219,13 +222,13 @@ OSStatus LoopbackCapture::Impl::ioProc(AudioObjectID, const AudioTimeStamp*,
     }
 
     if (d->resamp) {
-        SDL_PutAudioStreamData(d->resamp, d->mix.data(),
-                               static_cast<int>(d->mix.size() * sizeof(float)));
-        int avail = SDL_GetAudioStreamAvailable(d->resamp);
+        const int outCh = std::max(1, d->deliveredChannels.load(std::memory_order_relaxed));
+        d->resamp->put(d->mix.data(), static_cast<int>(d->mix.size()) / outCh);
+        int avail = d->resamp->available();
         if (avail > 0) {
-            d->pulled.resize(static_cast<std::size_t>(avail) / sizeof(float));
-            int got = SDL_GetAudioStreamData(d->resamp, d->pulled.data(), avail);
-            if (got > 0) d->deliver(d->pulled.data(), got / static_cast<int>(sizeof(float)));
+            d->pulled.resize(static_cast<std::size_t>(avail) * outCh);
+            int got = d->resamp->get(d->pulled.data(), avail);
+            if (got > 0) d->deliver(d->pulled.data(), got * outCh);
         }
     } else if (!d->mix.empty()) {
         d->deliver(d->mix.data(), static_cast<int>(d->mix.size()));
@@ -249,10 +252,7 @@ void LoopbackCapture::Impl::teardown() {
         tapID = kAudioObjectUnknown;
     }
 #endif
-    if (resamp) {
-        SDL_DestroyAudioStream(resamp);
-        resamp = nullptr;
-    }
+    resamp.reset();
 }
 
 // ─── public surface ──────────────────────────────────────────────────────────
@@ -402,10 +402,7 @@ bool LoopbackCapture::start(const LoopbackConfig& cfg, LoopbackCallback cb) {
         const int outCh   = cfg.mono ? 1 : impl_->srcCh;
         const int outRate = (cfg.targetRate > 0) ? cfg.targetRate : impl_->srcRate;
         if (outRate != impl_->srcRate) {
-            SDL_AudioSpec src{}, dst{};
-            src.format = SDL_AUDIO_F32; src.channels = outCh; src.freq = impl_->srcRate;
-            dst.format = SDL_AUDIO_F32; dst.channels = outCh; dst.freq = outRate;
-            impl_->resamp = SDL_CreateAudioStream(&src, &dst);
+            impl_->resamp = StreamResampler::create(outCh, impl_->srcRate, outRate);
             if (!impl_->resamp) return fail("resampler create failed");
         }
         impl_->mix.reserve(static_cast<std::size_t>(impl_->srcRate / 10) * outCh);  // ~100ms

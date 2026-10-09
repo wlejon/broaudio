@@ -2,8 +2,8 @@
 
 // Multi-consumer mic-frame dispatch with per-consumer resampling and AGC.
 //
-// broaudio owns mic capture (one SDL_AudioStream against the default recording
-// device). Consumers — wake-word detectors, live ASR, custom analyzers — attach
+// broaudio owns mic capture (one capture stream on the default recording
+// device, opened through the AudioBackend in device.h). Consumers — wake-word detectors, live ASR, custom analyzers — attach
 // a MicTap describing the rate, frame size, and loudness normalisation they
 // want. The audio thread fans the raw mic chunk out to every active tap: each
 // tap resamples (if its targetRate differs from the engine rate), optionally
@@ -13,7 +13,7 @@
 //   * Multiple simultaneous consumers (wake + future live whisper, etc.) with
 //     no last-writer-wins races.
 //   * One place that knows about resampling — taps requesting different rates
-//     each get a polyphase SDL_AudioStream owned by broaudio.
+//     each get a streaming polyphase resampler owned by broaudio.
 //   * AGC as a reusable utility instead of per-consumer copy-paste.
 //   * Stats per tap (frames delivered, rolling peak) for diagnostics without
 //     instrumenting the consumer.
@@ -68,7 +68,7 @@ private:
 // Configuration handed to Engine::addMicTap. All fields optional.
 //   * targetRate  = 0  -> deliver at the engine's native mic rate (no
 //                          resampling done; the tap callback receives the same
-//                          samples the SDL recording callback produced).
+//                          samples the device recording callback produced).
 //   * chunkFrames = 0  -> deliver each resampler-output run as a single
 //                          callback (variable size). >0 buffers and slices into
 //                          fixed-size frames.

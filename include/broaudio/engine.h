@@ -22,6 +22,7 @@
 #include "broaudio/io/audio_file.h"
 #include "broaudio/io/serialization.h"
 #include "broaudio/dsp/jit/jit_compiler.h"
+#include "broaudio/device.h"
 
 #include <atomic>
 #include <functional>
@@ -30,11 +31,28 @@
 #include <mutex>
 #include <vector>
 
-struct SDL_AudioStream;
-
 namespace broaudio {
 
 class FileStreamRunner;
+class StreamResampler;   // private (src/device/stream_resampler.h)
+
+// Device options for Engine::init. All optional.
+struct AudioDeviceConfig {
+    AudioBackendKind backend = AudioBackendKind::Auto;
+    // Identity shown by the system mixer (PipeWire node / application
+    // properties, SDL's app name). Empty = "broaudio".
+    std::string appId;
+    std::string appName;
+    // Requested device period in frames at the engine rate (a hint; see
+    // AudioStreamConfig::periodFrames). The engine processes in blocks of up
+    // to MAX_SCRATCH_FRAMES regardless.
+    int periodFrames = 128;
+    // AudioDeviceInfo ids; empty = the system default, followed as it changes.
+    std::string outputDevice;
+    std::string inputDevice;
+    // PipeWire media.role of the output stream; empty = none.
+    std::string outputRole;
+};
 
 // Options for createStreamFromFile. Frame counts are at the ENGINE sample
 // rate (the ring holds resampled audio).
@@ -67,25 +85,51 @@ public:
     Engine(const Engine&) = delete;
     Engine& operator=(const Engine&) = delete;
 
+    // Opens the default playback device through an AudioBackend (device.h:
+    // PipeWire on Linux when a daemon is reachable, else SDL; overridable
+    // with AudioDeviceConfig::backend or $BROAUDIO_BACKEND). Returns false,
+    // leaving the engine uninitialised, when no backend or device opens;
+    // callers fall back to initHeadless().
     bool init();
+    bool init(const AudioDeviceConfig& config);
     bool initHeadless();
     void shutdown();
 
-    // Non-realtime maintenance — reaps finished voices, etc. Call from a
-    // non-audio thread (e.g., UI tick). Safe to call frequently; each call
-    // is cheap when no work is pending.
+    // Non-realtime maintenance — reaps finished voices, reclaims RCU
+    // snapshots and delivers device events (setAudioDeviceEventCallback).
+    // Call from a non-audio thread (e.g., UI tick). Safe to call frequently;
+    // each call is cheap when no work is pending.
     void update();
 
     double currentTime() const;
     int sampleRate() const { return sampleRate_; }
 
-    // Approximate output latency in seconds: the device buffer size divided
-    // by the device sample rate, captured when the playback stream opened.
-    // This covers only the SDL device buffer — OS mixer, driver, and DAC
-    // latency are not visible from here, so treat it as a lower bound (the
-    // Web Audio outputLatency contract is the same "estimate" language).
-    // 0.0 in headless mode (no device).
-    double outputLatencySeconds() const { return outputLatencySeconds_; }
+    // Output latency in seconds, as the backend measures it now (see
+    // AudioStreamInfo::latencySeconds): PipeWire reports one graph period
+    // plus the measured delay to the device; SDL only its device buffer, so
+    // treat that as a lower bound (the Web Audio outputLatency contract is
+    // the same "estimate" language). 0.0 in headless mode (no device).
+    double outputLatencySeconds() const;
+    // The same for the mic stream; 0.0 when the mic is not capturing.
+    double inputLatencySeconds() const;
+
+    // --- Audio devices ---
+
+    // The backend in use: "pipewire", "sdl", "null", or "none" (headless).
+    const char* audioBackendName() const;
+    // Devices the backend sees; empty in headless mode.
+    std::vector<AudioDeviceInfo> audioDevices(AudioDirection direction) const;
+    // Playback / mic stream state: rate, period, latency, current device.
+    // Default-constructed when that stream is not open.
+    AudioStreamInfo outputStreamInfo() const;
+    AudioStreamInfo inputStreamInfo() const;
+    AudioStreamStats outputStreamStats() const;
+    AudioStreamStats inputStreamStats() const;
+    // Device hotplug, default-device changes and our streams moving between
+    // devices. Delivered from update(), on its thread. Streams opened on the
+    // default device follow the default by themselves; this is for UI and
+    // logging.
+    void setAudioDeviceEventCallback(AudioDeviceEventFn fn);
 
     // --- Voices (synthesis) ---
 
@@ -343,6 +387,9 @@ public:
 
     // --- Microphone ---
 
+    // Opens the recording device through the engine's backend (mono, engine
+    // rate). Returns false after initHeadless(): a headless engine has no
+    // device and never opens the mic; drive taps with injectMicSamples().
     bool startMicCapture();
     void stopMicCapture();
     bool isMicCapturing() const { return micCapturing_; }
@@ -756,9 +803,10 @@ private:
     using PlaybackList = std::vector<std::shared_ptr<ClipPlayback>>;
     using BusList = std::vector<std::shared_ptr<Bus>>;
 
-    static void audioCallback(void* userdata, SDL_AudioStream* stream,
-                              int additional_amount, int total_amount);
-    void processOutputChunk(SDL_AudioStream* stream, int numFrames);
+    // Device callbacks (AudioProcessFn), on the backend's realtime thread.
+    static void outputCallback(void* userdata, float* out, int numFrames);
+    static void micCallback(void* userdata, float* in, int numFrames);
+    void processOutputChunk(float* out, int numFrames);
     void renderInternal(int numFrames);
     void generateSamples(int numFrames, const BusList& buses);
     void processBusEffects(Bus& bus, int numFrames);
@@ -797,8 +845,6 @@ private:
     // Fit the air table for the current conditions if none is published yet.
     void ensureAirTable();
 
-    static void micCallback(void* userdata, SDL_AudioStream* stream,
-                            int additional_amount, int total_amount);
     void processMicSamples(const float* samples, int numSamples);
 
     // RCU reclamation domain — must be declared before any AtomicSharedPtr
@@ -889,12 +935,14 @@ private:
     std::atomic<bool> voiceJitEnabled_{true};
     std::atomic<int> voiceJitVoices_{0};
 
-    SDL_AudioStream* stream_ = nullptr;
-    SDL_AudioStream* micStream_ = nullptr;
+    // Device I/O. Streams are destroyed before the backend (shutdown()).
+    AudioDeviceConfig deviceConfig_;
+    std::unique_ptr<AudioBackend> backend_;
+    std::unique_ptr<AudioStream> outStream_;
+    std::unique_ptr<AudioStream> micStream_;
+    AudioDeviceEventFn deviceEventFn_;
     std::atomic<uint64_t> samplesGenerated_{0};
     int sampleRate_ = 44100;
-    // Device-buffer latency estimate, set once in init() (see accessor).
-    double outputLatencySeconds_ = 0.0;
     std::atomic<bool> initialized_{false};
     std::atomic<bool> micCapturing_{false};
 
@@ -904,14 +952,14 @@ private:
     // SPSC publication; no lock is required between the recording callback
     // (writer) and the analysis readers on the main thread.
 
-    // Multi-consumer mic-tap registry. Each tap owns its own SDL_AudioStream
+    // Multi-consumer mic-tap registry. Each tap owns its own StreamResampler
     // (when resampling) + Agc + chunk-buffer state. The audio thread loads a
     // wait-free snapshot of the list and dispatches to each tap in order.
     struct MicTap {
         MicTapId         id          = kInvalidMicTapId;
         MicTapConfig     cfg{};
         MicTapCallback   callback;
-        SDL_AudioStream* resampler   = nullptr;   // nullptr when targetRate==0 or matches engine rate
+        StreamResampler* resampler   = nullptr;   // owned; nullptr when targetRate==0 or matches engine rate
         int              effectiveRate = 0;       // rate samples arrive at the callback
         Agc              agc{};
         std::vector<float> chunkBuf;              // accumulator when cfg.chunkFrames > 0
@@ -976,9 +1024,9 @@ private:
     alignas(64) std::atomic<uint32_t> eventWrite_{0};
     alignas(64) std::atomic<uint32_t> eventRead_{0};
 
-    // Pre-allocated scratch buffers for audio callbacks (avoids heap allocs on audio thread)
+    // Pre-allocated scratch buffer for the output callback (avoids heap
+    // allocs on the audio thread).
     std::vector<float> outputScratch_;
-    std::vector<float> micScratch_;
 
     // Max decoded clip size (bytes). 0 = unlimited.
     size_t maxClipDecodedBytes_ = 200 * 1024 * 1024;  // 200 MB

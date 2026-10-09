@@ -4,8 +4,7 @@
 [![CodeQL](https://github.com/wlejon/broaudio/actions/workflows/codeql.yml/badge.svg)](https://github.com/wlejon/broaudio/actions/workflows/codeql.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A real-time audio engine library in C++20, built on SDL3 with a lock-free, audio-thread-safe
-design. It covers synthesis, sample playback, streaming sources, effects, spatial audio, MIDI,
+A real-time audio engine library in C++20 with a lock-free, audio-thread-safe design. It covers synthesis, sample playback, streaming sources, effects, spatial audio, MIDI,
 audio-file decode and encode, system-audio capture, and a hierarchical mixing bus.
 
 broaudio is one of the engine libraries of the
@@ -17,8 +16,10 @@ broaudio is one of the engine libraries of the
 [bronze](https://github.com/wlejon/bronze) and [brass](https://github.com/wlejon/brass), and brass
 also JIT-compiles fused bus effect chains to native kernels.
 
-**Platforms.** Built and tested on Windows (MSVC), Linux (GCC and Clang) and macOS (arm64). Audio
-output goes through SDL3 on all three. System-audio capture is platform-specific: WASAPI loopback
+**Platforms.** Built and tested on Windows (MSVC), Linux (GCC and Clang) and macOS (arm64). Device
+I/O goes through a backend-neutral layer (`include/broaudio/device.h`): a native PipeWire client
+on Linux when a daemon is reachable, SDL3 on Windows and macOS and as the Linux fallback, and a
+null backend for tests. SDL is a private dependency; no public header names it. System-audio capture is platform-specific: WASAPI loopback
 on Windows, CoreAudio process taps on macOS 14.2+, the PulseAudio monitor source on Linux (which
 covers pipewire-pulse; no per-application capture there). Everything runs on the CPU.
 

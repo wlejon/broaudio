@@ -1,11 +1,11 @@
-// Microphone capture and the SDL recording callback, multi-consumer mic taps
-// (resample + AGC + chunking), output recording, and spectrum analysis.
+// Microphone capture and the device recording callback, multi-consumer mic
+// taps (resample + AGC + chunking), output recording, and spectrum analysis.
 
 #include "broaudio/engine.h"
 #include "broaudio/log.h"
 #include "broaudio/dsp/fft.h"
+#include "device/stream_resampler.h"
 
-#include <SDL3/SDL.h>
 #include <cmath>
 #include <cstring>
 #include <algorithm>
@@ -21,22 +21,32 @@ bool Engine::startMicCapture()
     if (micCapturing_) return true;
     if (!initialized_) return false;
 
-    SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, "128");
+    // A headless engine has no device backend, and the mic stays closed: a
+    // headless run never claims the machine's sound hardware (offline mic
+    // input goes through injectMicSamples).
+    if (!backend_) return false;
 
-    SDL_AudioSpec spec;
-    spec.format = SDL_AUDIO_F32;
-    spec.channels = 1;
-    spec.freq = sampleRate_;
-
-    micStream_ = SDL_OpenAudioDeviceStream(
-        SDL_AUDIO_DEVICE_DEFAULT_RECORDING, &spec, micCallback, this);
-
+    AudioStreamConfig sc;
+    sc.direction = AudioDirection::Capture;
+    sc.deviceId = deviceConfig_.inputDevice;
+    sc.sampleRate = sampleRate_;
+    sc.channels = 1;
+    sc.periodFrames = deviceConfig_.periodFrames;
+    sc.appId = deviceConfig_.appId;
+    sc.appName = deviceConfig_.appName;
+    sc.streamName = "Microphone";
+    std::string error;
+    micStream_ = backend_->openStream(sc, &Engine::micCallback, this, &error);
     if (!micStream_) {
-        log(LogLevel::Error, "broaudio: Failed to open mic device: %s", SDL_GetError());
+        log(LogLevel::Error, "broaudio: Failed to open mic device (%s): %s",
+            backend_->name(), error.c_str());
         return false;
     }
-
-    SDL_ResumeAudioStreamDevice(micStream_);
+    if (!micStream_->start()) {
+        log(LogLevel::Error, "broaudio: Failed to start mic device (%s)", backend_->name());
+        micStream_.reset();
+        return false;
+    }
     micCapturing_ = true;
     return true;
 }
@@ -45,30 +55,15 @@ void Engine::stopMicCapture()
 {
     if (!micCapturing_) return;
     if (micStream_) {
-        SDL_DestroyAudioStream(micStream_);
-        micStream_ = nullptr;
+        micStream_->stop();
+        micStream_.reset();
     }
     micCapturing_ = false;
 }
 
-void Engine::micCallback(void* userdata, SDL_AudioStream* stream,
-                          int additional_amount, int /*total_amount*/)
+void Engine::micCallback(void* userdata, float* in, int numFrames)
 {
-    auto* engine = static_cast<Engine*>(userdata);
-
-    int avail = SDL_GetAudioStreamAvailable(stream);
-    if (avail <= 0) return;
-
-    int numSamples = avail / static_cast<int>(sizeof(float));
-    if (static_cast<size_t>(numSamples) > engine->micScratch_.size())
-        engine->micScratch_.resize(numSamples);
-    float* buffer = engine->micScratch_.data();
-
-    int got = SDL_GetAudioStreamData(stream, buffer, avail);
-    if (got > 0) {
-        int samplesGot = got / static_cast<int>(sizeof(float));
-        engine->processMicSamples(buffer, samplesGot);
-    }
+    static_cast<Engine*>(userdata)->processMicSamples(in, numFrames);
 }
 
 void Engine::processMicSamples(const float* buffer, int samplesGot)
@@ -111,10 +106,8 @@ void Engine::injectMicSamples(const float* samples, int numSamples)
 
 Engine::MicTap::~MicTap()
 {
-    if (resampler) {
-        SDL_DestroyAudioStream(resampler);
-        resampler = nullptr;
-    }
+    delete resampler;
+    resampler = nullptr;
 }
 
 MicTapId Engine::addMicTap(const MicTapConfig& cfg, MicTapCallback cb)
@@ -133,18 +126,10 @@ MicTapId Engine::addMicTap(const MicTapConfig& cfg, MicTapCallback cb)
     tap->effectiveRate = needResample ? cfg.targetRate : engineRate;
 
     if (needResample) {
-        SDL_AudioSpec src{}, dst{};
-        src.format   = SDL_AUDIO_F32;
-        src.channels = 1;
-        src.freq     = engineRate;
-        dst.format   = SDL_AUDIO_F32;
-        dst.channels = 1;
-        dst.freq     = cfg.targetRate;
-        tap->resampler = SDL_CreateAudioStream(&src, &dst);
+        tap->resampler = StreamResampler::create(1, engineRate, cfg.targetRate).release();
         if (!tap->resampler) {
-            log(LogLevel::Error,
-                "broaudio: addMicTap: SDL_CreateAudioStream failed: %s",
-                SDL_GetError());
+            log(LogLevel::Error, "broaudio: addMicTap: could not create a %d -> %d Hz resampler",
+                engineRate, cfg.targetRate);
             return kInvalidMicTapId;
         }
     }
@@ -173,7 +158,7 @@ void Engine::removeMicTap(MicTapId id)
     // The removed tap's shared_ptr drops off the list here. Any audio-thread
     // callback that captured an old snapshot still holds it through the
     // ReadScope; once that scope ends and QSBR observes a quiescent state,
-    // the MicTap destructor runs and frees the SDL_AudioStream.
+    // the MicTap destructor runs and frees the resampler.
 }
 
 MicTapStats Engine::getMicTapStats(MicTapId id) const
@@ -209,19 +194,16 @@ void Engine::deliverTapChunk(MicTap& tap, const float* samples, int numSamples)
     int          feedN = numSamples;
 
     if (tap.resampler) {
-        const int putBytes = numSamples * static_cast<int>(sizeof(float));
-        SDL_PutAudioStreamData(tap.resampler, samples, putBytes);
-        const int availBytes = SDL_GetAudioStreamAvailable(tap.resampler);
-        if (availBytes <= 0) return;
-        const int availSamples = availBytes / static_cast<int>(sizeof(float));
+        tap.resampler->put(samples, numSamples);
+        const int availSamples = tap.resampler->available();
+        if (availSamples <= 0) return;
         if (static_cast<int>(tap.scratch.size()) < availSamples) {
             tap.scratch.resize(static_cast<std::size_t>(availSamples));
         }
-        const int gotBytes = SDL_GetAudioStreamData(
-            tap.resampler, tap.scratch.data(), availBytes);
-        if (gotBytes <= 0) return;
+        const int got = tap.resampler->get(tap.scratch.data(), availSamples);
+        if (got <= 0) return;
         feed = tap.scratch.data();
-        feedN = gotBytes / static_cast<int>(sizeof(float));
+        feedN = got;
     }
 
     // Stage 2: AGC (in-place — promote pass-through samples to scratch first

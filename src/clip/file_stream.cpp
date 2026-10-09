@@ -1,6 +1,5 @@
 #include "broaudio/clip/file_stream.h"
-
-#include <SDL3/SDL.h>
+#include "../device/stream_resampler.h"
 
 #include <algorithm>
 #include <chrono>
@@ -34,10 +33,6 @@ FileStreamRunner::~FileStreamRunner()
 {
     requestStop();
     join();
-    if (resampler_) {
-        SDL_DestroyAudioStream(resampler_);
-        resampler_ = nullptr;
-    }
 }
 
 void FileStreamRunner::start()
@@ -90,7 +85,7 @@ void FileStreamRunner::performSeek(double seconds)
 
     // Drop everything decoded but not yet heard: resampler tail + pending
     // frames on this thread, then fence off what already sits in the ring.
-    if (resampler_) SDL_ClearAudioStream(resampler_);
+    if (resampler_) resampler_->clear();
     pending_.clear();
     pendingOffsetFrames_ = 0;
     decoderEof_ = false;
@@ -108,12 +103,10 @@ void FileStreamRunner::performSeek(double seconds)
 
 void FileStreamRunner::worker()
 {
-    // Streaming resampler (SDL_AudioStream keeps filter state across chunks —
-    // the offline polyphase resample() would reset per chunk and click).
+    // Streaming resampler (keeps filter state across chunks — the offline
+    // polyphase resample() would reset per chunk and click).
     if (decoder_->sampleRate() != engineRate_) {
-        SDL_AudioSpec src{SDL_AUDIO_F32, clip_->channels, decoder_->sampleRate()};
-        SDL_AudioSpec dst{SDL_AUDIO_F32, clip_->channels, engineRate_};
-        resampler_ = SDL_CreateAudioStream(&src, &dst);
+        resampler_ = StreamResampler::create(clip_->channels, decoder_->sampleRate(), engineRate_);
         // On failure fall through with resampler_ == nullptr: audio plays at
         // the wrong pitch rather than not at all, and creation only fails in
         // out-of-memory-grade situations.
@@ -230,8 +223,7 @@ bool FileStreamRunner::step()
     int got = decoder_->readFrames(decodeBuf_.data(), toRead);
     if (got > 0) {
         if (resampler_) {
-            SDL_PutAudioStreamData(resampler_, decodeBuf_.data(),
-                                   got * ch * static_cast<int>(sizeof(float)));
+            resampler_->put(decodeBuf_.data(), got);
         } else {
             pending_.assign(decodeBuf_.begin(),
                             decodeBuf_.begin() + static_cast<size_t>(got) * ch);
@@ -243,19 +235,18 @@ bool FileStreamRunner::step()
             decoder_->seekToStart()) {
             return true;
         }
-        if (resampler_) SDL_FlushAudioStream(resampler_);
+        if (resampler_) resampler_->flush();
         decoderEof_ = true;
     }
 
     if (resampler_) {
-        int availBytes = SDL_GetAudioStreamAvailable(resampler_);
-        if (availBytes > 0) {
+        int availFrames = resampler_->available();
+        if (availFrames > 0) {
             size_t oldSize = pending_.size();
-            pending_.resize(oldSize + static_cast<size_t>(availBytes) / sizeof(float));
-            int gotBytes = SDL_GetAudioStreamData(
-                resampler_, pending_.data() + oldSize, availBytes);
-            if (gotBytes >= 0 && gotBytes < availBytes)
-                pending_.resize(oldSize + static_cast<size_t>(gotBytes) / sizeof(float));
+            pending_.resize(oldSize + static_cast<size_t>(availFrames) * ch);
+            int gotFrames = resampler_->get(pending_.data() + oldSize, availFrames);
+            if (gotFrames < availFrames)
+                pending_.resize(oldSize + static_cast<size_t>(gotFrames) * ch);
         }
     }
 

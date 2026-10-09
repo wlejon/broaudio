@@ -20,8 +20,9 @@ cmake --build build
 ctest --test-dir build            # SDL_AUDIODRIVER=dummy for no audio device
 ```
 
-Dependencies: SDL3 (`find_package`, or a consumer-provided `SDL3::SDL3` / `SDL3::SDL3-static`
-target, else the pinned SDL), the header-only sibling [`bromath`](https://github.com/wlejon/bromath),
+Dependencies: SDL3, linked PRIVATE (`find_package`, or a consumer-provided `SDL3::SDL3` /
+`SDL3::SDL3-static` target, else the pinned SDL; never include it from a public header),
+libpipewire-0.3 on Linux when found (the PipeWire device backend), the header-only sibling [`bromath`](https://github.com/wlejon/bromath),
 libremidi, and bronze for the binding. No submodules: each is a `bro_dependency()` pin in
 `CMakeLists.txt` (`cmake/bro_deps.cmake`), taken from `../<name>` when that working tree exists
 and fetched at configure otherwise.
@@ -57,6 +58,7 @@ matter when changing code:
 |---|---|
 | `include/broaudio/` | Public headers; the directory structure mirrors `src/` |
 | `src/` | Implementation |
+| `src/device/` | Device I/O behind `include/broaudio/device.h`: backend selection (`device.cpp`), `backend_pipewire.cpp` (Linux), `backend_sdl.cpp`, `backend_null.cpp`, and the private `StreamResampler` (SDL's converter). The only files that may include SDL or PipeWire headers, besides `src/loopback/` and `log.cpp` |
 | `src/loopback/` | Per-platform system-audio capture, selected in CMake (`capture_win.cpp`, `capture_macos.mm`, `capture_pulse.cpp`, `capture_null.cpp`) |
 | `src/codec/` | Vendored decoder implementation TUs, isolated in the `broaudio_codecs` target so CodeQL can pre-build them out of the Security tab |
 | `tests/` | One executable per test file |

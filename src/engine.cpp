@@ -1,5 +1,5 @@
 // Engine lifecycle (init/headless/renderBlock/shutdown) and the lock-free
-// audio thread: the SDL output callback, per-chunk bus-graph mixdown, voice
+// audio thread: the device output callback, per-chunk bus-graph mixdown, voice
 // synthesis (generateSamples) and finished-voice reaping.
 
 #include "broaudio/engine.h"
@@ -10,7 +10,6 @@
 #include "broaudio/dsp/limiter.h"
 #include "engine_internal.h"
 
-#include <SDL3/SDL.h>
 #include <cmath>
 #include <cstring>
 #include <algorithm>
@@ -32,39 +31,37 @@ Engine::~Engine()
 
 bool Engine::init()
 {
+    return init(AudioDeviceConfig{});
+}
+
+bool Engine::init(const AudioDeviceConfig& config)
+{
     if (initialized_) return true;
 
-    if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
-        log(LogLevel::Error, "broaudio: Failed to init SDL audio: %s", SDL_GetError());
+    deviceConfig_ = config;
+    std::string error;
+    backend_ = createAudioBackend(config.backend, &error);
+    if (!backend_) {
+        log(LogLevel::Error, "broaudio: no audio backend: %s", error.c_str());
         return false;
     }
 
-    SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, "128");
-
-    SDL_AudioSpec spec;
-    spec.format = SDL_AUDIO_F32;
-    spec.channels = 2;
-    spec.freq = sampleRate_;
-
-    stream_ = SDL_OpenAudioDeviceStream(
-        SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, audioCallback, this);
-
-    if (!stream_) {
-        log(LogLevel::Error, "broaudio: Failed to open audio device: %s", SDL_GetError());
+    AudioStreamConfig sc;
+    sc.direction = AudioDirection::Playback;
+    sc.deviceId = config.outputDevice;
+    sc.sampleRate = sampleRate_;
+    sc.channels = 2;
+    sc.periodFrames = config.periodFrames;
+    sc.appId = config.appId;
+    sc.appName = config.appName;
+    sc.streamName = "Output";
+    sc.role = config.outputRole;
+    outStream_ = backend_->openStream(sc, &Engine::outputCallback, this, &error);
+    if (!outStream_) {
+        log(LogLevel::Error, "broaudio: Failed to open audio device (%s): %s",
+            backend_->name(), error.c_str());
+        backend_.reset();
         return false;
-    }
-
-    // Output latency estimate: device buffer frames / device rate. Only the
-    // SDL buffer is visible from here (see outputLatencySeconds() docs).
-    {
-        SDL_AudioDeviceID dev = SDL_GetAudioStreamDevice(stream_);
-        SDL_AudioSpec devSpec{};
-        int devFrames = 0;
-        if (dev != 0 && SDL_GetAudioDeviceFormat(dev, &devSpec, &devFrames)
-            && devFrames > 0 && devSpec.freq > 0) {
-            outputLatencySeconds_ =
-                static_cast<double>(devFrames) / static_cast<double>(devSpec.freq);
-        }
     }
 
     // Create master bus (id 0)
@@ -84,27 +81,78 @@ bool Engine::init()
 
     // Pre-allocate scratch buffers
     outputScratch_.resize(MAX_SCRATCH_FRAMES * 2, 0.0f);
-    micScratch_.resize(MAX_SCRATCH_FRAMES, 0.0f);
     initDistanceState(MAX_SCRATCH_FRAMES);
 
     // Initialize master gain smoother
     smoothMasterGain_.init(sampleRate_);
     smoothMasterGain_.snap(masterGain_.load(std::memory_order_relaxed));
 
-    // Resume audio *after* all buffers and buses are ready — starting earlier
+    // Start audio *after* all buffers and buses are ready — starting earlier
     // would let the audio callback race with init and corrupt the heap.
-    SDL_ResumeAudioStreamDevice(stream_);
+    if (!outStream_->start()) {
+        log(LogLevel::Error, "broaudio: Failed to start audio device (%s)", backend_->name());
+        outStream_.reset();
+        backend_.reset();
+        return false;
+    }
 
     initialized_ = true;
-    log(LogLevel::Info, "broaudio: initialized %d Hz stereo", sampleRate_);
+    AudioStreamInfo info = outStream_->info();
+    log(LogLevel::Info, "broaudio: initialized %d Hz stereo via %s (%s)", sampleRate_,
+        backend_->name(), info.deviceName.empty() ? "default device" : info.deviceName.c_str());
     return true;
+}
+
+double Engine::outputLatencySeconds() const
+{
+    return outStream_ ? outStream_->info().latencySeconds : 0.0;
+}
+
+double Engine::inputLatencySeconds() const
+{
+    return micStream_ ? micStream_->info().latencySeconds : 0.0;
+}
+
+const char* Engine::audioBackendName() const
+{
+    return backend_ ? backend_->name() : "none";
+}
+
+std::vector<AudioDeviceInfo> Engine::audioDevices(AudioDirection direction) const
+{
+    return backend_ ? backend_->devices(direction) : std::vector<AudioDeviceInfo>{};
+}
+
+AudioStreamInfo Engine::outputStreamInfo() const
+{
+    return outStream_ ? outStream_->info() : AudioStreamInfo{};
+}
+
+AudioStreamInfo Engine::inputStreamInfo() const
+{
+    return micStream_ ? micStream_->info() : AudioStreamInfo{};
+}
+
+AudioStreamStats Engine::outputStreamStats() const
+{
+    return outStream_ ? outStream_->stats() : AudioStreamStats{};
+}
+
+AudioStreamStats Engine::inputStreamStats() const
+{
+    return micStream_ ? micStream_->stats() : AudioStreamStats{};
+}
+
+void Engine::setAudioDeviceEventCallback(AudioDeviceEventFn fn)
+{
+    deviceEventFn_ = std::move(fn);
 }
 
 bool Engine::initHeadless()
 {
     if (initialized_) return true;
 
-    // Create master bus (id 0) — same as init() but no SDL audio device
+    // Create master bus (id 0) — same as init() but no audio device
     {
         auto master = std::make_shared<Bus>();
         master->id = MASTER_BUS_ID;
@@ -118,7 +166,6 @@ bool Engine::initHeadless()
     }
 
     outputScratch_.resize(MAX_SCRATCH_FRAMES * 2, 0.0f);
-    micScratch_.resize(MAX_SCRATCH_FRAMES, 0.0f);
     initDistanceState(MAX_SCRATCH_FRAMES);
 
     // Initialize master gain smoother
@@ -139,7 +186,7 @@ void Engine::renderBlock(int numFrames)
     // freeze-in-place semantics as the realtime callback.
     if (masterPaused_.load(std::memory_order_relaxed)) return;
 
-    // Reader scope for host-driven (non-SDL) rendering — covers
+    // Reader scope for host-driven (no device) rendering — covers
     // renderInternal / generateSamples / processBusEffects transitively.
     RcuDomain::ReadScope rcuScope(rcu_);
 
@@ -245,14 +292,14 @@ void Engine::renderInternal(int numFrames)
 void Engine::shutdown()
 {
     // Stop disk-stream decode workers before tearing the device down —
-    // they hold clip/playback refs and an SDL_AudioStream resampler each.
+    // they hold clip/playback refs and a resampler each.
     stopAllFileStreams();
     stopMicCapture();
     jitCompiler_.shutdown();
-    if (stream_) {
-        SDL_DestroyAudioStream(stream_);
-        stream_ = nullptr;
-    }
+    // Stop before destroying: once stop() returns no callback is running.
+    if (outStream_) outStream_->stop();
+    outStream_.reset();
+    backend_.reset();
     initialized_ = false;
 }
 
@@ -266,29 +313,16 @@ double Engine::currentTime() const
 // Output audio callback + synthesis — LOCK-FREE
 // ---------------------------------------------------------------------------
 
-void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
-                            int additional_amount, int /*total_amount*/)
+void Engine::outputCallback(void* userdata, float* out, int totalFrames)
 {
     auto* engine = static_cast<Engine*>(userdata);
-    int totalFloats = additional_amount / static_cast<int>(sizeof(float));
-    int totalFrames = totalFloats / 2;
     if (totalFrames <= 0) return;
 
     // Master pause: feed silence without touching the graph or advancing
     // samplesGenerated_ — voices, clips, and scheduled events freeze in
-    // place and resume exactly where they stopped. outputScratch_ is owned
-    // by this (audio) thread, so reusing it here is race-free.
+    // place and resume exactly where they stopped.
     if (engine->masterPaused_.load(std::memory_order_relaxed)) {
-        float* buffer = engine->outputScratch_.data();
-        std::memset(buffer, 0,
-                    std::min(totalFrames, MAX_SCRATCH_FRAMES) * 2 * sizeof(float));
-        int remaining = totalFrames;
-        while (remaining > 0) {
-            int chunk = std::min(remaining, MAX_SCRATCH_FRAMES);
-            SDL_PutAudioStreamData(stream, buffer,
-                                   chunk * 2 * static_cast<int>(sizeof(float)));
-            remaining -= chunk;
-        }
+        std::memset(out, 0, static_cast<size_t>(totalFrames) * 2 * sizeof(float));
         return;
     }
 
@@ -302,12 +336,13 @@ void Engine::audioCallback(void* userdata, SDL_AudioStream* stream,
     int remaining = totalFrames;
     while (remaining > 0) {
         int chunk = std::min(remaining, MAX_SCRATCH_FRAMES);
-        engine->processOutputChunk(stream, chunk);
+        engine->processOutputChunk(out, chunk);
+        out += static_cast<size_t>(chunk) * 2;
         remaining -= chunk;
     }
 }
 
-void Engine::processOutputChunk(SDL_AudioStream* stream, int numFrames)
+void Engine::processOutputChunk(float* out, int numFrames)
 {
     auto* engine = this;
     int numFloats = numFrames * 2;
@@ -441,7 +476,7 @@ void Engine::processOutputChunk(SDL_AudioStream* stream, int numFrames)
         engine->micPlaybackReadPos_.store(rp + toRead, std::memory_order_relaxed);
     }
 
-    SDL_PutAudioStreamData(stream, buffer, numFloats * sizeof(float));
+    std::memcpy(out, buffer, static_cast<size_t>(numFloats) * sizeof(float));
 
     // Mono mixdown to output ring buffer for analysis
     for (int i = 0; i < numFrames; i++) {
@@ -853,6 +888,19 @@ void Engine::update()
         reapFinishedVoicesLocked();
     }
     rcu_.reclaim();
+
+    if (backend_) {
+        backend_->pollEvents([this](const AudioDeviceEvent& ev) {
+            static const char* const kinds[] = {"added", "removed", "default changed",
+                                                "stream moved", "stream lost"};
+            log(ev.kind == AudioDeviceEvent::Kind::StreamLost ? LogLevel::Warn : LogLevel::Info,
+                "broaudio: %s device %s: %s%s%s",
+                ev.direction == AudioDirection::Playback ? "playback" : "capture",
+                kinds[static_cast<int>(ev.kind)], ev.deviceId.c_str(),
+                ev.name.empty() ? "" : " - ", ev.name.c_str());
+            if (deviceEventFn_) deviceEventFn_(ev);
+        });
+    }
 }
 
 } // namespace broaudio

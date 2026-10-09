@@ -2,8 +2,8 @@
 
 // System-audio / application loopback capture.
 //
-// broaudio owns mic capture (one SDL_AudioStream against the default RECORDING
-// device). This is the complement: capturing what the machine is PLAYING — the
+// broaudio owns mic capture (one capture stream against the default RECORDING
+// device, through the AudioBackend in device.h). This is the complement: capturing what the machine is PLAYING — the
 // render side — so the listening stack (bro.sense / bro.kws / streaming STT)
 // can hear the computer itself, not just a microphone.
 //
@@ -13,7 +13,7 @@
 //                      processes it spawned). "Transcribe just this call."
 //   * ProcessExclude — everything EXCEPT that process tree.
 //
-// Unlike the mic path this does not go through SDL: render-loopback and
+// Unlike the mic path this does not go through the AudioBackend: render-loopback and
 // per-process loopback are OS-specific (Windows WASAPI today; other platforms
 // report unsupported and never start). The capture runs on its own thread and
 // fans mono FP32 frames out through a callback, exactly like a mic tap — so a

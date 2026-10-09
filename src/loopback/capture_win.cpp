@@ -17,9 +17,10 @@
 #include "broaudio/loopback_capture.h"
 #include "broaudio/log.h"
 
-#include <SDL3/SDL.h>
+#include "../device/stream_resampler.h"
 
 #include <algorithm>
+#include <memory>
 #include <atomic>
 #include <thread>
 #include <vector>
@@ -201,7 +202,7 @@ void LoopbackCapture::Impl::run() {
     IAudioClient*        client  = nullptr;
     IAudioCaptureClient* capture = nullptr;
     WAVEFORMATEX*        mixFmt  = nullptr;   // owned (CoTaskMemFree) for SystemOutput
-    SDL_AudioStream*     resamp  = nullptr;
+    std::unique_ptr<StreamResampler> resamp;
     HANDLE               evt     = nullptr;
     bool                 useEvent = false;
 
@@ -218,7 +219,7 @@ void LoopbackCapture::Impl::run() {
 
     auto cleanup = [&]() {
         if (client) client->Stop();
-        if (resamp) SDL_DestroyAudioStream(resamp);
+        resamp.reset();
         safeRelease(capture);
         safeRelease(client);
         if (mixFmt) CoTaskMemFree(mixFmt);
@@ -327,10 +328,7 @@ void LoopbackCapture::Impl::run() {
     const int outCh   = cfg.mono ? 1 : srcCh;
     const int outRate = (cfg.targetRate > 0) ? cfg.targetRate : srcRate;
     if (outRate != srcRate) {
-        SDL_AudioSpec src{}, dst{};
-        src.format = SDL_AUDIO_F32; src.channels = outCh; src.freq = srcRate;
-        dst.format = SDL_AUDIO_F32; dst.channels = outCh; dst.freq = outRate;
-        resamp = SDL_CreateAudioStream(&src, &dst);
+        resamp = StreamResampler::create(outCh, srcRate, outRate);
         if (!resamp) { fail("resampler create failed"); cleanup(); return; }
     }
     deliveredRate.store(outRate, std::memory_order_relaxed);
@@ -391,13 +389,12 @@ void LoopbackCapture::Impl::run() {
             capture->ReleaseBuffer(frames);
 
             if (resamp) {
-                SDL_PutAudioStreamData(resamp, mono.data(),
-                                       static_cast<int>(mono.size() * sizeof(float)));
-                int avail = SDL_GetAudioStreamAvailable(resamp);
+                resamp->put(mono.data(), static_cast<int>(mono.size()) / outCh);
+                int avail = resamp->available();
                 if (avail > 0) {
-                    pulled.resize(static_cast<std::size_t>(avail) / sizeof(float));
-                    int got = SDL_GetAudioStreamData(resamp, pulled.data(), avail);
-                    if (got > 0) deliver(pulled.data(), got / static_cast<int>(sizeof(float)));
+                    pulled.resize(static_cast<std::size_t>(avail) * outCh);
+                    int got = resamp->get(pulled.data(), avail);
+                    if (got > 0) deliver(pulled.data(), got * outCh);
                 }
             } else if (!mono.empty()) {
                 deliver(mono.data(), static_cast<int>(mono.size()));

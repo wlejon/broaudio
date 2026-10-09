@@ -126,6 +126,10 @@ add_library(broaudio STATIC
     src/engine_synth.cpp
     src/log.cpp
     src/mic_tap.cpp
+    src/device/device.cpp
+    src/device/backend_sdl.cpp
+    src/device/backend_null.cpp
+    src/device/stream_resampler.cpp
     src/rcu.cpp
     src/dsp/jit/jit_bus_builder.cpp
     src/dsp/jit/jit_bus_pipeline.cpp
@@ -199,11 +203,35 @@ if(MSVC)
         COMPILE_FLAGS "$<$<NOT:$<CONFIG:Debug>>:/O1>")
 endif()
 
+# SDL3 is private: broaudio's public headers name no SDL type (device I/O is
+# behind include/broaudio/device.h), so SDL's include directory does not reach
+# consumers. A static broaudio still carries SDL onto their link line.
 if(TARGET SDL3::SDL3)
-    target_link_libraries(broaudio PUBLIC SDL3::SDL3)
+    target_link_libraries(broaudio PRIVATE SDL3::SDL3)
 elseif(TARGET SDL3::SDL3-static)
-    target_link_libraries(broaudio PUBLIC SDL3::SDL3-static)
+    target_link_libraries(broaudio PRIVATE SDL3::SDL3-static)
 endif()
+
+# Native PipeWire device backend (Linux): the default there when a daemon is
+# reachable, with SDL as the fallback. Needs libpipewire-0.3 at build time;
+# without it the build degrades to SDL only.
+option(BROAUDIO_PIPEWIRE "Native PipeWire device backend on Linux" ON)
+set(BROAUDIO_HAS_PIPEWIRE OFF)
+if(BROAUDIO_PIPEWIRE AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(BROAUDIO_LIBPIPEWIRE QUIET IMPORTED_TARGET libpipewire-0.3)
+    endif()
+    if(BROAUDIO_LIBPIPEWIRE_FOUND)
+        set(BROAUDIO_HAS_PIPEWIRE ON)
+        target_sources(broaudio PRIVATE src/device/backend_pipewire.cpp)
+        target_link_libraries(broaudio PRIVATE PkgConfig::BROAUDIO_LIBPIPEWIRE)
+        message(STATUS "broaudio: PipeWire device backend (libpipewire ${BROAUDIO_LIBPIPEWIRE_VERSION})")
+    else()
+        message(STATUS "broaudio: libpipewire-0.3 not found, PipeWire device backend disabled (SDL only)")
+    endif()
+endif()
+target_compile_definitions(broaudio PRIVATE BROAUDIO_HAS_PIPEWIRE=$<BOOL:${BROAUDIO_HAS_PIPEWIRE}>)
 
 target_link_libraries(broaudio PUBLIC bromath::bromath)
 

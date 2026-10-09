@@ -45,6 +45,7 @@ set(BROAUDIO_TESTS
     test_engine_presets
     test_engine_offline
     test_mic_tap
+    test_audio_device
     test_loopback_capture
     test_midi_input
     test_ear
@@ -69,6 +70,10 @@ foreach(test ${BROAUDIO_TESTS})
     target_include_directories(${test} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     add_test(NAME ${test} COMMAND ${test})
 endforeach()
+
+# Real-device measurement tool (latency, xruns, device events); not a test.
+add_executable(audio_device_probe audio_device_probe.cpp)
+target_link_libraries(audio_device_probe PRIVATE broaudio)
 
 # JIT audio bus pipeline test (requires Brass JIT backend)
 if(BROAUDIO_HAS_JIT)

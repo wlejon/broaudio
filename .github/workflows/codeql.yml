@@ -27,7 +27,8 @@ jobs:
 
     steps:
       # bromath, libremidi and bronze (and through it brass) are fetched at
-      # configure from the pinned commits; bronze is not built here, since only
+      # configure (libremidi from a pinned commit, the rest from the heads of their
+      # main branches); bronze is not built here, since only
       # the broaudio target is traced.
       - uses: actions/checkout@v7
         with:

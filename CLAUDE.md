@@ -23,9 +23,10 @@ ctest --test-dir build            # SDL_AUDIODRIVER=dummy for no audio device
 Dependencies: SDL3, linked PRIVATE (`find_package`, or a consumer-provided `SDL3::SDL3` /
 `SDL3::SDL3-static` target, else the pinned SDL; never include it from a public header),
 libpipewire-0.3 on Linux when found (the PipeWire device backend), the header-only sibling [`bromath`](https://github.com/wlejon/bromath),
-libremidi, and bronze for the binding. No submodules: each is a `bro_dependency()` pin in
+libremidi, and bronze for the binding. No submodules: each is a `bro_dependency()` in
 `CMakeLists.txt` (`cmake/bro_deps.cmake`), taken from `../<name>` when that working tree exists
-and fetched at configure otherwise.
+and fetched at configure otherwise (the siblings at their main's head, SDL and libremidi at
+their pinned commits).
 
 Optional dependencies degrade rather than fail: if libremidi or opusfile is missing,
 `BROAUDIO_MIDI` / `BROAUDIO_OPUS` auto-disable with a status message. Preserve that behavior when

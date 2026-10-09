@@ -10,9 +10,9 @@
 - Linux, optional: `libpipewire-0.3` (pkg-config) for the native PipeWire device backend. Without
   it the build is SDL-only.
 
-Everything else is a dependency pinned in `CMakeLists.txt` and resolved by
+Everything else is a dependency declared in `CMakeLists.txt` and resolved by
 `cmake/bro_deps.cmake`: an existing target in the build, else a working tree beside the
-top-level project at `../<name>`, else the pinned commit, fetched at configure (override any
+top-level project at `../<name>`, else the head of its main branch (SDL and libremidi: a pinned commit), fetched at configure (override any
 with `-DFETCHCONTENT_SOURCE_DIR_<NAME>=<path>`). There are no submodules.
 
 - [`bromath`](https://github.com/wlejon/bromath), header-only math

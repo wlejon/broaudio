@@ -13,7 +13,7 @@ concurrency:
 # broaudio requires SDL3 and the header-only sibling bromath; with
 # BROAUDIO_MIDI=ON (the default) it also builds libremidi. Every job builds a
 # plain clone: bromath, libremidi and bronze (with brass, its code generator)
-# come from the commits CMakeLists.txt pins (cmake/bro_deps.cmake), fetched at
+# come from the heads of their main branches, libremidi from a pinned commit (cmake/bro_deps.cmake), fetched at
 # configure. bronze and brass compile inside this build tree with the job's own
 # compiler and CRT, since the api is bound across bronze's C++ embed boundary.
 # That is what makes broaudio_test_api the check that the library works the

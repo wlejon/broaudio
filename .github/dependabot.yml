@@ -1,7 +1,7 @@
 version: 2
 
-# The actions in .github/workflows/ carry pinned versions here; libremidi and the
-# bro siblings are pinned in CMakeLists.txt (bro_dependency). SDL3 is provisioned by the
+# The actions in .github/workflows/ carry pinned versions here; libremidi is
+# pinned in CMakeLists.txt (bro_dependency) and the bro siblings track their main. SDL3 is provisioned by the
 # pinned setup-sdl step in the workflows, so bumping it is a github-actions
 # concern too. dr_libs and nlohmann are vendored single headers with no manifest.
 updates:

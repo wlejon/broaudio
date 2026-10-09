@@ -26,19 +26,12 @@ jobs:
       actions: read
 
     steps:
+      # bromath, libremidi and bronze (and through it brass) are fetched at
+      # configure from the pinned commits; bronze is not built here, since only
+      # the broaudio target is traced.
       - uses: actions/checkout@v7
         with:
           path: broaudio
-          submodules: recursive
-
-      - uses: actions/checkout@v7
-        with:
-          repository: wlejon/bromath
-          path: bromath
-
-      # bronze (and through it brass) is needed at configure for the api;
-      # neither is built here, since only the broaudio target is traced.
-      - uses: wlejon/bronze/.github/actions/checkout-toolchain@main
 
       - name: Provision SDL3
         uses: libsdl-org/setup-sdl@v1
@@ -53,7 +46,7 @@ jobs:
       - name: Configure
         run: cmake -S broaudio -B build -DCMAKE_BUILD_TYPE=Debug
 
-      # The vendored libremidi submodule and the single-header codec
+      # The fetched libremidi and the single-header codec
       # implementations (broaudio_codecs = dr_wav/dr_flac/dr_mp3 + stb_vorbis) are
       # compiled here, ahead of `init`. For a compiled language CodeQL only
       # extracts what it observes the compiler build while tracing, so anything

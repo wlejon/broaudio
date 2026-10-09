@@ -21,9 +21,10 @@ ctest --test-dir build            # SDL_AUDIODRIVER=dummy for no audio device
 ```
 
 Dependencies: SDL3 (`find_package`, or a consumer-provided `SDL3::SDL3` / `SDL3::SDL3-static`
-target), the header-only sibling [`bromath`](https://github.com/wlejon/bromath) expected at
-`../bromath`, and libremidi as a submodule under `third_party/`
-(`git submodule update --init`).
+target, else the pinned SDL), the header-only sibling [`bromath`](https://github.com/wlejon/bromath),
+libremidi, and bronze for the binding. No submodules: each is a `bro_dependency()` pin in
+`CMakeLists.txt` (`cmake/bro_deps.cmake`), taken from `../<name>` when that working tree exists
+and fetched at configure otherwise.
 
 Optional dependencies degrade rather than fail: if libremidi or opusfile is missing,
 `BROAUDIO_MIDI` / `BROAUDIO_OPUS` auto-disable with a status message. Preserve that behavior when
@@ -59,7 +60,7 @@ matter when changing code:
 | `src/loopback/` | Per-platform system-audio capture, selected in CMake (`capture_win.cpp`, `capture_macos.mm`, `capture_pulse.cpp`, `capture_null.cpp`) |
 | `src/codec/` | Vendored decoder implementation TUs, isolated in the `broaudio_codecs` target so CodeQL can pre-build them out of the Security tab |
 | `tests/` | One executable per test file |
-| `third_party/` | dr_libs, stb_vorbis, nlohmann (vendored); libremidi (submodule) |
+| `third_party/` | dr_libs, stb_vorbis, nlohmann (vendored); libremidi is a pinned dependency |
 | `docs/` | Feature list, architecture, build guide |
 
 ## Conventions

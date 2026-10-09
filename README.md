@@ -75,12 +75,13 @@ cmake --build build
 ctest --test-dir build
 ```
 
-Requires a C++20 compiler, CMake 3.24+, SDL3, bronze and brass beside this repository (or
-`-DBRONZE_DIR=<path>`; they have no submodule, because the binding has to be compiled against the
-same bronze as the program that loads it), and the header-only sibling
-[`bromath`](https://github.com/wlejon/bromath), which resolves the way every repo in the
-ecosystem resolves a sibling: an existing target, then `../bromath`, then the
-`third_party/bromath` submodule (`git clone --recursive`). To consume it from another project:
+Requires a C++20 compiler and CMake 3.24+. A plain `git clone` is enough: there are no
+submodules. The dependencies ([`bromath`](https://github.com/wlejon/bromath), libremidi, and
+[bronze](https://github.com/wlejon/bronze) with [brass](https://github.com/wlejon/brass) for the
+JavaScript binding) resolve the way every repo in the ecosystem resolves one
+(`cmake/bro_deps.cmake`): an existing target, then a working tree at `../<name>`, then the commit
+`CMakeLists.txt` pins, fetched at configure. SDL3 is an installed package when one is found,
+otherwise the pinned SDL is built too. To consume it from another project:
 
 ```cmake
 add_subdirectory(broaudio)
@@ -96,7 +97,8 @@ See [docs/building.md](docs/building.md) for options, optional dependencies, and
 | `include/broaudio/` | Public headers, mirroring `src/` |
 | `src/` | Implementation |
 | `tests/` | One executable per test, registered with CTest |
-| `third_party/` | Vendored dr_libs, stb_vorbis, nlohmann; libremidi and bromath as submodules |
+| `third_party/` | Vendored dr_libs, stb_vorbis, nlohmann |
+| `cmake/bro_deps.cmake` | The ecosystem's dependency helper (`bro_dependency`) |
 | `src/api/` | The bronze JavaScript binding (`broaudio_api`) |
 | `scripts/` | `coverage.ps1`, the Windows coverage report |
 | `docs/` | Feature list, architecture, build guide |

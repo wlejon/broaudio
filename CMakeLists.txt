@@ -8,82 +8,29 @@ if(MSVC AND CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
-# SDL3 — use consumer-provided target if available, otherwise find it
+# Dependencies (cmake/bro_deps.cmake): an outer project's target wins (under bro
+# these are all bro's), else the ../<name> working tree beside the top-level
+# project, else the pinned commit, fetched at configure.
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/bro_deps.cmake)
+
+# SDL3: the consumer's target, else an installed SDL3 (find_package), else the
+# commit bro pins, built static here.
 if(NOT TARGET SDL3::SDL3 AND NOT TARGET SDL3::SDL3-static)
-    if(NOT DEFINED SDL3_DIR AND NOT DEFINED ENV{SDL3_DIR})
-        foreach(_candidate
-                "${CMAKE_CURRENT_SOURCE_DIR}/../bro/build/third_party/SDL"
-                "${CMAKE_CURRENT_SOURCE_DIR}/third_party/SDL"
-                "${CMAKE_CURRENT_SOURCE_DIR}/../bro/third_party/SDL"
-                "${CMAKE_CURRENT_SOURCE_DIR}/../SDL")
-            if(EXISTS "${_candidate}/SDL3Config.cmake")
-                set(SDL3_DIR "${_candidate}" CACHE PATH "SDL3 directory")
-                break()
-            elseif(EXISTS "${_candidate}/CMakeLists.txt")
-                set(SDL_SHARED OFF CACHE BOOL "" FORCE)
-                set(SDL_STATIC ON CACHE BOOL "" FORCE)
-                set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
-                add_subdirectory("${_candidate}" "${CMAKE_BINARY_DIR}/SDL" EXCLUDE_FROM_ALL)
-                break()
-            endif()
-        endforeach()
-    endif()
-    if(NOT TARGET SDL3::SDL3 AND NOT TARGET SDL3::SDL3-static)
-        find_package(SDL3 REQUIRED)
+    find_package(SDL3 QUIET)
+    if(NOT SDL3_FOUND)
+        bro_dependency(SDL GITHUB libsdl-org/SDL REF 1df279a04f604bc50b6f36c9e903b5e64c4fe2a3 THIRD_PARTY
+                       TARGET SDL3-static OPTIONS SDL_SHARED=OFF SDL_STATIC=ON SDL_TEST_LIBRARY=OFF)
     endif()
 endif()
 
-# bromath — header-only math library (sibling repo). Resolves like every repo
-# in the bro ecosystem: an existing target (a parent project got there first)
-# wins; otherwise a checkout beside the top-level project (../bromath,
-# overridable with -DBROMATH_DIR=<path>); otherwise the top-level project's
-# third_party/bromath submodule (`git submodule update --init --recursive`).
-if(NOT TARGET bromath::bromath)
-    set(BROMATH_DIR "${CMAKE_SOURCE_DIR}/../bromath" CACHE PATH
-        "Path to standalone bromath repo (set to a missing path to force submodule fallback)")
-    if(EXISTS "${BROMATH_DIR}/CMakeLists.txt")
-        message(STATUS "broaudio: bromath from ${BROMATH_DIR}")
-        add_subdirectory("${BROMATH_DIR}" "${CMAKE_BINARY_DIR}/bromath" EXCLUDE_FROM_ALL)
-    elseif(EXISTS "${CMAKE_SOURCE_DIR}/third_party/bromath/CMakeLists.txt")
-        message(STATUS "broaudio: bromath from ${CMAKE_SOURCE_DIR}/third_party/bromath (submodule)")
-        add_subdirectory("${CMAKE_SOURCE_DIR}/third_party/bromath" "${CMAKE_BINARY_DIR}/bromath" EXCLUDE_FROM_ALL)
-    else()
-        message(FATAL_ERROR
-            "broaudio needs bromath (math headers): not found at ${BROMATH_DIR} or "
-            "${CMAKE_SOURCE_DIR}/third_party/bromath. Clone https://github.com/wlejon/bromath next "
-            "to this repo, run `git submodule update --init --recursive`, or override with "
-            "-DBROMATH_DIR=...")
-    endif()
-endif()
+# bromath, header-only math.
+bro_dependency(bromath GITHUB wlejon/bromath REF 8b511fbd69c014bf0584d2b42e6c96a8cf720f6a TARGET bromath::bromath)
 
-# bronze, the JavaScript runtime the api binds: a checkout beside this one
-# (../bronze, with ../brass beside it — bronze resolves and add_subdirectory()s
-# its own code generator), the layout of a bro tree and of CI (bronze's
-# .github/actions/checkout-toolchain), or an explicit -DBRONZE_DIR. No vendored
-# fallback: the api is bound across bronze's C++ embed boundary, so it has to
-# build against the bronze the surrounding tree builds against. Under bro this
-# block is skipped, bro having added bronze already.
-if(NOT TARGET bronze_runtime_shared)
-    set(BRONZE_BUILD_SHARED_RUNTIME ON CACHE BOOL "" FORCE)
-    set(BRONZE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    if(DEFINED BRONZE_DIR AND EXISTS "${BRONZE_DIR}/CMakeLists.txt")
-        # Explicit BRONZE_DIR supplied
-    elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../bronze/CMakeLists.txt")
-        set(BRONZE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../bronze" CACHE PATH "bronze source tree")
-    elseif(EXISTS "${CMAKE_SOURCE_DIR}/../bronze/CMakeLists.txt")
-        # Beside the top-level project: this repo is a third_party/ submodule
-        # of the project being built.
-        set(BRONZE_DIR "${CMAKE_SOURCE_DIR}/../bronze" CACHE PATH "bronze source tree")
-    endif()
-
-    if(NOT BRONZE_DIR OR NOT EXISTS "${BRONZE_DIR}/CMakeLists.txt")
-        message(FATAL_ERROR
-            "bronze not found: check it out beside this repository (../bronze, with ../brass beside it) "
-            "or pass -DBRONZE_DIR=<path>.")
-    endif()
-
-    add_subdirectory("${BRONZE_DIR}" "${CMAKE_BINARY_DIR}/bronze-build" EXCLUDE_FROM_ALL)
-endif()
+# bronze, the JavaScript runtime the api binds (it brings its code generator,
+# brass). The api is bound across bronze's C++ embed boundary, so it has to
+# build against the bronze the surrounding tree builds against.
+bro_dependency(bronze GITHUB wlejon/bronze REF 15ce4cf5fc25d8afe03882985ae95adcba46a6a9 TARGET bronze_runtime_shared
+               OPTIONS BRONZE_BUILD_SHARED_RUNTIME=ON BRONZE_BUILD_TESTS=OFF)
 
 # opusfile — optional OGG Opus support
 option(BROAUDIO_OPUS "Enable OGG Opus loading via opusfile" OFF)
@@ -104,18 +51,10 @@ endif()
 # libremidi — optional MIDI support
 option(BROAUDIO_MIDI "Enable MIDI input via libremidi" ON)
 if(BROAUDIO_MIDI)
-    if(NOT TARGET libremidi::libremidi)
-        # Build from submodule if available
-        if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libremidi/CMakeLists.txt")
-            set(LIBREMIDI_NO_JACK ON CACHE BOOL "" FORCE)
-            set(LIBREMIDI_NO_PIPEWIRE ON CACHE BOOL "" FORCE)
-            set(LIBREMIDI_NO_NETWORK ON CACHE BOOL "" FORCE)
-            set(LIBREMIDI_NO_KEYBOARD ON CACHE BOOL "" FORCE)
-            add_subdirectory(third_party/libremidi EXCLUDE_FROM_ALL)
-        else()
-            find_package(libremidi QUIET)
-        endif()
-    endif()
+    bro_dependency(libremidi GITHUB celtera/libremidi REF 6e8dccd92386311413d8d737ef223dfb71a2d0de THIRD_PARTY
+                   TARGET libremidi::libremidi
+                   OPTIONS LIBREMIDI_NO_JACK=ON LIBREMIDI_NO_PIPEWIRE=ON LIBREMIDI_NO_NETWORK=ON
+                           LIBREMIDI_NO_KEYBOARD=ON)
     if(NOT TARGET libremidi::libremidi)
         set(BROAUDIO_MIDI OFF)
         message(STATUS "broaudio: libremidi not found, MIDI support disabled")
@@ -268,25 +207,7 @@ endif()
 
 target_link_libraries(broaudio PUBLIC bromath::bromath)
 
-# --- Brass JIT acceleration (optional, enabled if Brass is found) ---
-if(NOT TARGET brass)
-    if(NOT BRASS_ROOT)
-        if(DEFINED ENV{BRASS_ROOT} AND NOT "$ENV{BRASS_ROOT}" STREQUAL "")
-            set(BRASS_ROOT "$ENV{BRASS_ROOT}")
-        elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../brass/include/brass/codegen/kernel_jit.hpp")
-            get_filename_component(BRASS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../brass" ABSOLUTE)
-        endif()
-    endif()
-
-    if(BRASS_ROOT)
-        file(TO_CMAKE_PATH "${BRASS_ROOT}" BRASS_ROOT)
-    endif()
-
-    if(BRASS_ROOT AND EXISTS "${BRASS_ROOT}/CMakeLists.txt")
-        add_subdirectory("${BRASS_ROOT}" "${CMAKE_BINARY_DIR}/brass-build" EXCLUDE_FROM_ALL)
-    endif()
-endif()
-
+# --- Brass JIT acceleration (brass arrives with bronze, above) ---
 if(TARGET brass AND NOT BRASS_HOST_BACKEND)
     message(STATUS "broaudio: brass has no code generator for this target; JIT off")
 elseif(TARGET brass)

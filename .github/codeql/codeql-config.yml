@@ -3,8 +3,8 @@ name: broaudio CodeQL config
 queries:
   - uses: security-extended
 
-# All vendored code is kept out of the analysis by build order: the libremidi
-# submodule and the single-header codec implementations (broaudio_codecs =
+# All vendored code is kept out of the analysis by build order: the fetched
+# libremidi and the single-header codec implementations (broaudio_codecs =
 # dr_wav/dr_flac/dr_mp3 + stb_vorbis) are pre-built before CodeQL's init, so
 # their compiled TUs are never traced. See the pre-build step in codeql.yml.
 #

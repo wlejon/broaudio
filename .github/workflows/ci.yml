@@ -10,29 +10,21 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# broaudio requires SDL3 (find_package REQUIRED) and the header-only sibling
-# bromath (../bromath); with BROAUDIO_MIDI=ON (the default) it also builds the
-# vendored libremidi submodule. So every job provisions SDL3 via setup-sdl,
-# checks bromath out beside this repo, and checks broaudio out with submodules:
+# broaudio requires SDL3 and the header-only sibling bromath; with
+# BROAUDIO_MIDI=ON (the default) it also builds libremidi. Every job builds a
+# plain clone: bromath, libremidi and bronze (with brass, its code generator)
+# come from the commits CMakeLists.txt pins (cmake/bro_deps.cmake), fetched at
+# configure. bronze and brass compile inside this build tree with the job's own
+# compiler and CRT, since the api is bound across bronze's C++ embed boundary.
+# That is what makes broaudio_test_api the check that the library works the
+# way bro uses it.
 #
-#     $GITHUB_WORKSPACE/
-#       broaudio/   <- this repo, checked out with submodules (libremidi)
-#       bromath/
-#       bronze/     <- the JavaScript runtime broaudio_api binds
-#       brass/      <- bronze's code generator
-#
-# bronze and brass are laid out by bronze's checkout-toolchain action and
-# compiled inside this build tree (bronze add_subdirectory()s brass), with the
-# job's own compiler and CRT — the api is bound across bronze's C++ embed
-# boundary, so a prebuilt bronze would be an unverifiable ABI hazard. That is
-# what makes broaudio_test_api the check that the library works the way bro
-# uses it.
-#
-# On Windows SDL is built with the static MSVC runtime to match broaudio, which
-# forces MultiThreaded when built standalone; a dynamic-CRT SDL would fail the
-# link (LNK2038). setup-sdl's install-linux-dependencies pulls the ALSA/Pulse
-# dev packages, which also satisfy libremidi's Linux MIDI backend. Tests run
-# with SDL_AUDIODRIVER=dummy so no audio device is needed on the runners.
+# SDL3 is provisioned with setup-sdl, which CMake finds before it would fetch
+# its own. On Windows SDL is built with the static MSVC runtime to match
+# broaudio, which forces MultiThreaded when built standalone; a dynamic-CRT SDL
+# would fail the link (LNK2038). setup-sdl's install-linux-dependencies pulls
+# the ALSA/Pulse dev packages, which also satisfy libremidi's Linux MIDI
+# backend. Tests run with SDL_AUDIODRIVER=dummy so no audio device is needed.
 jobs:
   test:
     name: ${{ matrix.name }}
@@ -49,14 +41,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: broaudio
-          submodules: recursive
-
-      - uses: actions/checkout@v7
-        with:
-          repository: wlejon/bromath
-          path: bromath
-
-      - uses: wlejon/bronze/.github/actions/checkout-toolchain@main
 
       - name: Provision SDL3
         uses: libsdl-org/setup-sdl@v1
@@ -82,53 +66,11 @@ jobs:
           SDL_AUDIODRIVER: dummy
         run: ctest --test-dir build -C Release --output-on-failure
 
-  # ── Submodule fallback ────────────────────────────────────────────────────
-  #
-  # No sibling checkout: bromath comes from the third_party/ submodule at the
-  # commit this repo pins, as it does for a fresh `git clone --recursive`.
-  # bronze and brass are the documented exception (no submodule; the api has
-  # to compile against the bronze of the program that loads it) and are laid
-  # out beside the repo as in the other jobs. The configure step checks bromath
-  # really took the submodule path.
-  submodule:
-    name: Submodule fallback · ubuntu-24.04
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          path: broaudio
-          submodules: recursive
-
-      - uses: wlejon/bronze/.github/actions/checkout-toolchain@main
-
-      - name: Provision SDL3
-        uses: libsdl-org/setup-sdl@v1
-        with:
-          version: 3.4.12
-          build-type: Release
-          add-to-environment: true
-          install-linux-dependencies: true
-
-      - name: Configure
-        shell: bash
-        run: |
-          test ! -e bromath
-          cmake -S broaudio -B build -DCMAKE_BUILD_TYPE=Release | tee configure.log
-          grep -q "broaudio: bromath from .*third_party/bromath (submodule)" configure.log
-
-      - name: Build
-        run: cmake --build build --parallel 4
-
-      - name: Test
-        env:
-          SDL_AUDIODRIVER: dummy
-        run: ctest --test-dir build --output-on-failure
-
   # ── Coverage ──────────────────────────────────────────────────────────────
   #
   # Debug + --coverage on Linux. --filter scopes the numbers to broaudio's own
-  # code (include/broaudio/ + src/); SDL, the sibling bromath, and the vendored
-  # libremidi / dr_libs / nlohmann are excluded.
+  # code (include/broaudio/ + src/); SDL, bromath, libremidi and the vendored
+  # dr_libs / nlohmann are excluded.
   coverage:
     name: Coverage
     runs-on: ubuntu-24.04
@@ -136,14 +78,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: broaudio
-          submodules: recursive
-
-      - uses: actions/checkout@v7
-        with:
-          repository: wlejon/bromath
-          path: bromath
-
-      - uses: wlejon/bronze/.github/actions/checkout-toolchain@main
 
       - name: Provision SDL3
         uses: libsdl-org/setup-sdl@v1

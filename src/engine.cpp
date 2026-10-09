@@ -46,18 +46,7 @@ bool Engine::init(const AudioDeviceConfig& config)
         return false;
     }
 
-    AudioStreamConfig sc;
-    sc.direction = AudioDirection::Playback;
-    sc.deviceId = config.outputDevice;
-    sc.sampleRate = sampleRate_;
-    sc.channels = 2;
-    sc.periodFrames = config.periodFrames;
-    sc.appId = config.appId;
-    sc.appName = config.appName;
-    sc.streamName = "Output";
-    sc.role = config.outputRole;
-    outStream_ = backend_->openStream(sc, &Engine::outputCallback, this, &error);
-    if (!outStream_) {
+    if (!openOutputStream(&error)) {
         log(LogLevel::Error, "broaudio: Failed to open audio device (%s): %s",
             backend_->name(), error.c_str());
         backend_.reset();
@@ -100,6 +89,64 @@ bool Engine::init(const AudioDeviceConfig& config)
     AudioStreamInfo info = outStream_->info();
     log(LogLevel::Info, "broaudio: initialized %d Hz stereo via %s (%s)", sampleRate_,
         backend_->name(), info.deviceName.empty() ? "default device" : info.deviceName.c_str());
+    return true;
+}
+
+bool Engine::openOutputStream(std::string* error)
+{
+    const AudioDeviceConfig& config = deviceConfig_;
+    AudioStreamConfig sc;
+    sc.direction = AudioDirection::Playback;
+    sc.deviceId = config.outputDevice;
+    sc.sampleRate = sampleRate_;
+    sc.channels = 2;
+    sc.periodFrames = config.periodFrames;
+    sc.appId = config.appId;
+    sc.appName = config.appName;
+    sc.streamName = "Output";
+    sc.role = config.outputRole;
+    outStream_ = backend_->openStream(sc, &Engine::outputCallback, this, error);
+    return outStream_ != nullptr;
+}
+
+// The whole device side again: a new backend (a PipeWire daemon that
+// restarted needs a new connection; the old one's streams are dead), the
+// output, and the mic if it was capturing. The engine's state (buses,
+// voices, clips) is untouched: the output callback just resumes.
+bool Engine::reopenDevice()
+{
+    const bool mic = reopenMic_ || micCapturing_;
+    reopenMic_ = mic;  // kept until a reopen succeeds
+    stopMicCapture();
+    if (outStream_) outStream_->stop();
+    outStream_.reset();
+    backend_.reset();
+
+    std::string error;
+    backend_ = createAudioBackend(deviceConfig_.backend, &error);
+    bool ok = backend_ != nullptr;
+    if (ok && !openOutputStream(&error)) ok = false;
+    if (ok && !outStream_->start()) {
+        error = "the output stream did not start";
+        ok = false;
+    }
+    if (!ok) {
+        outStream_.reset();
+        backend_.reset();
+        if (!reopenFailedLogged_) {
+            log(LogLevel::Warn, "broaudio: the audio device is gone (%s); retrying every second",
+                error.c_str());
+            reopenFailedLogged_ = true;
+        }
+        return false;
+    }
+    reopenMic_ = false;
+    if (mic && !startMicCapture())
+        log(LogLevel::Warn, "broaudio: the mic did not reopen after the audio device came back");
+    const AudioStreamInfo info = outStream_->info();
+    log(LogLevel::Info, "broaudio: audio device reopened via %s (%s)", backend_->name(),
+        info.deviceName.empty() ? "default device" : info.deviceName.c_str());
+    reopenFailedLogged_ = false;
     return true;
 }
 
@@ -898,8 +945,18 @@ void Engine::update()
                 ev.direction == AudioDirection::Playback ? "playback" : "capture",
                 kinds[static_cast<int>(ev.kind)], ev.deviceId.c_str(),
                 ev.name.empty() ? "" : " - ", ev.name.c_str());
+            if (ev.kind == AudioDeviceEvent::Kind::StreamLost) deviceLost_ = true;
             if (deviceEventFn_) deviceEventFn_(ev);
         });
+    }
+    // A lost stream does not come back by itself: reopen everything, now
+    // and then every second until the device (the daemon) is back.
+    if (deviceLost_ && initialized_) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= nextReopen_) {
+            if (reopenDevice()) deviceLost_ = false;
+            else nextReopen_ = now + std::chrono::seconds(1);
+        }
     }
 }
 

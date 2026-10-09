@@ -25,6 +25,7 @@
 #include "broaudio/device.h"
 
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <future>
 #include <memory>
@@ -941,6 +942,15 @@ private:
     std::unique_ptr<AudioStream> outStream_;
     std::unique_ptr<AudioStream> micStream_;
     AudioDeviceEventFn deviceEventFn_;
+    // A stream of ours was lost (the PipeWire daemon restarted, a device
+    // went): update() reopens the backend and the streams that were open,
+    // retrying every second until it can. Main thread only.
+    bool openOutputStream(std::string* error);
+    bool reopenDevice();
+    bool deviceLost_ = false;
+    bool reopenMic_ = false;  // the mic was capturing when the device went
+    bool reopenFailedLogged_ = false;
+    std::chrono::steady_clock::time_point nextReopen_{};
     std::atomic<uint64_t> samplesGenerated_{0};
     int sampleRate_ = 44100;
     std::atomic<bool> initialized_{false};

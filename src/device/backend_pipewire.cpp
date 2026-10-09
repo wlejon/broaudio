@@ -27,6 +27,7 @@
 #include <spa/param/audio/format-utils.h>
 #include <spa/pod/builder.h>
 #include <spa/utils/result.h>
+#include <sys/resource.h>
 
 #include <algorithm>
 #include <atomic>
@@ -349,7 +350,37 @@ bool PwBackend::connect(std::string* error)
         if (error) *error = "pw_thread_loop_new failed";
         return false;
     }
-    context_ = pw_context_new(pw_thread_loop_get_loop(loop_), nullptr, 0);
+    // The kernel SIGKILLs a process whose realtime thread runs past
+    // RLIMIT_RTTIME without blocking, and an unprivileged process cannot raise
+    // a lowered hard limit. module-rt lowers it as each context loads, to what
+    // rtkit or xdg-desktop-portal's Realtime interface allows, and a portal
+    // started before rtkit says 0: the first tick that lands while the data
+    // thread is processing would kill the whole app. Below a sane budget the
+    // data loop runs without realtime (loop.rt-prio 0) instead.
+    auto rtBudgetTooSmall = [] {
+        rlimit rl{};
+        if (getrlimit(RLIMIT_RTTIME, &rl) != 0) return false;
+        return rl.rlim_max != RLIM_INFINITY && rl.rlim_max < 10000;
+    };
+    auto makeContext = [&](bool rt) {
+        pw_properties* props = rt ? nullptr : pw_properties_new(PW_KEY_LOOP_RT_PRIO, "0", nullptr);
+        return pw_context_new(pw_thread_loop_get_loop(loop_), props, 0);
+    };
+    bool rt = !rtBudgetTooSmall();
+    context_ = makeContext(rt);
+    if (context_ && rt && rtBudgetTooSmall()) {
+        pw_context_destroy(context_);
+        rt = false;
+        context_ = makeContext(false);
+    }
+    if (!rt) {
+        rlimit rl{};
+        getrlimit(RLIMIT_RTTIME, &rl);
+        log(LogLevel::Warn,
+            "broaudio: PipeWire audio runs without realtime scheduling: RLIMIT_RTTIME is %llu us "
+            "(a portal started before rtkit says 0: restart xdg-desktop-portal)",
+            static_cast<unsigned long long>(rl.rlim_max));
+    }
     if (!context_) {
         if (error) *error = "pw_context_new failed";
         return false;

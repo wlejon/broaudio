@@ -56,10 +56,18 @@ endif()
 # libremidi — optional MIDI support
 option(BROAUDIO_MIDI "Enable MIDI input via libremidi" ON)
 if(BROAUDIO_MIDI)
+    # libremidi appends its own cmake/ to CMAKE_MODULE_PATH; ours goes first so
+    # its include(libremidi.cppwinrt) / include(libremidi.winmidi) find the
+    # versions in cmake/libremidi/, which generate the WinRT headers only when
+    # their inputs change and never delete them (upstream deletes and rebuilds
+    # them on every configure, breaking any build running at the time).
+    set(_broaudio_module_path "${CMAKE_MODULE_PATH}")
+    list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake/libremidi")
     bro_dependency(libremidi GITHUB celtera/libremidi REF 6e8dccd92386311413d8d737ef223dfb71a2d0de THIRD_PARTY
                    TARGET libremidi::libremidi
                    OPTIONS LIBREMIDI_NO_JACK=ON LIBREMIDI_NO_PIPEWIRE=ON LIBREMIDI_NO_NETWORK=ON
                            LIBREMIDI_NO_KEYBOARD=ON)
+    set(CMAKE_MODULE_PATH "${_broaudio_module_path}")
     if(NOT TARGET libremidi::libremidi)
         set(BROAUDIO_MIDI OFF)
         message(STATUS "broaudio: libremidi not found, MIDI support disabled")

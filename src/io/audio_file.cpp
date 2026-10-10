@@ -24,11 +24,11 @@
 #undef STB_VORBIS_HEADER_ONLY
 
 // ---------------------------------------------------------------------------
-// Optional Opus/OGG support via opusfile
+// Ogg Opus via broaudio's own Ogg demuxer over libopus (when linked)
 // ---------------------------------------------------------------------------
 
 #if defined(BROAUDIO_HAS_OPUS) && BROAUDIO_HAS_OPUS
-#include <opusfile.h>
+#include "../codec/ogg_opus.h"
 #endif
 
 namespace broaudio {
@@ -256,76 +256,52 @@ static AudioFileData loadVorbisMemory(const uint8_t* data, size_t size)
 
 #if defined(BROAUDIO_HAS_OPUS) && BROAUDIO_HAS_OPUS
 
+// Decode a whole opened Ogg Opus stream (48 kHz interleaved float32).
+static AudioFileData decodeOpus(OggOpusDecoder& dec, bool opened, const std::string& err)
+{
+    AudioFileData result;
+    if (!opened) {
+        result.error = err.empty() ? "corrupt or unsupported Ogg Opus file" : err;
+        return result;
+    }
+    const int channels = dec.channels();
+    if (dec.totalFrames() > 0)
+        result.samples.reserve(static_cast<size_t>(dec.totalFrames()) * channels);
+
+    std::vector<float> chunk(static_cast<size_t>(4096) * channels);
+    uint64_t frames = 0;
+    for (;;) {
+        int got = dec.readFrames(chunk.data(), 4096);
+        if (got <= 0) break;
+        result.samples.insert(result.samples.end(), chunk.begin(),
+                              chunk.begin() + static_cast<size_t>(got) * channels);
+        frames += static_cast<uint64_t>(got);
+    }
+    if (frames == 0) {
+        result.samples.clear();
+        result.error = "corrupt Ogg Opus file (no decodable audio)";
+        return result;
+    }
+    result.channels = channels;
+    result.sampleRate = OggOpusDecoder::sampleRate();
+    result.numFrames = static_cast<int>(frames);
+    return result;
+}
+
 static AudioFileData loadOpus(const char* path)
 {
-    int error = 0;
-    OggOpusFile* of = op_open_file(path, &error);
-    if (!of) return {};
-
-    int channels = op_channel_count(of, -1);
-    ogg_int64_t totalSamples = op_pcm_total(of, -1);
-    if (totalSamples <= 0 || channels <= 0) {
-        op_free(of);
-        return {};
-    }
-
-    AudioFileData result;
-    result.channels = channels;
-    result.sampleRate = 48000;  // Opus always decodes to 48 kHz
-    result.numFrames = static_cast<int>(totalSamples);
-    result.samples.resize(static_cast<size_t>(totalSamples) * channels);
-
-    size_t offset = 0;
-    size_t remaining = result.samples.size();
-    while (remaining > 0) {
-        int read = op_read_float(of, result.samples.data() + offset,
-                                 static_cast<int>(std::min(remaining, static_cast<size_t>(8192))), nullptr);
-        if (read <= 0) break;
-        size_t got = static_cast<size_t>(read) * channels;
-        offset += got;
-        remaining -= got;
-    }
-
-    result.numFrames = static_cast<int>(offset / channels);
-    result.samples.resize(offset);
-    op_free(of);
-    return result;
+    OggOpusDecoder dec;
+    std::string err;
+    bool ok = dec.openFile(path, &err);
+    return decodeOpus(dec, ok, err);
 }
 
 static AudioFileData loadOpusMemory(const uint8_t* data, size_t size)
 {
-    int error = 0;
-    OggOpusFile* of = op_open_memory(data, size, &error);
-    if (!of) return {};
-
-    int channels = op_channel_count(of, -1);
-    ogg_int64_t totalSamples = op_pcm_total(of, -1);
-    if (totalSamples <= 0 || channels <= 0) {
-        op_free(of);
-        return {};
-    }
-
-    AudioFileData result;
-    result.channels = channels;
-    result.sampleRate = 48000;
-    result.numFrames = static_cast<int>(totalSamples);
-    result.samples.resize(static_cast<size_t>(totalSamples) * channels);
-
-    size_t offset = 0;
-    size_t remaining = result.samples.size();
-    while (remaining > 0) {
-        int read = op_read_float(of, result.samples.data() + offset,
-                                 static_cast<int>(std::min(remaining, static_cast<size_t>(8192))), nullptr);
-        if (read <= 0) break;
-        size_t got = static_cast<size_t>(read) * channels;
-        offset += got;
-        remaining -= got;
-    }
-
-    result.numFrames = static_cast<int>(offset / channels);
-    result.samples.resize(offset);
-    op_free(of);
-    return result;
+    OggOpusDecoder dec;
+    std::string err;
+    bool ok = dec.openMemory(data, size, &err);
+    return decodeOpus(dec, ok, err);
 }
 
 #endif // BROAUDIO_HAS_OPUS
@@ -384,8 +360,8 @@ static AudioFileData oggError(AudioFormat fmt)
     AudioFileData r;
     switch (fmt) {
         case AudioFormat::Opus:
-            r.error = "Ogg Opus support is not compiled in (build with BROAUDIO_OPUS=ON), "
-                      "or re-encode the file as WAV, FLAC, MP3, or Ogg Vorbis";
+            r.error = "Ogg Opus support is not compiled in (broaudio was built without "
+                      "libopus); re-encode the file as WAV, FLAC, MP3, or Ogg Vorbis";
             break;
         default:
             r.error = "unrecognized Ogg codec (supported formats: WAV, FLAC, MP3, Ogg Vorbis"

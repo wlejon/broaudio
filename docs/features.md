@@ -87,7 +87,9 @@ Per bus, in a chain whose order is set by `setBusEffectOrder`.
 ## Audio file I/O
 
 - **Decode**: `loadAudioFile` and `loadAudioFileFromMemory` decode WAV, FLAC, MP3, and OGG to
-  interleaved float32 PCM via dr_libs. Opus requires `BROAUDIO_OPUS`.
+  interleaved float32 PCM via dr_libs and stb_vorbis. Ogg Opus (48 kHz) decodes through
+  broaudio's own Ogg demuxer over libopus when it is linked (`BROAUDIO_WITH_OPUS`), in memory
+  and as a seekable disk stream.
 - **Encode**: `saveWav` writes 32-bit float WAV; `exportRecordingToWav` dumps captured output.
 - **Offline resampling**: polyphase Kaiser-windowed sinc `resample()` for arbitrary ratios.
 

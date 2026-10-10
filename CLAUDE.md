@@ -28,8 +28,8 @@ libremidi, and bronze for the binding. No submodules: each is a `bro_dependency(
 and fetched at configure otherwise (the siblings at their main's head, SDL and libremidi at
 their pinned commits).
 
-Optional dependencies degrade rather than fail: if libremidi or opusfile is missing,
-`BROAUDIO_MIDI` / `BROAUDIO_OPUS` auto-disable with a status message. Preserve that behavior when
+Optional dependencies degrade rather than fail: if libremidi or libopus (`Opus::opus`) is
+missing, `BROAUDIO_MIDI` / `BROAUDIO_WITH_OPUS` auto-disable with a status message. Preserve that behavior when
 adding dependencies.
 
 Note for MSVC: `src/engine.cpp` is pinned to `/O1` in non-Debug configs to work around a compiler

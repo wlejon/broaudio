@@ -32,19 +32,24 @@ bro_dependency(bromath GITHUB wlejon/bromath TARGET bromath::bromath)
 bro_dependency(bronze GITHUB wlejon/bronze TARGET bronze_runtime_shared
                OPTIONS BRONZE_BUILD_SHARED_RUNTIME=ON BRONZE_BUILD_TESTS=OFF)
 
-# opusfile — optional OGG Opus support
-option(BROAUDIO_OPUS "Enable OGG Opus loading via opusfile" OFF)
-if(BROAUDIO_OPUS)
-    find_package(PkgConfig QUIET)
-    if(PkgConfig_FOUND)
-        pkg_check_modules(OPUSFILE IMPORTED_TARGET opusfile)
+# libopus — optional Ogg Opus decoding (broaudio's own Ogg demuxer,
+# src/codec/ogg_opus.cpp, over libopus; no opusfile). Uses the consumer's
+# Opus::opus target when it has one, else an installed Opus CMake package
+# (vcpkg's `opus`); without either it switches itself off and Ogg Opus files
+# fail with a clear error.
+# (BROAUDIO_OPUS was the old opusfile switch, default OFF; the new name keeps
+# a stale cache entry from turning this off.)
+option(BROAUDIO_WITH_OPUS "Ogg Opus decoding over libopus (auto-off when libopus is absent)" ON)
+set(BROAUDIO_HAS_LIBOPUS OFF)
+if(BROAUDIO_WITH_OPUS)
+    if(NOT TARGET Opus::opus)
+        find_package(Opus CONFIG QUIET)
     endif()
-    if(NOT OPUSFILE_FOUND)
-        find_package(OpusFile QUIET)
-    endif()
-    if(NOT OPUSFILE_FOUND AND NOT TARGET OpusFile::opusfile)
-        set(BROAUDIO_OPUS OFF)
-        message(STATUS "broaudio: opusfile not found, OGG Opus support disabled")
+    if(NOT TARGET Opus::opus)
+        message(STATUS "broaudio: libopus (Opus::opus) not found, Ogg Opus support disabled")
+    else()
+        set(BROAUDIO_HAS_LIBOPUS ON)
+        message(STATUS "broaudio: Ogg Opus decoding via libopus")
     endif()
 endif()
 
@@ -268,13 +273,10 @@ if(BROAUDIO_MIDI AND TARGET libremidi::libremidi)
     target_link_libraries(broaudio PUBLIC libremidi::libremidi)
 endif()
 
-if(BROAUDIO_OPUS)
+if(BROAUDIO_HAS_LIBOPUS)
+    target_sources(broaudio PRIVATE src/codec/ogg_opus.cpp)
     target_compile_definitions(broaudio PUBLIC BROAUDIO_HAS_OPUS=1)
-    if(TARGET PkgConfig::OPUSFILE)
-        target_link_libraries(broaudio PRIVATE PkgConfig::OPUSFILE)
-    elseif(TARGET OpusFile::opusfile)
-        target_link_libraries(broaudio PRIVATE OpusFile::opusfile)
-    endif()
+    target_link_libraries(broaudio PRIVATE Opus::opus)
 endif()
 
 # Bronze JavaScript API (before tests, which add a test against it)

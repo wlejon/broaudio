@@ -26,8 +26,8 @@ struct AudioFileData {
 // Format is detected by extension: .wav, .flac, .mp3. For .ogg/.opus the
 // codec inside the Ogg container is sniffed from the first packet: Ogg
 // Vorbis decodes via stb_vorbis (mono, stereo, and multichannel, any sample
-// rate); Opus decodes only when built with BROAUDIO_HAS_OPUS (a clear
-// `error` is set otherwise).
+// rate); Ogg Opus decodes at 48 kHz when broaudio is built with libopus
+// (BROAUDIO_HAS_OPUS; a clear `error` is set otherwise).
 // Returns an invalid AudioFileData on failure (valid() == false).
 AudioFileData loadAudioFile(const char* path);
 

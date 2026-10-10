@@ -7,7 +7,8 @@
 namespace broaudio {
 
 // Incremental (pull-based) audio file decoder — the disk-streaming counterpart
-// of loadAudioFile(). Opens WAV, FLAC, MP3, or Ogg Vorbis and decodes
+// of loadAudioFile(). Opens WAV, FLAC, MP3, Ogg Vorbis, or (when broaudio
+// is built with libopus, BROAUDIO_HAS_OPUS) Ogg Opus at 48 kHz, and decodes
 // interleaved float32 PCM in chunks instead of the whole file at once, so
 // arbitrarily large files play without being resident in RAM.
 //
@@ -33,8 +34,9 @@ public:
     int channels() const { return channels_; }
     int sampleRate() const { return sampleRate_; }
 
-    // Total frame count, or 0 when the container cannot say without scanning
-    // the whole file (MP3).
+    // Total frame count (at sampleRate()), or 0 when the file does not say.
+    // MP3 without a Xing/LAME header is counted by scanning its frame
+    // headers at open (no decoding); Ogg Opus reads its last page's granule.
     uint64_t totalFrames() const { return totalFrames_; }
 
     // Decode up to maxFrames interleaved frames into dst (needs room for
@@ -46,8 +48,8 @@ public:
     // backend cannot seek.
     bool seekToStart();
 
-    // Seek to an absolute PCM frame (at the file's native rate). All four
-    // backends support this (MP3 seeks by decoding/skipping, so a far seek
+    // Seek to an absolute PCM frame (at the file's native rate). Every
+    // backend supports this (Ogg Opus bisects pages by granule; MP3 seeks by decoding/skipping, so a far seek
     // in a long MP3 can take a moment — fine on the stream worker thread,
     // never call from the audio thread). Returns false if the backend
     // cannot reach the frame; decoder position is then unspecified, so

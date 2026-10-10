@@ -12,6 +12,10 @@
 #include "stb_vorbis/stb_vorbis.c"
 #undef STB_VORBIS_HEADER_ONLY
 
+#if defined(BROAUDIO_HAS_OPUS) && BROAUDIO_HAS_OPUS
+#include "../codec/ogg_opus.h"
+#endif
+
 namespace broaudio {
 
 // ---------------------------------------------------------------------------
@@ -19,7 +23,7 @@ namespace broaudio {
 // ---------------------------------------------------------------------------
 
 struct AudioFileStream::Impl {
-    enum class Backend { None, Wav, Flac, Mp3, Vorbis };
+    enum class Backend { None, Wav, Flac, Mp3, Vorbis, Opus };
     Backend backend = Backend::None;
 
     drwav wav{};
@@ -28,6 +32,9 @@ struct AudioFileStream::Impl {
     drmp3 mp3{};
     bool mp3Open = false;
     stb_vorbis* vorbis = nullptr;
+#if defined(BROAUDIO_HAS_OPUS) && BROAUDIO_HAS_OPUS
+    std::unique_ptr<OggOpusDecoder> opus;
+#endif
 
     ~Impl() { close(); }
 
@@ -38,6 +45,9 @@ struct AudioFileStream::Impl {
             case Backend::Flac: if (flac) drflac_close(flac); flac = nullptr; break;
             case Backend::Mp3:  if (mp3Open) drmp3_uninit(&mp3); mp3Open = false; break;
             case Backend::Vorbis: if (vorbis) stb_vorbis_close(vorbis); vorbis = nullptr; break;
+#if defined(BROAUDIO_HAS_OPUS) && BROAUDIO_HAS_OPUS
+            case Backend::Opus: opus.reset(); break;
+#endif
             default: break;
         }
         backend = Backend::None;
@@ -48,6 +58,12 @@ struct AudioFileStream::Impl {
 // Format sniff (mirror of audio_file.cpp's detectFormat, kept local so the
 // public header stays free of internal enums)
 // ---------------------------------------------------------------------------
+
+#if defined(BROAUDIO_HAS_OPUS) && BROAUDIO_HAS_OPUS
+#define STREAMABLE "WAV, FLAC, MP3, Ogg Vorbis, Ogg Opus"
+#else
+#define STREAMABLE "WAV, FLAC, MP3, Ogg Vorbis"
+#endif
 
 namespace {
 enum class Sniffed { Unknown, Wav, Flac, Mp3, OggVorbis, OggOpus, OggOther };
@@ -147,7 +163,10 @@ bool AudioFileStream::open(const char* path)
             impl_->backend = Impl::Backend::Mp3;
             channels_ = static_cast<int>(impl_->mp3.channels);
             sampleRate_ = static_cast<int>(impl_->mp3.sampleRate);
-            totalFrames_ = 0; // counting would scan the whole file
+            // From the Xing/LAME header when there is one (instant, and
+            // net of encoder delay/padding), else a scan of the frame
+            // headers — no synthesis, and dr_mp3 rewinds afterwards.
+            totalFrames_ = drmp3_get_pcm_frame_count(&impl_->mp3);
             return true;
         }
         case Sniffed::OggVorbis: {
@@ -165,17 +184,31 @@ bool AudioFileStream::open(const char* path)
             totalFrames_ = stb_vorbis_stream_length_in_samples(impl_->vorbis);
             return true;
         }
-        case Sniffed::OggOpus:
-            error_ = "Ogg Opus cannot be disk-streamed; re-encode as WAV, FLAC, "
-                     "MP3, or Ogg Vorbis";
+        case Sniffed::OggOpus: {
+#if defined(BROAUDIO_HAS_OPUS) && BROAUDIO_HAS_OPUS
+            auto dec = std::make_unique<OggOpusDecoder>();
+            std::string err;
+            if (!dec->openFile(path, &err)) {
+                error_ = err.empty() ? "corrupt or unsupported Ogg Opus file" : err;
+                return false;
+            }
+            channels_ = dec->channels();
+            sampleRate_ = OggOpusDecoder::sampleRate();
+            totalFrames_ = dec->totalFrames();
+            impl_->opus = std::move(dec);
+            impl_->backend = Impl::Backend::Opus;
+            return true;
+#else
+            error_ = "Ogg Opus support is not compiled in (broaudio was built "
+                     "without libopus); re-encode as WAV, FLAC, MP3, or Ogg Vorbis";
             return false;
+#endif
+        }
         case Sniffed::OggOther:
-            error_ = "unrecognized Ogg codec (streamable formats: WAV, FLAC, MP3, "
-                     "Ogg Vorbis)";
+            error_ = "unrecognized Ogg codec (streamable formats: " STREAMABLE ")";
             return false;
         default:
-            error_ = "unrecognized audio format (streamable formats: WAV, FLAC, "
-                     "MP3, Ogg Vorbis)";
+            error_ = "unrecognized audio format (streamable formats: " STREAMABLE ")";
             return false;
     }
 }
@@ -196,6 +229,10 @@ int AudioFileStream::readFrames(float* dst, int maxFrames)
         case Impl::Backend::Vorbis:
             return stb_vorbis_get_samples_float_interleaved(
                 impl_->vorbis, channels_, dst, maxFrames * channels_);
+#if defined(BROAUDIO_HAS_OPUS) && BROAUDIO_HAS_OPUS
+        case Impl::Backend::Opus:
+            return impl_->opus->readFrames(dst, maxFrames);
+#endif
         default:
             return 0;
     }
@@ -225,6 +262,10 @@ bool AudioFileStream::seekToFrame(uint64_t frame)
         case Impl::Backend::Vorbis:
             return stb_vorbis_seek(impl_->vorbis,
                        static_cast<unsigned int>(frame)) != 0;
+#if defined(BROAUDIO_HAS_OPUS) && BROAUDIO_HAS_OPUS
+        case Impl::Backend::Opus:
+            return impl_->opus->seekToFrame(frame);
+#endif
         default:
             return false;
     }

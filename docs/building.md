@@ -43,7 +43,7 @@ top-level project declared first win over broaudio's own.
 | Option | Default | Description |
 |---|---|---|
 | `BROAUDIO_MIDI` | `ON` | MIDI input via libremidi (pinned, fetched at configure). Defines `BROAUDIO_HAS_MIDI`. |
-| `BROAUDIO_OPUS` | `OFF` | OGG Opus decoding via opusfile (pkg-config or find_package). Defines `BROAUDIO_HAS_OPUS`. |
+| `BROAUDIO_WITH_OPUS` | `ON` | Ogg Opus decoding (file, memory and disk streaming) through broaudio's own Ogg demuxer over libopus: the consumer's `Opus::opus` target, else `find_package(Opus CONFIG)` (vcpkg `opus`). Defines `BROAUDIO_HAS_OPUS`; auto-off without libopus. |
 | `BROAUDIO_PIPEWIRE` | `ON` | Native PipeWire device backend on Linux when `libpipewire-0.3` is found. Defines `BROAUDIO_HAS_PIPEWIRE` (private). |
 | `BROAUDIO_TESTS` | `ON` | Build the test suite (standalone builds only). |
 

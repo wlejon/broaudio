@@ -1,5 +1,5 @@
 // Behavioural checks for broaudio_api against the pre-bronze (QuickJS)
-// binding: every row of bro's docs/transition-drift.md section B, plus the
+// binding: every behaviour the bronze port drifted from, plus the
 // node-level restorations the static shape diff found (analyser `source`,
 // oscillator gain-through-connect, biquad connect/disconnect, the filter
 // slot error, the sequence note `beat` key).

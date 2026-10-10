@@ -118,8 +118,8 @@ if(TARGET broaudio_api)
         endif()
     endif()
 
-    # Pre-bronze binding semantics (drift rows B1-B17 of bro's
-    # docs/transition-drift.md plus the node-level shape diff): its own
+    # Pre-bronze binding semantics (the QuickJS binding's behaviour plus the
+    # node-level shape diff): its own
     # headless engine, renderBlock-driven, files through a scratch resolver.
     add_executable(broaudio_test_api_drift test_audio_api_drift.cpp)
     target_link_libraries(broaudio_test_api_drift PRIVATE broaudio_api bronze_runtime_shared)

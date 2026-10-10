@@ -58,6 +58,12 @@ struct AudioClip {
     std::atomic<uint64_t> streamSeekRequested{0};
     std::atomic<uint64_t> streamSeekApplied{0};
 
+    // Disk streams: the file's length in seconds, or 0 when the container
+    // cannot say. Stored once by createStreamFromFile right after the clip is
+    // published (relaxed: a reader that sees 0 just reports "unknown" for a
+    // moment). Position queries wrap a looping stream's file time by it.
+    std::atomic<double> streamDurationSeconds{0.0};
+
     int numFrames() const { return channels > 0 ? static_cast<int>(samples.size()) / channels : 0; }
 };
 

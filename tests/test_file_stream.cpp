@@ -15,6 +15,7 @@
 #include "broaudio/io/audio_file.h"
 #include "broaudio/io/audio_stream.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -486,6 +487,55 @@ TEST(file_stream_seek_restarts_finished_stream) {
     }));
     ASSERT_FALSE(e.getStreamStats(id).finished);
 
+    e.closeStream(id);
+    std::remove(WAV_PATH);
+    PASS();
+}
+
+// A stream knows its file's length; its position stays inside the file while
+// it loops, reads 0..1 normalized, and a non-looping stream that played out
+// reports Finished (isPlaybackPlaying false) while staying open.
+TEST(file_stream_position_wraps_and_finishes) {
+    Engine e;
+    ASSERT_TRUE(e.initHeadless());
+    const int sr = e.sampleRate();
+    const int frames = sr * 2 / 5;  // 0.4 s
+    auto sine = sineMono(frames, 440.0f, sr);
+    ASSERT_TRUE(saveWav(WAV_PATH, sine.data(), frames, 1, sr));
+
+    FileStreamOptions opts;
+    opts.loop = true;
+    int id = e.createStreamFromFile(WAV_PATH, opts);
+    ASSERT_TRUE(id >= 0);
+    ASSERT_NEAR(e.getStreamDuration(id), 0.4, 1e-6);
+    ASSERT_NEAR(e.getStreamStats(id).durationSeconds, 0.4, 1e-6);
+
+    // Four and a half passes.
+    double maxPos = 0.0;
+    for (int i = 0; i < 18; ++i) {
+        ASSERT_TRUE(renderFed(e, id, sr / 10));
+        const double p = e.getPlaybackPositionSeconds(id);
+        maxPos = std::max(maxPos, p);
+        ASSERT_NEAR(e.getPlaybackPosition(id), p / 0.4, 1e-4);
+    }
+    const double played = static_cast<double>(e.getStreamStats(id).playedFrames) / sr;
+    ASSERT_TRUE(played > 1.75);
+    ASSERT_TRUE(maxPos < 0.4);
+    ASSERT_NEAR(e.getPlaybackPositionSeconds(id), std::fmod(played, 0.4), 1e-3);
+    ASSERT_TRUE(e.isPlaybackPlaying(id));
+    e.closeStream(id);
+
+    id = e.createStreamFromFile(WAV_PATH);
+    ASSERT_TRUE(id >= 0);
+    ASSERT_TRUE(renderFed(e, id, sr / 5));
+    ASSERT_NEAR(e.getPlaybackPosition(id), 0.5, 0.05);
+    ASSERT_TRUE(e.isPlaybackPlaying(id));
+    ASSERT_TRUE(renderFed(e, id, sr / 2));
+    ASSERT_TRUE(waitFor([&] { return e.getStreamStats(id).finished; }));
+    ASSERT_TRUE(e.getPlaybackState(id) == Engine::PlaybackState::Finished);
+    ASSERT_FALSE(e.isPlaybackPlaying(id));
+    ASSERT_NEAR(e.getPlaybackPositionSeconds(id), 0.4, 1e-3);
+    ASSERT_NEAR(e.getPlaybackPosition(id), 1.0, 1e-3);
     e.closeStream(id);
     std::remove(WAV_PATH);
     PASS();

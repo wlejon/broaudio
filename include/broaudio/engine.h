@@ -76,6 +76,10 @@ struct StreamStats {
     uint64_t underrunFrames = 0;  // silent frames emitted while starved
     bool finished = false;        // disk stream: EOF reached and ring drained
     bool valid = false;           // false when the id is not a streaming playback
+    // Disk stream: the file's length in seconds (0 = unknown, and always 0
+    // for live PCM streams). positionSeconds is getPlaybackPositionSeconds.
+    double durationSeconds = 0.0;
+    double positionSeconds = 0.0;
 };
 
 class Engine {
@@ -579,14 +583,16 @@ public:
     // --- Disk-streamed file playback ---
     //
     // Play a large audio file WITHOUT decoding it into RAM: a cold worker
-    // thread decodes the file incrementally (WAV, FLAC, MP3, Ogg Vorbis),
-    // resamples to the engine rate, and feeds the same streaming ring a live
-    // PCM stream uses. The returned playback instance id works with every
-    // setPlayback* control (gain, pan, bus, sends, rate, spatial). Playback
-    // starts automatically once the prebuffer is decoded. Looping follows
+    // thread decodes the file incrementally (WAV, FLAC, MP3, Ogg Vorbis, and
+    // Ogg Opus when built with libopus), resamples to the engine rate, and
+    // feeds the same streaming ring a live PCM stream uses. The returned
+    // playback instance id works with every setPlayback* control (gain, pan,
+    // bus, sends, rate, spatial) and with seekPlayback. Playback starts
+    // automatically once the prebuffer is decoded. Looping follows
     // setPlaybackLoop live: the worker rewinds the decoder at EOF, so loops
-    // are seamless. There is no seek (matching clip playback). On ring
-    // underrun the mixer emits silence and counts it (see getStreamStats).
+    // are seamless. A non-looping stream that has played its last frame
+    // reports PlaybackState::Finished (it stays open until closeStream). On
+    // ring underrun the mixer emits silence and counts it (getStreamStats).
     //
     // Returns the playback instance id, or -1 on failure with *outError set
     // to an actionable message (unreadable file, unsupported codec, >2
@@ -599,6 +605,11 @@ public:
     // stats.valid is false when the id is not an active streaming playback.
     StreamStats getStreamStats(int instanceId) const;
 
+    // A disk stream's file length in seconds: exact from the container for
+    // WAV, FLAC, Ogg Vorbis and Ogg Opus, from a frame-header scan at open
+    // for MP3. 0 for live PCM streams, clips and unknown ids.
+    double getStreamDuration(int instanceId) const;
+
     // rampSeconds as setBusGain. A ramp set before the playback's first mixed
     // block starts from the gain it replaced (play at 0, ramp to 1 = fade-in).
     void setPlaybackGain(int instanceId, float gain, float rampSeconds = 0.0f);
@@ -607,6 +618,9 @@ public:
     void setPlaybackPlaying(int instanceId, bool playing);
     void setPlaybackRate(int instanceId, float rate);
     void setPlaybackPan(int instanceId, float pan);
+    // Normalized 0..1 position: clips within the region (wraps when
+    // looping); disk streams getPlaybackPositionSeconds / getStreamDuration
+    // (0 while the duration is unknown); live PCM streams 0.
     float getPlaybackPosition(int instanceId) const;
 
     // Jump the playback cursor to `seconds`.
@@ -624,8 +638,9 @@ public:
     // Playback position in seconds — the seconds-domain counterpart of the
     // normalized getPlaybackPosition. Clip playbacks: seconds from the region
     // start (wraps when looping). Disk streams: current file time (seek-
-    // aware). Live PCM streams: seconds of audio consumed since the stream
-    // opened. Returns 0 for unknown handles.
+    // aware), in [0, duration] — a looping stream wraps back to 0 at each
+    // pass, a finished one reads its duration. Live PCM streams: seconds of
+    // audio consumed since the stream opened. Returns 0 for unknown handles.
     double getPlaybackPositionSeconds(int instanceId) const;
 
     // --- Spatial (listener) ---
@@ -767,7 +782,7 @@ public:
     // --- Audio file I/O ---
 
     // Create a clip by loading an audio file (WAV, FLAC, MP3, Ogg Vorbis;
-    // Ogg Opus with BROAUDIO_OPUS). Returns clip id on success, -1 on failure.
+    // Ogg Opus when built with libopus). Returns clip id on success, -1 on failure.
     int createClipFromFile(const char* path);
 
     // As createClipFromFile, but on failure *outError receives an actionable

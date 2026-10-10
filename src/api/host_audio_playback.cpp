@@ -294,7 +294,16 @@ void registerAudioContextPlayback(ObjectBuilder& b) {
         obj.set("bufferedFrames", ev::fromDouble(stats.bufferedFrames));
         obj.set("underrunFrames", ev::fromDouble(stats.underrunFrames));
         obj.set("finished", ev::fromBool(stats.finished));
+        obj.set("duration", ev::fromDouble(stats.durationSeconds));
+        obj.set("position", ev::fromDouble(stats.positionSeconds));
         return obj.get();
+    });
+
+    // getStreamDuration(playbackId) -> seconds; 0 when unknown, for a live
+    // stream, or for anything that is not a stream.
+    b.def("getStreamDuration", 1, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        return ev::fromDouble(e && !a.empty() ? e->getStreamDuration(i32At(a, 0)) : 0.0);
     });
 }
 

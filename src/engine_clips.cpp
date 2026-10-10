@@ -10,6 +10,7 @@
 
 #include <new>
 #include <algorithm>
+#include <cmath>
 
 namespace broaudio {
 
@@ -235,6 +236,16 @@ Engine::PlaybackState Engine::getPlaybackState(int instanceId) const
         if (pb->id != instanceId) continue;
         if (!pb->active.load(std::memory_order_relaxed)) return PlaybackState::Finished;
         if (!pb->playing.load(std::memory_order_relaxed)) return PlaybackState::Paused;
+        // A disk stream that reached EOF (not looping) and whose ring has
+        // drained has nothing left to play: it stays open (closeStream) but
+        // is finished, like a one-shot parked at its end.
+        if (pb->clipId > 0) {
+            if (AudioClip* clip = findClip(pb->clipId); clip && clip->streaming &&
+                clip->streamEnded.load(std::memory_order_acquire) &&
+                pb->playPos.load(std::memory_order_relaxed) >=
+                    clip->writeFrames.load(std::memory_order_acquire))
+                return PlaybackState::Finished;
+        }
         // The mixer begins a scheduled playback inside the block that spans
         // startSample; samplesGenerated_ is the end of the last mixed block.
         uint64_t startS = pb->startSample.load(std::memory_order_relaxed);
@@ -382,6 +393,11 @@ int Engine::createStreamFromFile(const char* path, const FileStreamOptions& opts
         return fail("cannot allocate a ring of " + std::to_string(ringFrames) + " frames");
     }
 
+    if (decoder->totalFrames() > 0)
+        clip->streamDurationSeconds.store(
+            static_cast<double>(decoder->totalFrames()) / decoder->sampleRate(),
+            std::memory_order_relaxed);
+
     auto runner = std::make_unique<FileStreamRunner>(
         std::move(clip), std::move(pb), std::move(decoder), sampleRate_, prebuffer);
     runner->start();
@@ -409,7 +425,18 @@ StreamStats Engine::getStreamStats(int instanceId) const
     s.underrunFrames = clip->streamUnderrunFrames.load(std::memory_order_relaxed);
     s.finished = clip->streamEnded.load(std::memory_order_acquire)
                  && s.bufferedFrames == 0;
+    s.durationSeconds = clip->streamDurationSeconds.load(std::memory_order_relaxed);
+    s.positionSeconds = getPlaybackPositionSeconds(instanceId);
     return s;
+}
+
+double Engine::getStreamDuration(int instanceId) const
+{
+    ClipPlayback* pb = findPlayback(instanceId);
+    if (!pb) return 0.0;
+    AudioClip* clip = findClip(pb->clipId);
+    if (!clip || !clip->streaming) return 0.0;
+    return clip->streamDurationSeconds.load(std::memory_order_relaxed);
 }
 
 void Engine::stopFileStream(int instanceId)
@@ -578,7 +605,22 @@ double Engine::getPlaybackPositionSeconds(int instanceId) const
         uint64_t sinceFlush = pos > flush ? pos - flush : 0;
         double s = (static_cast<double>(base) + static_cast<double>(sinceFlush))
                    / static_cast<double>(sampleRate_);
-        return s > 0.0 ? s : 0.0;
+        if (!(s > 0.0)) return 0.0;
+
+        // A looping disk stream rewinds its decoder at EOF without a fence,
+        // so the consumed count keeps growing across passes: fold it back
+        // into file time. A stream that played out (not looping, EOF) reads
+        // its duration rather than wrapping to the start of a pass it will
+        // not play — including the few resampler-tail frames past the end.
+        const double dur = clip->streamDurationSeconds.load(std::memory_order_relaxed);
+        if (dur > 0.0 && s >= dur) {
+            double r = std::fmod(s, dur);
+            if (!pb->looping.load(std::memory_order_relaxed) &&
+                clip->streamEnded.load(std::memory_order_acquire) && r < 0.05)
+                r = dur;
+            s = r;
+        }
+        return s;
     }
 
     int rs = pb->regionStart.load(std::memory_order_relaxed);
@@ -598,6 +640,14 @@ float Engine::getPlaybackPosition(int instanceId) const
     if (!pb) return 0.0f;
     auto* clip = findClip(pb->clipId);
     if (!clip) return 0.0f;
+
+    if (clip->streaming) {
+        // The ring is not the file: normalize file time by the file's length.
+        const double dur = clip->streamDurationSeconds.load(std::memory_order_relaxed);
+        if (!(dur > 0.0)) return 0.0f;
+        return static_cast<float>(
+            std::clamp(getPlaybackPositionSeconds(instanceId) / dur, 0.0, 1.0));
+    }
 
     int re = pb->regionEnd.load(std::memory_order_relaxed);
     int rs = pb->regionStart.load(std::memory_order_relaxed);

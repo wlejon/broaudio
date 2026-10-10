@@ -30,6 +30,7 @@
 #if defined(BROAUDIO_HAS_OPUS) && BROAUDIO_HAS_OPUS
 #include "../codec/ogg_opus.h"
 #endif
+#include "../codec/mp4_aac.h"
 
 namespace broaudio {
 
@@ -307,10 +308,58 @@ static AudioFileData loadOpusMemory(const uint8_t* data, size_t size)
 #endif // BROAUDIO_HAS_OPUS
 
 // ---------------------------------------------------------------------------
+// MP4 / M4A (AAC through the platform decoder)
+// ---------------------------------------------------------------------------
+
+static AudioFileData decodeMp4(Mp4AacDecoder& dec, bool opened, const std::string& err)
+{
+    AudioFileData result;
+    if (!opened) {
+        result.error = err.empty() ? "corrupt or unsupported MP4 file" : err;
+        return result;
+    }
+    const int channels = dec.channels();
+    result.samples.resize(static_cast<size_t>(dec.totalFrames()) * channels);
+    uint64_t frames = 0;
+    while (frames < dec.totalFrames()) {
+        const int want = static_cast<int>(std::min<uint64_t>(4096, dec.totalFrames() - frames));
+        const int got = dec.readFrames(result.samples.data() + frames * channels, want);
+        if (got <= 0) break;
+        frames += static_cast<uint64_t>(got);
+    }
+    result.samples.resize(static_cast<size_t>(frames) * channels);
+    if (frames == 0) {
+        result.samples.clear();
+        result.error = "corrupt MP4 file (no decodable audio)";
+        return result;
+    }
+    result.channels = channels;
+    result.sampleRate = dec.sampleRate();
+    result.numFrames = static_cast<int>(frames);
+    return result;
+}
+
+static AudioFileData loadMp4(const char* path)
+{
+    Mp4AacDecoder dec;
+    std::string err;
+    const bool ok = dec.openFile(path, &err);
+    return decodeMp4(dec, ok, err);
+}
+
+static AudioFileData loadMp4Memory(const uint8_t* data, size_t size)
+{
+    Mp4AacDecoder dec;
+    std::string err;
+    const bool ok = dec.openMemory(data, size, &err);
+    return decodeMp4(dec, ok, err);
+}
+
+// ---------------------------------------------------------------------------
 // Format detection from memory (magic bytes)
 // ---------------------------------------------------------------------------
 
-enum class AudioFormat { Unknown, Wav, Flac, Mp3, Opus, Vorbis, OggOther };
+enum class AudioFormat { Unknown, Wav, Flac, Mp3, Opus, Vorbis, OggOther, Mp4 };
 
 // Sniff the codec inside an Ogg container. The first Ogg page carries the
 // codec's identification header as its first packet: page = 27-byte header,
@@ -343,6 +392,10 @@ static AudioFormat detectFormat(const uint8_t* data, size_t size)
     // OggS (OGG container) — distinguish the codec, don't assume Opus
     if (data[0] == 'O' && data[1] == 'g' && data[2] == 'g' && data[3] == 'S')
         return sniffOggCodec(data, size);
+
+    // ....ftyp: an ISO media file (M4A, MP4)
+    if (looksLikeMp4(data, size))
+        return AudioFormat::Mp4;
 
     // MP3: ID3 tag or sync word (0xFF 0xFB/0xFA/0xF3/0xF2/0xE3/0xE2)
     if (data[0] == 'I' && data[1] == 'D' && data[2] == '3')
@@ -411,6 +464,8 @@ AudioFileData loadAudioFile(const char* path)
 #endif
         return oggError(fmt);
     }
+    if (ext == ".m4a" || ext == ".m4b" || ext == ".mp4")
+        return loadMp4(path);
 
     return {};
 }
@@ -434,6 +489,8 @@ AudioFileData loadAudioFileFromMemory(const uint8_t* data, size_t size)
             return loadVorbisMemory(data, size);
         case AudioFormat::OggOther:
             return oggError(fmt);
+        case AudioFormat::Mp4:
+            return loadMp4Memory(data, size);
         default: return {};
     }
 }

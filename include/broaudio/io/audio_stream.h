@@ -7,8 +7,9 @@
 namespace broaudio {
 
 // Incremental (pull-based) audio file decoder — the disk-streaming counterpart
-// of loadAudioFile(). Opens WAV, FLAC, MP3, Ogg Vorbis, or (when broaudio
-// is built with libopus, BROAUDIO_HAS_OPUS) Ogg Opus at 48 kHz, and decodes
+// of loadAudioFile(). Opens WAV, FLAC, MP3, Ogg Vorbis, (when broaudio is
+// built with libopus, BROAUDIO_HAS_OPUS) Ogg Opus at 48 kHz, or (with a
+// platform AAC decoder, BROAUDIO_HAS_AAC: Windows, macOS) MP4/M4A AAC, and decodes
 // interleaved float32 PCM in chunks instead of the whole file at once, so
 // arbitrarily large files play without being resident in RAM.
 //

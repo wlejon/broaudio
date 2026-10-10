@@ -44,6 +44,7 @@ top-level project declared first win over broaudio's own.
 |---|---|---|
 | `BROAUDIO_MIDI` | `ON` | MIDI input via libremidi (pinned, fetched at configure). Defines `BROAUDIO_HAS_MIDI`. |
 | `BROAUDIO_WITH_OPUS` | `ON` | Ogg Opus decoding (file, memory and disk streaming) through broaudio's own Ogg demuxer over libopus: the consumer's `Opus::opus` target, else `find_package(Opus CONFIG)` (vcpkg `opus`). Defines `BROAUDIO_HAS_OPUS`; auto-off without libopus. |
+| (none) | | M4A/AAC: Media Foundation (`mfplat`, `mfuuid`) on Windows and AudioToolbox on macOS are always linked and define `BROAUDIO_HAS_AAC=1`; elsewhere it is 0 and M4A fails with a clear error. |
 | `BROAUDIO_PIPEWIRE` | `ON` | Native PipeWire device backend on Linux when `libpipewire-0.3` is found. Defines `BROAUDIO_HAS_PIPEWIRE` (private). |
 | `BROAUDIO_TESTS` | `ON` | Build the test suite (standalone builds only). |
 

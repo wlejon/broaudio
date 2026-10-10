@@ -98,7 +98,7 @@ See [docs/building.md](docs/building.md) for options, optional dependencies, and
 | `include/broaudio/` | Public headers, mirroring `src/` |
 | `src/` | Implementation |
 | `tests/` | One executable per test, registered with CTest |
-| `third_party/` | Vendored dr_libs, stb_vorbis, nlohmann |
+| `third_party/` | Vendored dr_libs, stb_vorbis, minimp4 (CC0), nlohmann |
 | `cmake/bro_deps.cmake` | The ecosystem's dependency helper (`bro_dependency`) |
 | `src/api/` | The bronze JavaScript binding (`broaudio_api`) |
 | `scripts/` | `coverage.ps1`, the Windows coverage report |

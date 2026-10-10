@@ -89,7 +89,16 @@ Per bus, in a chain whose order is set by `setBusEffectOrder`.
 - **Decode**: `loadAudioFile` and `loadAudioFileFromMemory` decode WAV, FLAC, MP3, and OGG to
   interleaved float32 PCM via dr_libs and stb_vorbis. Ogg Opus (48 kHz) decodes through
   broaudio's own Ogg demuxer over libopus when it is linked (`BROAUDIO_WITH_OPUS`), in memory
-  and as a seekable disk stream.
+  and as a seekable disk stream. MP4/M4A AAC (AAC-LC; HE-AAC where the platform decoder takes
+  it) demuxes with minimp4 (CC0) and decodes through the platform: Media Foundation on Windows,
+  AudioToolbox on macOS (`BROAUDIO_HAS_AAC`). The edit list's priming is trimmed and seeks are
+  sample-exact. Linux has no AAC decoder in broaudio: M4A fails there with "M4A/AAC needs a
+  platform AAC decoder".
+- **Tags**: `readAudioTags` / `readAudioTagsFromMemory` (`broaudio/io/audio_tags.h`) read
+  title, artist, album, album artist, track/disc (of total), year, genre, the front cover, and
+  the length, rate, channels, bit rate and codec, from ID3v2.2–2.4 + ID3v1 (MP3), FLAC
+  comments and pictures, Ogg Vorbis/Opus comments, WAV LIST/INFO and id3 chunks, and MP4
+  `ilst` atoms, without decoding and without reading the whole file.
 - **Encode**: `saveWav` writes 32-bit float WAV; `exportRecordingToWav` dumps captured output.
 - **Offline resampling**: polyphase Kaiser-windowed sinc `resample()` for arbitrary ratios.
 

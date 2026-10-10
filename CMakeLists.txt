@@ -75,6 +75,7 @@ endif()
 add_library(broaudio_codecs STATIC
     src/codec/stb_vorbis_impl.c
     src/codec/dr_libs_impl.cpp
+    src/codec/minimp4_impl.c
 )
 target_include_directories(broaudio_codecs PRIVATE
     third_party/dr_libs
@@ -117,7 +118,17 @@ add_library(broaudio STATIC
     src/sequencer/sequence.cpp
     src/io/audio_file.cpp
     src/io/audio_stream.cpp
+    src/io/byte_source.cpp
     src/io/serialization.cpp
+    src/io/tags/audio_tags.cpp
+    src/io/tags/id3.cpp
+    src/io/tags/mp3.cpp
+    src/io/tags/mp4.cpp
+    src/io/tags/ogg.cpp
+    src/io/tags/vorbis.cpp
+    src/io/tags/wav.cpp
+    src/codec/aac_decoder.cpp
+    src/codec/mp4_aac.cpp
     src/engine.cpp
     src/engine_buses.cpp
     src/engine_bus_params.cpp
@@ -185,6 +196,24 @@ else()
         target_sources(broaudio PRIVATE src/loopback/capture_null.cpp)
         message(STATUS "broaudio: loopback capture unsupported (no backend), using stub")
     endif()
+endif()
+
+# AAC (MP4/M4A audio) through the platform's decoder: Media Foundation on
+# Windows, AudioToolbox on macOS. broaudio carries no AAC decoder of its own,
+# so elsewhere M4A fails with "M4A/AAC needs a platform AAC decoder".
+if(WIN32)
+    target_sources(broaudio PRIVATE src/codec/aac_mediafoundation.cpp)
+    target_link_libraries(broaudio PUBLIC mfplat mfuuid)
+    target_compile_definitions(broaudio PUBLIC BROAUDIO_HAS_AAC=1)
+    message(STATUS "broaudio: M4A/AAC via Media Foundation")
+elseif(APPLE)
+    target_sources(broaudio PRIVATE src/codec/aac_audiotoolbox.cpp)
+    target_link_libraries(broaudio PUBLIC "-framework AudioToolbox" "-framework CoreFoundation")
+    target_compile_definitions(broaudio PUBLIC BROAUDIO_HAS_AAC=1)
+    message(STATUS "broaudio: M4A/AAC via AudioToolbox")
+else()
+    target_compile_definitions(broaudio PUBLIC BROAUDIO_HAS_AAC=0)
+    message(STATUS "broaudio: no platform AAC decoder; M4A/AAC disabled")
 endif()
 
 target_sources(broaudio PRIVATE src/midi/midi_input.cpp)

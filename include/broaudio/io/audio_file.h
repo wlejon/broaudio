@@ -27,7 +27,11 @@ struct AudioFileData {
 // codec inside the Ogg container is sniffed from the first packet: Ogg
 // Vorbis decodes via stb_vorbis (mono, stereo, and multichannel, any sample
 // rate); Ogg Opus decodes at 48 kHz when broaudio is built with libopus
-// (BROAUDIO_HAS_OPUS; a clear `error` is set otherwise).
+// (BROAUDIO_HAS_OPUS; a clear `error` is set otherwise). .m4a/.m4b/.mp4
+// decode their first AAC track through the platform's AAC decoder (Media
+// Foundation on Windows, AudioToolbox on macOS; BROAUDIO_HAS_AAC), with the
+// encoder's priming trimmed by the edit list; on other platforms `error`
+// says M4A needs a platform AAC decoder.
 // Returns an invalid AudioFileData on failure (valid() == false).
 AudioFileData loadAudioFile(const char* path);
 

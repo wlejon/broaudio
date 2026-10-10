@@ -37,6 +37,8 @@ set(BROAUDIO_TESTS
     test_audio_file
     test_vorbis
     test_file_stream
+    test_audio_tags
+    test_m4a
     test_serialization
     test_atomic_shared_ptr
     test_clip_playback
@@ -68,6 +70,8 @@ foreach(test ${BROAUDIO_TESTS})
     add_executable(${test} ${test}.cpp)
     target_link_libraries(${test} PRIVATE broaudio)
     target_include_directories(${test} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    # Binary fixtures a test cannot build as bytes (an encoder's M4A).
+    target_compile_definitions(${test} PRIVATE BROAUDIO_TEST_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
     add_test(NAME ${test} COMMAND ${test})
 endforeach()
 

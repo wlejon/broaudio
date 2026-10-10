@@ -15,6 +15,7 @@
 #if defined(BROAUDIO_HAS_OPUS) && BROAUDIO_HAS_OPUS
 #include "../codec/ogg_opus.h"
 #endif
+#include "../codec/mp4_aac.h"
 
 namespace broaudio {
 
@@ -23,7 +24,7 @@ namespace broaudio {
 // ---------------------------------------------------------------------------
 
 struct AudioFileStream::Impl {
-    enum class Backend { None, Wav, Flac, Mp3, Vorbis, Opus };
+    enum class Backend { None, Wav, Flac, Mp3, Vorbis, Opus, Mp4 };
     Backend backend = Backend::None;
 
     drwav wav{};
@@ -35,6 +36,7 @@ struct AudioFileStream::Impl {
 #if defined(BROAUDIO_HAS_OPUS) && BROAUDIO_HAS_OPUS
     std::unique_ptr<OggOpusDecoder> opus;
 #endif
+    std::unique_ptr<Mp4AacDecoder> mp4;
 
     ~Impl() { close(); }
 
@@ -48,6 +50,7 @@ struct AudioFileStream::Impl {
 #if defined(BROAUDIO_HAS_OPUS) && BROAUDIO_HAS_OPUS
             case Backend::Opus: opus.reset(); break;
 #endif
+            case Backend::Mp4: mp4.reset(); break;
             default: break;
         }
         backend = Backend::None;
@@ -60,17 +63,25 @@ struct AudioFileStream::Impl {
 // ---------------------------------------------------------------------------
 
 #if defined(BROAUDIO_HAS_OPUS) && BROAUDIO_HAS_OPUS
-#define STREAMABLE "WAV, FLAC, MP3, Ogg Vorbis, Ogg Opus"
+#define STREAMABLE_OPUS ", Ogg Opus"
 #else
-#define STREAMABLE "WAV, FLAC, MP3, Ogg Vorbis"
+#define STREAMABLE_OPUS ""
 #endif
+#if defined(BROAUDIO_HAS_AAC) && BROAUDIO_HAS_AAC
+#define STREAMABLE_AAC ", M4A (AAC)"
+#else
+#define STREAMABLE_AAC ""
+#endif
+#define STREAMABLE "WAV, FLAC, MP3, Ogg Vorbis" STREAMABLE_OPUS STREAMABLE_AAC
 
 namespace {
-enum class Sniffed { Unknown, Wav, Flac, Mp3, OggVorbis, OggOpus, OggOther };
+enum class Sniffed { Unknown, Wav, Flac, Mp3, OggVorbis, OggOpus, OggOther, Mp4 };
 
 Sniffed sniff(const uint8_t* d, size_t n)
 {
     if (n < 4) return Sniffed::Unknown;
+    if (looksLikeMp4(d, n))
+        return Sniffed::Mp4;
     if (n >= 12 && d[0] == 'R' && d[1] == 'I' && d[2] == 'F' && d[3] == 'F'
         && d[8] == 'W' && d[9] == 'A' && d[10] == 'V' && d[11] == 'E')
         return Sniffed::Wav;
@@ -204,6 +215,20 @@ bool AudioFileStream::open(const char* path)
             return false;
 #endif
         }
+        case Sniffed::Mp4: {
+            auto dec = std::make_unique<Mp4AacDecoder>();
+            std::string err;
+            if (!dec->openFile(path, &err)) {
+                error_ = err.empty() ? "corrupt or unsupported MP4 file" : err;
+                return false;
+            }
+            channels_ = dec->channels();
+            sampleRate_ = dec->sampleRate();
+            totalFrames_ = dec->totalFrames();
+            impl_->mp4 = std::move(dec);
+            impl_->backend = Impl::Backend::Mp4;
+            return true;
+        }
         case Sniffed::OggOther:
             error_ = "unrecognized Ogg codec (streamable formats: " STREAMABLE ")";
             return false;
@@ -233,6 +258,8 @@ int AudioFileStream::readFrames(float* dst, int maxFrames)
         case Impl::Backend::Opus:
             return impl_->opus->readFrames(dst, maxFrames);
 #endif
+        case Impl::Backend::Mp4:
+            return impl_->mp4->readFrames(dst, maxFrames);
         default:
             return 0;
     }
@@ -266,6 +293,8 @@ bool AudioFileStream::seekToFrame(uint64_t frame)
         case Impl::Backend::Opus:
             return impl_->opus->seekToFrame(frame);
 #endif
+        case Impl::Backend::Mp4:
+            return impl_->mp4->seekToFrame(frame);
         default:
             return false;
     }

@@ -64,6 +64,12 @@ struct AudioClip {
     // moment). Position queries wrap a looping stream's file time by it.
     std::atomic<double> streamDurationSeconds{0.0};
 
+    // Disk streams: started (createStreamFromFile) but held silent until the
+    // worker has decoded the prebuffer. The stream counts as playing in that
+    // window (isClipPlaying), and a pause in it cancels the worker's release:
+    // whoever clears it (the worker's exchange, or a pause) decides.
+    std::atomic<bool> streamStartPending{false};
+
     int numFrames() const { return channels > 0 ? static_cast<int>(samples.size()) / channels : 0; }
 };
 

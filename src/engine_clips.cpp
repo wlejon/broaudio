@@ -235,7 +235,13 @@ Engine::PlaybackState Engine::getPlaybackState(int instanceId) const
     for (auto& pb : *current) {
         if (pb->id != instanceId) continue;
         if (!pb->active.load(std::memory_order_relaxed)) return PlaybackState::Finished;
-        if (!pb->playing.load(std::memory_order_relaxed)) return PlaybackState::Paused;
+        if (!pb->playing.load(std::memory_order_relaxed)) {
+            // A disk stream buffering its start is playing, not paused.
+            AudioClip* clip = pb->clipId > 0 ? findClip(pb->clipId) : nullptr;
+            if (!(clip && clip->streaming && clip->streamStartPending.load(std::memory_order_acquire)))
+                return PlaybackState::Paused;
+            return PlaybackState::Playing;
+        }
         // A disk stream that reached EOF (not looping) and whose ring has
         // drained has nothing left to play: it stays open (closeStream) but
         // is finished, like a one-shot parked at its end.
@@ -393,6 +399,7 @@ int Engine::createStreamFromFile(const char* path, const FileStreamOptions& opts
         return fail("cannot allocate a ring of " + std::to_string(ringFrames) + " frames");
     }
 
+    clip->streamStartPending.store(true, std::memory_order_release);
     if (decoder->totalFrames() > 0)
         clip->streamDurationSeconds.store(
             static_cast<double>(decoder->totalFrames()) / decoder->sampleRate(),
@@ -514,6 +521,13 @@ void Engine::setPlaybackLoop(int instanceId, bool loop)
 void Engine::setPlaybackPlaying(int instanceId, bool playing)
 {
     if (auto* pb = findPlayback(instanceId)) {
+        // A disk stream still buffering its start: playing is already on its
+        // way (the worker releases it); a pause cancels that release.
+        if (AudioClip* clip = findClip(pb->clipId);
+            clip && clip->streaming && clip->streamStartPending.load(std::memory_order_acquire)) {
+            if (playing) return;
+            if (clip->streamStartPending.exchange(false, std::memory_order_acq_rel)) return;
+        }
         if (playing && !pb->playing.load(std::memory_order_relaxed))
             pb->playPos.store(0, std::memory_order_relaxed);
         pb->playing.store(playing, std::memory_order_relaxed);

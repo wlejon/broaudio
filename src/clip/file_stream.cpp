@@ -137,7 +137,9 @@ void FileStreamRunner::worker()
                  static_cast<uint64_t>(prebufferFrames_) ||
              decoderEof_)) {
             started_ = true;
-            playback_->playing.store(true, std::memory_order_release);
+            // Unless it was paused while it buffered.
+            if (clip_->streamStartPending.exchange(false, std::memory_order_acq_rel))
+                playback_->playing.store(true, std::memory_order_release);
         }
 
         std::unique_lock<std::mutex> lk(mutex_);

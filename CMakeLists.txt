@@ -239,10 +239,6 @@ target_include_directories(broaudio PRIVATE
 
 if(MSVC)
     target_compile_options(broaudio PRIVATE /MP /permissive- /utf-8)
-    # Work around MSVC ICE in Release with /O2 on engine.cpp. The mic-capture
-    # code split out into engine_capture.cpp still trips it at /O2.
-    set_source_files_properties(src/engine.cpp src/engine_capture.cpp PROPERTIES
-        COMPILE_FLAGS "$<$<NOT:$<CONFIG:Debug>>:/O1>")
 endif()
 
 # SDL3 is private: broaudio's public headers name no SDL type (device I/O is

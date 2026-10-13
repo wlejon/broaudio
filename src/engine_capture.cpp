@@ -369,14 +369,15 @@ std::vector<float> Engine::getSpectrum(int numBins) const
 
     fft(real.data(), imag.data(), n);
 
-    int outBins = n / 2;
-    if (outBins > numBins) outBins = numBins;
-    std::vector<float> result(numBins, 0.0f);
-    float invN = 1.0f / static_cast<float>(n);
+    int outBins = std::min(n / 2, numBins);
+    std::vector<float> result(static_cast<size_t>(numBins), 0.0f);
+    // Factor 1/n outside sqrt(re^2 + im^2): saves two multiplies per bin and
+    // avoids an MSVC /O2 auto-vectorizer ICE on sqrt((re*invN)^2 + (im*invN)^2).
+    const float scale = 2.0f / static_cast<float>(n);
     for (int i = 0; i < outBins; i++) {
-        float re = real[i] * invN;
-        float im = imag[i] * invN;
-        result[i] = std::sqrt(re * re + im * im) * 2.0f;
+        const float re = real[i];
+        const float im = imag[i];
+        result[i] = std::sqrt(re * re + im * im) * scale;
     }
 
     return result;

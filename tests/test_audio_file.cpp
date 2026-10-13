@@ -5,7 +5,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <numbers>
+#include <string>
 #include <vector>
 
 using namespace broaudio;
@@ -70,6 +72,25 @@ TEST(wav_save_and_load_stereo) {
     }
 
     std::remove(TEST_WAV_PATH);
+    PASS();
+}
+
+// A UTF-8 path that is not ASCII names the file it spells: on Windows the
+// narrow C runtime opens read it in the ANSI code page (a song title saved as
+// mojibake, and not found again).
+TEST(wav_save_and_load_utf8_path) {
+    int sr = 22050;
+    auto sine = generateSine(sr);
+    const char* path = "test_\xE4\xBA\x91\xE6\x9C\xB5 roundtrip.wav";   // "test_云朵 roundtrip.wav"
+    ASSERT_TRUE(saveWav(path, sine.data(), static_cast<int>(sine.size()), 1, sr));
+    AudioFileData loaded = loadAudioFile(path);
+    ASSERT_TRUE(loaded.valid());
+    ASSERT_EQ(loaded.numFrames, static_cast<int>(sine.size()));
+    ASSERT_NEAR(loaded.samples[10], sine[10], 1e-6f);
+    // The file is where the name says.
+    const std::filesystem::path fp(std::u8string(reinterpret_cast<const char8_t*>(path)));
+    ASSERT_TRUE(std::filesystem::exists(fp));
+    std::filesystem::remove(fp);
     PASS();
 }
 

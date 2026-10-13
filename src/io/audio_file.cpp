@@ -5,6 +5,17 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 // ---------------------------------------------------------------------------
 // dr_libs decoders — declarations only. The single-header implementations are
@@ -431,9 +442,47 @@ static AudioFileData oggError(AudioFormat fmt)
 // Public API
 // ---------------------------------------------------------------------------
 
+#ifdef _WIN32
+// Paths are UTF-8; the C runtime's narrow opens (and dr_libs' / stb_vorbis's,
+// built on them) read them in the ANSI code page, so a song title like
+// "云朵时光" names a different file. Such a path is opened wide here.
+static bool nonAscii(const char* s)
+{
+    for (; *s; ++s)
+        if (static_cast<unsigned char>(*s) >= 0x80) return true;
+    return false;
+}
+
+static std::wstring widen(const char* s)
+{
+    const int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, nullptr, 0);
+    std::wstring w(n > 0 ? n - 1 : 0, L'\0');
+    if (n > 1) MultiByteToWideChar(CP_UTF8, 0, s, -1, w.data(), n);
+    return w;
+}
+
+static bool readWholeFileWide(const char* path, std::vector<uint8_t>& out)
+{
+    FILE* f = _wfopen(widen(path).c_str(), L"rb");
+    if (!f) return false;
+    uint8_t buf[65536];
+    size_t got;
+    while ((got = fread(buf, 1, sizeof(buf), f)) > 0) out.insert(out.end(), buf, buf + got);
+    fclose(f);
+    return true;
+}
+#endif
+
 AudioFileData loadAudioFile(const char* path)
 {
     if (!path) return {};
+#ifdef _WIN32
+    if (nonAscii(path)) {
+        std::vector<uint8_t> bytes;
+        if (!readWholeFileWide(path, bytes) || bytes.empty()) return {};
+        return loadAudioFileFromMemory(bytes.data(), bytes.size());
+    }
+#endif
 
     std::string ext = extensionLower(path);
 
@@ -508,7 +557,13 @@ bool saveWav(const char* path, const float* samples, int numFrames, int channels
     format.sampleRate = static_cast<unsigned int>(sampleRate);
     format.bitsPerSample = 32;
 
-    if (!drwav_init_file_write(&wav, path, &format, nullptr))
+#ifdef _WIN32
+    const bool opened = nonAscii(path) ? drwav_init_file_write_w(&wav, widen(path).c_str(), &format, nullptr)
+                                       : drwav_init_file_write(&wav, path, &format, nullptr);
+#else
+    const bool opened = drwav_init_file_write(&wav, path, &format, nullptr);
+#endif
+    if (!opened)
         return false;
 
     drwav_uint64 written = drwav_write_pcm_frames(&wav, static_cast<drwav_uint64>(numFrames), samples);

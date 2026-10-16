@@ -42,9 +42,42 @@
 #ifndef PW_KEY_TARGET_OBJECT
 #define PW_KEY_TARGET_OBJECT PW_KEY_NODE_TARGET   // before 0.3.64
 #endif
+#ifndef PW_KEY_LOOP_RT_PRIO
+#define PW_KEY_LOOP_RT_PRIO "loop.rt-prio"        // before 1.2
+#endif
+#ifndef SPA_IO_CLOCK_FLAG_XRUN_RECOVER
+#define SPA_IO_CLOCK_FLAG_XRUN_RECOVER (1u << 1)  // before 1.2
+#endif
 
 namespace broaudio::detail {
 namespace {
+
+template <typename C>
+bool clockCycleChanged(const C& c, uint32_t& lastCycle)
+{
+    if constexpr (requires { c.cycle; }) {
+        if (c.cycle != lastCycle) {
+            lastCycle = c.cycle;
+            return true;
+        }
+        return false;
+    } else {
+        (void)c;
+        (void)lastCycle;
+        return false;
+    }
+}
+
+template <typename C>
+void syncClockCycle(const C& c, uint32_t& lastCycle)
+{
+    if constexpr (requires { c.cycle; }) {
+        lastCycle = c.cycle;
+    } else {
+        (void)c;
+        (void)lastCycle;
+    }
+}
 
 using Clock = std::chrono::steady_clock;
 
@@ -685,9 +718,9 @@ void PwStream::onProcess(void* data)
     if (spa_io_position* pos = self->position_.load(std::memory_order_acquire)) {
         const spa_io_clock& c = pos->clock;
         if (self->resetClock_.exchange(false, std::memory_order_relaxed)
-            || c.id != self->lastClockId_ || c.cycle != self->lastCycle_) {
+            || c.id != self->lastClockId_ || clockCycleChanged(c, self->lastCycle_)) {
             self->lastClockId_ = c.id;
-            self->lastCycle_ = c.cycle;
+            syncClockCycle(c, self->lastCycle_);
         } else {
             if (c.flags & SPA_IO_CLOCK_FLAG_XRUN_RECOVER)
                 self->xruns_.fetch_add(1, std::memory_order_relaxed);

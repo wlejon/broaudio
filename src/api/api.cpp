@@ -6,9 +6,14 @@ namespace broaudio::api {
 
 static broaudio::Engine* s_customEngine = nullptr;
 static std::unique_ptr<broaudio::Engine> s_defaultEngine = nullptr;
+static std::function<broaudio::Engine*()> s_engineProvider;
 
 broaudio::Engine* getAudioEngine() {
     if (s_customEngine) return s_customEngine;
+    if (s_engineProvider) {
+        s_customEngine = s_engineProvider();
+        if (s_customEngine) return s_customEngine;
+    }
     if (!s_defaultEngine) {
         s_defaultEngine = std::make_unique<broaudio::Engine>();
         if (!s_defaultEngine->init()) {
@@ -24,6 +29,12 @@ broaudio::Engine* existingAudioEngine() {
 
 void setAudioEngine(broaudio::Engine* engine) {
     s_customEngine = engine;
+    s_engineProvider = nullptr;
+}
+
+void setAudioEngineProvider(std::function<broaudio::Engine*()> provider) {
+    s_customEngine = nullptr;
+    s_engineProvider = std::move(provider);
 }
 
 void shutdownAudio() {
@@ -36,6 +47,7 @@ void shutdownAudio() {
         s_defaultEngine.reset();
     }
     s_customEngine = nullptr;
+    s_engineProvider = nullptr;
 }
 
 void installAudio() {

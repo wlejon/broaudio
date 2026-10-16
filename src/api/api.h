@@ -69,6 +69,12 @@ broaudio::Engine* getAudioEngine();
 /// Explicitly provide an external broaudio::Engine to back the Web Audio and Mic APIs.
 void setAudioEngine(broaudio::Engine* engine);
 
+/// As setAudioEngine, but the host's engine is asked for only when a script
+/// first needs one (an AudioContext, a clip, the mic): a page that never
+/// plays a sound never opens the audio device. The provider runs on the JS
+/// thread and its answer is kept; setAudioEngine clears it.
+void setAudioEngineProvider(std::function<broaudio::Engine*()> provider);
+
 /// Shut down and reset the default engine instance if created.
 void shutdownAudio();
 

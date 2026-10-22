@@ -443,7 +443,7 @@ void registerAudioContextSynthGraph(ObjectBuilder& b) {
 // render() returns an AudioBuffer, so a realm with SynthGraph needs that
 // class even without the rest of Web Audio (a worker).
 void installSynthGraph() {
-    installAudioBufferClass();
+    if (!g_audioBufferClass.installed()) installAudioBufferClass();
     installSynthGraphClass();
 }
 

@@ -40,6 +40,7 @@ void setAudioEngineProvider(std::function<broaudio::Engine*()> provider) {
 void shutdownAudio() {
     // Background clip loads hold the engine pointer: join them before the
     // engine they decode into goes away.
+    shutdownActiveMic();
     shutdownAsyncJobs();
     shutdownLiveParams();
     if (s_defaultEngine) {

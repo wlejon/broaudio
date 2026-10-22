@@ -954,18 +954,15 @@ void registerAudioContextPresets(ObjectBuilder& b);
 void decorateSequenceAutomation(ObjectBuilder& b);
 // The property name a lane's callback has in the sequence's `_laneCbs`.
 inline std::string sequenceLaneKey(int key) { return "k" + std::to_string(key); }
-
 // ---------------------------------------------------------------------------
 // File paths and background work (host_audio_io.cpp)
 // ---------------------------------------------------------------------------
-
 // A file path as the host's resolver sees it (api.h setPathResolver), or as
 // given when no resolver is set.
 std::string resolveAudioPath(const std::string& path);
 // The same for a file about to be written: the parent directory resolves
 // (it exists), the file name is appended.
 std::string resolveAudioWritePath(const std::string& path);
-
 // createClipFromFileAsync's worker: decodes `resolvedPath` on a background
 // thread and returns the promise that tickAsyncJobs() (api.h) later settles
 // on the JS thread — resolved with the clip id, or rejected with an Error
@@ -973,12 +970,11 @@ std::string resolveAudioWritePath(const std::string& path);
 Value launchClipLoad(const std::string& resolvedPath);
 // Join every outstanding job without touching JS (shutdownAudio).
 void shutdownAsyncJobs();
-
+void shutdownActiveMic();
 // Wavetable bank registry helpers
 std::shared_ptr<broaudio::WavetableBank> findWavetable(int id);
 int registerWavetable(std::shared_ptr<broaudio::WavetableBank> bank);
 void deleteWavetable(int id);
-
 // String/Enum parsers & formatters
 broaudio::BiquadFilter::Type parseFilterType(const std::string& str);
 const char* filterTypeToString(broaudio::BiquadFilter::Type type);
@@ -997,7 +993,5 @@ const char* distanceModelToString(broaudio::DistanceModel model);
 broaudio::EffectSlot parseEffectSlot(const std::string& str, broaudio::EffectSlot def);
 const char* effectSlotToString(broaudio::EffectSlot slot);
 broaudio::StealPolicy parseStealPolicy(const std::string& str);
-
 void installAudioGlobals();
-
 } // namespace broaudio::api

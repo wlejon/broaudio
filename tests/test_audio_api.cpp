@@ -459,9 +459,60 @@ int main() {
         test_context_direct();
         test_graph_script();
         test_ear_script();
+
+        broaudio::api::installMic();
+        ev::CallResult micStart = bronze::eval::evalScript(R"JS(
+            bro.mic.start({ live: false, chunkFrames: 160, samples: true, onChunk: function(c) {} });
+            bro.mic.isActive();
+        )JS");
+        TEST_CHECK(!micStart.thrown && ev::toBool(micStart.value));
     }
-    ev::destroyRealm(realm);
     broaudio::api::shutdownAudio();
+    ev::destroyRealm(realm);
+
+    // Second realm on the same thread: verify AudioBuffer & SynthGraph.render()
+    // work across sequential realms and bro.mic was cleanly reset by shutdownAudio().
+    ev::Realm* realm2 = ev::createRealm();
+    {
+        ev::RealmScope scope(realm2);
+        broaudio::api::installSynthGraph();
+        ev::CallResult sgRes = bronze::eval::evalScript(R"JS(
+            const g = new SynthGraph({
+                nodes: {
+                    o: { type: "osc", wave: "sine", freq: 440, gain: "e" },
+                    e: { type: "env", attack: 0.001, decay: 0.02, sustain: 0, release: 0.005 }
+                },
+                output: "o"
+            });
+            const b = g.render({ seed: 1, sampleRate: 48000 });
+            if (!(b instanceof AudioBuffer)) throw new Error("SynthGraph.render not instanceof AudioBuffer in realm2");
+            if (b.getChannelData(0).length !== b.length) throw new Error("getChannelData failed in realm2");
+            "OK";
+        )JS");
+        if (sgRes.thrown) {
+            std::cerr << "realm2 SynthGraph eval threw: " << ev::toUtf8(sgRes.value) << std::endl;
+            std::exit(1);
+        }
+        TEST_CHECK(ev::toUtf8(sgRes.value) == "OK");
+
+        broaudio::api::installAudio();
+        broaudio::api::installMic();
+        ev::CallResult micCheck = bronze::eval::evalScript(R"JS(
+            if (bro.mic.isActive()) throw new Error("bro.mic still active after shutdownAudio()");
+            const buf = new AudioBuffer({ length: 32, numberOfChannels: 1, sampleRate: 48000 });
+            if (!(buf instanceof AudioBuffer) || buf.getChannelData(0).length !== 32) {
+                throw new Error("AudioBuffer broken in realm2");
+            }
+            "OK";
+        )JS");
+        if (micCheck.thrown) {
+            std::cerr << "realm2 AudioBuffer/mic eval threw: " << ev::toUtf8(micCheck.value) << std::endl;
+            std::exit(1);
+        }
+        TEST_CHECK(ev::toUtf8(micCheck.value) == "OK");
+    }
+    broaudio::api::shutdownAudio();
+    ev::destroyRealm(realm2);
 
     std::cout << "All broaudio API tests passed!" << std::endl;
     return 0;

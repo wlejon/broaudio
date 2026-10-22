@@ -251,6 +251,7 @@ Value makeAudioBufferValue(int channels, int length, int sampleRate) {
                                    " x " + std::to_string(length) + " frames");
     }
 
+    if (!g_audioBufferClass.installed()) installAudioBufferClass();
     auto* h = new HostAudioBufferHandle();
     h->buffer = std::move(buffer);
     // Deferred: the payload owns Persistents (channelViews).
@@ -258,7 +259,6 @@ Value makeAudioBufferValue(int channels, int length, int sampleRate) {
 }
 
 void installAudioBufferClass() {
-    if (g_audioBufferClass.installed()) return;
     g_audioBufferClass.install(
         "AudioBuffer", 1,
         [](Value, std::span<const Value> a) -> Value {

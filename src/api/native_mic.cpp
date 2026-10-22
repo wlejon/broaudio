@@ -156,11 +156,14 @@ struct MicState {
 
 static MicState g_mic;
 
+} // namespace
+
 void shutdownActiveMic() {
-    if (!g_mic.active) return;
-    auto* e = getAudioEngine();
-    if (e && g_mic.tapId != broaudio::kInvalidMicTapId) {
-        e->removeMicTap(g_mic.tapId);
+    if (g_mic.active) {
+        auto* e = existingAudioEngine();
+        if (e && g_mic.tapId != broaudio::kInvalidMicTapId) {
+            e->removeMicTap(g_mic.tapId);
+        }
     }
     g_mic.tapId = broaudio::kInvalidMicTapId;
     g_mic.onChunk.set(ev::undefined());
@@ -169,8 +172,6 @@ void shutdownActiveMic() {
     g_mic.session.reset();
     g_mic.active = false;
 }
-
-} // namespace
 
 void drainMicChunks() {
     // The host's once-per-frame call into broaudio: settle background clip

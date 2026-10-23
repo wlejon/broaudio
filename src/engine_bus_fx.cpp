@@ -197,6 +197,13 @@ void Engine::processBusEffects(Bus& bus, int numFrames)
         if (pipeline && pipeline->matches(bus)) {
             pipeline->updateParams(bus, numFrames, sampleRate_);
             pipeline->process(buf, numFrames);
+            if (auto dsp = bus.customDspProcessor.load(std::memory_order_acquire)) {
+                double startTime = static_cast<double>(bus.customDspFrameCounter) /
+                                   static_cast<double>(std::max(sampleRate_, 1));
+                dsp->processStereoInterleaved(buf, static_cast<uint32_t>(numFrames),
+                                              startTime, static_cast<double>(sampleRate_));
+                bus.customDspFrameCounter += static_cast<uint64_t>(numFrames);
+            }
             bus.jitActive.store(true, std::memory_order_relaxed);
             updateBusMeters(bus, numFrames);
             return;
@@ -223,6 +230,14 @@ void Engine::processBusEffects(Bus& bus, int numFrames)
             case EffectSlot::Convolution: processBusConvolution(bus, buf, numFrames); break;
             default: break;
         }
+    }
+
+    if (auto dsp = bus.customDspProcessor.load(std::memory_order_acquire)) {
+        double startTime = static_cast<double>(bus.customDspFrameCounter) /
+                           static_cast<double>(std::max(sampleRate_, 1));
+        dsp->processStereoInterleaved(buf, static_cast<uint32_t>(numFrames),
+                                      startTime, static_cast<double>(sampleRate_));
+        bus.customDspFrameCounter += static_cast<uint64_t>(numFrames);
     }
 
     updateBusMeters(bus, numFrames);

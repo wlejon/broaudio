@@ -121,6 +121,7 @@ add_library(broaudio STATIC
     src/synth/synth_interp.cpp
     src/synth/synth_jit.cpp
     src/synth_verify.cpp
+    src/verified_dsp_kernel.cpp
     src/clip/clip.cpp
     src/clip/file_stream.cpp
     src/sequencer/automation.cpp

@@ -23,6 +23,7 @@ set(BROAUDIO_API_SOURCES
     host_audio_ear_fit.cpp
     host_audio_ear_fit_job.cpp
     host_audio_synth_graph.cpp
+    host_audio_verified_dsp.cpp
     native_mic.cpp
 )
 

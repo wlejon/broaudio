@@ -14,6 +14,7 @@
 #include "broaudio/dsp/partitioned_convolver.h"
 #include "broaudio/atomic_shared_ptr.h"
 #include "broaudio/dsp/jit/jit_bus_pipeline.h"
+#include "broaudio/verified_dsp_kernel.h"
 
 #include <atomic>
 #include <cstring>
@@ -69,6 +70,10 @@ struct Bus {
     std::atomic<float> convolutionMix{1.0f};
     std::atomic<int> convolutionClipId{-1};
     AtomicSharedPtr<PartitionedConvolver> convolver;
+
+    // Live lock-free verified JS audio DSP kernel stage
+    AtomicSharedPtr<VerifiedDspProcessor> customDspProcessor;
+    uint64_t customDspFrameCounter = 0;
 
     // Ramp control for `gain` (Engine::setBusGain's rampSeconds).
     RampControl gainRamp;

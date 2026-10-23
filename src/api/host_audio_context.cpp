@@ -1,5 +1,6 @@
 #include "host_audio_internal.h"
 #include "host_audio_synth_graph.h"
+#include "host_audio_verified_dsp.h"
 #include <broaudio/dsp/resampler.h>
 #include <broaudio/io/audio_file.h>
 
@@ -636,6 +637,8 @@ void decorateAudioContextProto(ObjectBuilder& b) {
         return ev::undefined();
     });
 
+    attachAudioContextVerifiedDspMethods(b);
+
     // 7. Spatial shortcuts
     b.def("setListenerPosition", 3, [](Value, std::span<const Value> a) {
         auto* e = getAudioEngine();
@@ -870,6 +873,7 @@ void installAudioGlobals() {
     // 16. Synth & Sequencer Globals
     installAudioSynthGlobals();
     installAudioSequencerGlobals();
+    installAudioVerifiedDspGlobals();
 
     // 17. getUserMedia: starts engine mic capture and resolves with a
     // MediaStream (for createMediaStreamSource), or rejects with

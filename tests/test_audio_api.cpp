@@ -448,6 +448,100 @@ static void test_ear_script() {
     TEST_CHECK(sig[0] == static_cast<char>(0x89) && sig[1] == 'P' && sig[2] == 'N' && sig[3] == 'G');
 }
 
+static void test_verified_dsp_script() {
+    std::cout << "[5] VerifiedDspNode & compileDspKernel..." << std::endl;
+    ev::CallResult res = bronze::eval::evalScript(R"JS(
+        (() => {
+            const ctx = new AudioContext();
+            if (typeof ctx.createVerifiedDspNode !== "function") {
+                throw new Error("missing ctx.createVerifiedDspNode");
+            }
+            if (typeof bro.audio.compileDspKernel !== "function") {
+                throw new Error("missing bro.audio.compileDspKernel");
+            }
+
+            // 1. Create a verified JS DSP node from a plain JS arrow function
+            const dsp = ctx.createVerifiedDspNode(
+                (sample, time, drive, mix) => {
+                    "@kernel";
+                    const shaped = Math.tanh(sample * drive + Math.sin(time * 440.0 * 6.2831853) * 0.25);
+                    return sample * (1.0 - mix) + shaped * mix;
+                },
+                { maxAmp: 0.95 }
+            );
+            if (!dsp.verified || !dsp.zeroAllocProven || !dsp.nanSafeProven || !dsp.mirEquivProven) {
+                throw new Error("DSP node failed formal verification flags");
+            }
+            if (dsp.hotSwapCount !== 1) {
+                throw new Error("expected initial hotSwapCount === 1, got " + dsp.hotSwapCount);
+            }
+            dsp.setParam(0, 2.0);
+            dsp.setParam(1, 1.0);
+            dsp.connect(ctx.destination);
+
+            const inBlock = new Float32Array(64);
+            for (let i = 0; i < 64; i++) inBlock[i] = 0.5;
+            const outBlock = dsp.processBlock(inBlock, 48000, 0.0);
+            if (!(outBlock instanceof Float32Array) || outBlock.length !== 64) {
+                throw new Error("processBlock did not return Float32Array(64)");
+            }
+            for (let i = 0; i < 64; i++) {
+                if (!Number.isFinite(outBlock[i]) || Math.abs(outBlock[i]) > 0.95001) {
+                    throw new Error("output sample out of verified [-maxAmp, +maxAmp] bounds: " + outBlock[i]);
+                }
+            }
+
+            // 2. Live lock-free hot-swap to a new kernel (div-by-zero test for speaker protection)
+            const swappedOk = dsp.hotSwap((sample) => sample / 0.0);
+            if (!swappedOk || dsp.hotSwapCount !== 2) {
+                throw new Error("hotSwap failed or did not increment hotSwapCount");
+            }
+            if (Math.abs(dsp.evalSample(1.0, 0.0) - 0.95) > 1e-4) {
+                throw new Error("+Inf was not clamped to +maxAmp (0.95)");
+            }
+            if (Math.abs(dsp.evalSample(-1.0, 0.0) + 0.95) > 1e-4) {
+                throw new Error("-Inf was not clamped to -maxAmp (-0.95)");
+            }
+            if (dsp.evalSample(0.0, 0.0) !== 0.0) {
+                throw new Error("0.0 / 0.0 (NaN) was not sanitized to 0.0");
+            }
+
+            // 3. Reject unsafe JS kernels containing heap allocations or unbounded loops
+            let allocThrew = false;
+            try {
+                ctx.createVerifiedDspNode("(sample) => { const a = new Float32Array(8); return sample; }");
+            } catch (e) {
+                allocThrew = true;
+            }
+            if (!allocThrew) {
+                throw new Error("createVerifiedDspNode did not reject heap allocation");
+            }
+
+            const badSwap = dsp.hotSwap("(sample) => { while (sample > 0) {} return sample; }");
+            if (badSwap !== false || dsp.hotSwapCount !== 2) {
+                throw new Error("hotSwap should reject unbounded loop and keep previous kernel active");
+            }
+
+            // 4. bro.audio.compileDspKernel standalone descriptor
+            const compiled = bro.audio.compileDspKernel("(sample, time, gain) => sample * gain", { maxAmp: 0.8 });
+            if (!compiled.ok || !compiled.verified || !compiled.nanSafeProven) {
+                throw new Error("bro.audio.compileDspKernel failed");
+            }
+            if (Math.abs(compiled.evalSample(0.5, 0.0, 1.0) - 0.5) > 1e-5) {
+                throw new Error("compiled.evalSample mismatch");
+            }
+
+            dsp.disconnect();
+            return "SUCCESS";
+        })()
+    )JS");
+    if (res.thrown) {
+        std::cerr << "verified DSP eval threw: " << ev::toUtf8(res.value) << std::endl;
+        std::exit(1);
+    }
+    TEST_CHECK(ev::toUtf8(res.value) == "SUCCESS");
+}
+
 int main() {
     std::cout << "Running broaudio API test..." << std::endl;
 
@@ -458,6 +552,7 @@ int main() {
         test_mounts();
         test_context_direct();
         test_graph_script();
+        test_verified_dsp_script();
         test_ear_script();
 
         broaudio::api::installMic();

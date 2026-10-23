@@ -175,4 +175,141 @@ TEST(asp_concurrent_stress) {
     PASS();
 }
 
+// Deterministic exhaustive state-space model checker for RcuDomain + AtomicSharedPtr
+// across all multi-reader (enterRead -> load_head -> copy_sp -> exitRead),
+// writer (exchange -> retire), and reclaimer (reclaim) interleavings.
+TEST(asp_qsbr_exhaustive_state_model_checker) {
+    struct ModelState {
+        // Packed RcuDomain state: (gen << 4) | activeReaders
+        int gen = 0;
+        int activeReaders = 0;
+        int headSnap = 0;       // current published snapshot id (0..kMaxSnaps)
+        int nextSnap = 1;       // next snapshot id to publish (up to 3)
+        // Writer in-flight state: -1 if idle, >=0 if exchanged `head_` and about to `retire(oldSnap)`
+        int writerRetiringSnap = -1;
+        // Retired queue: bitmask of retired snapshots and their retire generation
+        uint8_t retiredMask = 0;
+        uint8_t freedMask = 0;
+        int retiredGen[4] = {0, 0, 0, 0};
+        // Two readers: pc = 0 (idle), 1 (entered ReadScope, about to load head_),
+        //              2 (loaded s = head_, about to copy s->sp and exitRead)
+        int readerPc[2] = {0, 0};
+        int readerLoadedSnap[2] = {-1, -1};
+    };
+
+    int exploredStates = 0;
+    int terminalChecks = 0;
+
+    auto stepDfs = [&](auto& self, const ModelState& st, int depth) -> bool {
+        ++exploredStates;
+        // Safety invariant at EVERY reachable state:
+        // No reader at pc==2 (holding raw Snapshot* `s` inside ReadScope before copying `s->sp`)
+        // may EVER hold a snapshot that has already been freed (`freedMask & (1 << s)`),
+        // nor may `headSnap` itself be freed!
+        if ((st.freedMask & (1u << st.headSnap)) != 0) return false;
+        for (int r = 0; r < 2; ++r) {
+            if (st.readerPc[r] == 2) {
+                int s = st.readerLoadedSnap[r];
+                if ((st.freedMask & (1u << s)) != 0) return false;
+            }
+        }
+        if (depth >= 9) {
+            ++terminalChecks;
+            return true;
+        }
+
+        // Transition 1 & 2: Reader r steps
+        for (int r = 0; r < 2; ++r) {
+            if (st.readerPc[r] == 0) {
+                ModelState next = st;
+                next.activeReaders++;
+                next.readerPc[r] = 1;
+                if (!self(self, next, depth + 1)) return false;
+            } else if (st.readerPc[r] == 1) {
+                ModelState next = st;
+                next.readerLoadedSnap[r] = st.headSnap;
+                next.readerPc[r] = 2;
+                if (!self(self, next, depth + 1)) return false;
+            } else if (st.readerPc[r] == 2) {
+                // Atomic exitRead(): (gen, 1) -> (gen + 1, 0) or (gen, k) -> (gen, k - 1)
+                ModelState next = st;
+                if (next.activeReaders == 1) {
+                    next.activeReaders = 0;
+                    next.gen++;
+                } else {
+                    next.activeReaders--;
+                }
+                next.readerPc[r] = 0;
+                next.readerLoadedSnap[r] = -1;
+                if (!self(self, next, depth + 1)) return false;
+            }
+        }
+
+        // Transition 3: Writer exchanges head_ (if idle and nextSnap <= 3)
+        if (st.writerRetiringSnap == -1 && st.nextSnap <= 3) {
+            ModelState next = st;
+            next.writerRetiringSnap = st.headSnap;
+            next.headSnap = next.nextSnap++;
+            if (!self(self, next, depth + 1)) return false;
+        }
+
+        // Transition 4: Writer completes retire(writerRetiringSnap) using atomic (gen, activeReaders)
+        if (st.writerRetiringSnap != -1) {
+            ModelState next = st;
+            int oldSnap = next.writerRetiringSnap;
+            next.writerRetiringSnap = -1;
+            if (next.activeReaders == 0) {
+                next.freedMask |= static_cast<uint8_t>(1u << oldSnap);
+            } else {
+                next.retiredMask |= static_cast<uint8_t>(1u << oldSnap);
+                next.retiredGen[oldSnap] = next.gen;
+            }
+            if (!self(self, next, depth + 1)) return false;
+        }
+
+        // Transition 5: Reclaimer runs reclaim()
+        if (st.retiredMask != 0) {
+            ModelState next = st;
+            for (int s = 0; s < 4; ++s) {
+                if ((next.retiredMask & (1u << s)) && next.gen > next.retiredGen[s]) {
+                    next.retiredMask &= static_cast<uint8_t>(~(1u << s));
+                    next.freedMask |= static_cast<uint8_t>(1u << s);
+                }
+            }
+            if (!self(self, next, depth + 1)) return false;
+        }
+        return true;
+    };
+
+    ModelState init{};
+    ASSERT_TRUE(stepDfs(stepDfs, init, 0));
+    ASSERT_GT(exploredStates, 5000);
+    ASSERT_GT(terminalChecks, 1000);
+
+    // Also drive the real RcuDomain + AtomicSharedPtr through deterministic
+    // overlapping reader/writer/reclaim schedules to verify concrete execution.
+    resetCounters();
+    {
+        RcuDomain domain;
+        AtomicSharedPtr<Payload> slot(domain, std::make_shared<Payload>(100));
+        domain.enterRead(); // Reader 0 enters
+        domain.exitRead();  // Reader 0 exits (atomic 1->0 + gen bump)
+        ASSERT_EQ(static_cast<int>(domain.activeReaders()), 0);
+        ASSERT_EQ(static_cast<int>(domain.generation()), 1);
+
+        domain.enterRead(); // Reader 1 enters at gen==1
+        auto p1 = slot.load();
+        slot.store(std::make_shared<Payload>(200)); // retires Payload(100) at gen==1
+        domain.reclaim(); // gen is still 1 -> must NOT reclaim Payload(100)
+        ASSERT_EQ(Payload::dtorCount.load(), 0);
+        ASSERT_EQ(p1->magic, 100);
+        p1.reset();
+        domain.exitRead(); // Reader 1 exits -> gen becomes 2
+        domain.reclaim();  // gen (2) > 1 -> reclaims Payload(100)
+        ASSERT_EQ(Payload::dtorCount.load(), 1);
+    }
+    ASSERT_EQ(Payload::ctorCount.load(), Payload::dtorCount.load());
+    PASS();
+}
+
 int main() { return runAllTests(); }

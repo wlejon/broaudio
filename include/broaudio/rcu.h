@@ -32,27 +32,37 @@ public:
     RcuDomain(const RcuDomain&) = delete;
     RcuDomain& operator=(const RcuDomain&) = delete;
 
-    // Reader bookkeeping. The seq_cst here pairs with the seq_cst exchange
-    // in AtomicSharedPtr::store and the seq_cst loads in retire/reclaim, so
-    // that "publish then observe count" gives a consistent total order with
-    // "enter scope then load head" — the inline-free fast path relies on it.
+    // Reader bookkeeping. Both the active reader count (low 20 bits) and the
+    // quiescent generation counter (high 44 bits) live in a single 64-bit
+    // atomic word (`state_`) so that:
+    //   1. `exitRead()` transitions `(gen, readers=1) -> (gen+1, readers=0)` in
+    //      one atomic CAS (preventing a preempted reader's delayed generation
+    //      bump from racing with a new reader + retire).
+    //   2. `retire()` observes `(gen, readers)` in one atomic `seq_cst` load,
+    //      pairing with the `seq_cst` exchange in `AtomicSharedPtr::store`.
+    static constexpr uint64_t kGenShift   = 20;
+    static constexpr uint64_t kReaderMask = (1ULL << kGenShift) - 1;
+    static constexpr uint64_t kGenInc     = 1ULL << kGenShift;
+
     void enterRead() noexcept {
-        activeReaders_.fetch_add(1, std::memory_order_seq_cst);
+        state_.fetch_add(1, std::memory_order_seq_cst);
     }
     void exitRead() noexcept {
-        // If we're the last reader leaving, bump the generation so writers
-        // can recognise the transition through zero — only that transition
-        // proves all readers in flight at any earlier retire-time have
-        // exited.
-        if (activeReaders_.fetch_sub(1, std::memory_order_seq_cst) == 1) {
-            generation_.fetch_add(1, std::memory_order_seq_cst);
+        uint64_t s = state_.load(std::memory_order_relaxed);
+        for (;;) {
+            uint64_t next = ((s & kReaderMask) == 1) ? (s + kGenInc - 1) : (s - 1);
+            if (state_.compare_exchange_weak(s, next,
+                                             std::memory_order_seq_cst,
+                                             std::memory_order_relaxed)) {
+                break;
+            }
         }
     }
     uint64_t activeReaders() const noexcept {
-        return activeReaders_.load(std::memory_order_seq_cst);
+        return state_.load(std::memory_order_seq_cst) & kReaderMask;
     }
     uint64_t generation() const noexcept {
-        return generation_.load(std::memory_order_seq_cst);
+        return state_.load(std::memory_order_seq_cst) >> kGenShift;
     }
 
     using Deleter = void (*)(void*) noexcept;
@@ -77,8 +87,7 @@ private:
         Retired*  next;
     };
 
-    std::atomic<uint64_t> activeReaders_{0};
-    std::atomic<uint64_t> generation_{0};
+    std::atomic<uint64_t> state_{0};
     std::mutex            retireMutex_;
     Retired*              retired_ = nullptr;
 };

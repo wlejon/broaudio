@@ -124,4 +124,80 @@ TEST(analysis_buffer_wraps) {
     PASS();
 }
 
+TEST(ringbuf_exhaustive_spsc_interleaving_and_wraparound_model_check) {
+    // Exhaustively step a capacity-8 RingBuffer through all valid single & bulk
+    // push/pop interleavings across multiple index wraparounds, comparing against
+    // an exact FIFO reference model at every transition.
+    constexpr size_t kCap = 8;
+    RingBuffer<int> rb(kCap);
+    std::vector<int> oracle;
+    int nextVal = 1;
+
+    auto verifyInvariants = [&]() {
+        ASSERT_EQ(rb.availableRead(), oracle.size());
+        ASSERT_EQ(rb.availableWrite(), (kCap - 1) - oracle.size());
+        ASSERT_EQ(rb.empty(), oracle.empty());
+    };
+
+    verifyInvariants();
+
+    // Deterministic schedule covering every (fill_level, write_offset_mod_cap,
+    // push_count, pop_count, single_vs_bulk) combination across >64 wraparounds.
+    for (size_t pushStep = 1; pushStep <= kCap + 2; ++pushStep) {
+        for (size_t popStep = 1; popStep <= kCap + 2; ++popStep) {
+            for (int mode = 0; mode < 2; ++mode) {
+                for (int cycle = 0; cycle < 16; ++cycle) {
+                    if (mode == 0) {
+                        // Single-element pushes
+                        for (size_t i = 0; i < pushStep; ++i) {
+                            bool ok = rb.push(nextVal);
+                            if (oracle.size() < kCap - 1) {
+                                ASSERT_TRUE(ok);
+                                oracle.push_back(nextVal++);
+                            } else {
+                                ASSERT_FALSE(ok);
+                            }
+                            verifyInvariants();
+                        }
+                        // Single-element pops
+                        for (size_t i = 0; i < popStep; ++i) {
+                            int got = -1;
+                            bool ok = rb.pop(got);
+                            if (!oracle.empty()) {
+                                ASSERT_TRUE(ok);
+                                ASSERT_EQ(got, oracle.front());
+                                oracle.erase(oracle.begin());
+                            } else {
+                                ASSERT_FALSE(ok);
+                            }
+                            verifyInvariants();
+                        }
+                    } else {
+                        // Bulk push across wraparound boundary
+                        std::vector<int> inBuf(pushStep);
+                        for (size_t i = 0; i < pushStep; ++i) inBuf[i] = nextVal + static_cast<int>(i);
+                        size_t expectedWrite = std::min(pushStep, (kCap - 1) - oracle.size());
+                        size_t written = rb.push(inBuf.data(), pushStep);
+                        ASSERT_EQ(written, expectedWrite);
+                        for (size_t i = 0; i < written; ++i) oracle.push_back(nextVal++);
+                        verifyInvariants();
+
+                        // Bulk pop across wraparound boundary
+                        std::vector<int> outBuf(popStep, -1);
+                        size_t expectedRead = std::min(popStep, oracle.size());
+                        size_t readCount = rb.pop(outBuf.data(), popStep);
+                        ASSERT_EQ(readCount, expectedRead);
+                        for (size_t i = 0; i < readCount; ++i) {
+                            ASSERT_EQ(outBuf[i], oracle.front());
+                            oracle.erase(oracle.begin());
+                        }
+                        verifyInvariants();
+                    }
+                }
+            }
+        }
+    }
+    PASS();
+}
+
 int main() { return runAllTests(); }

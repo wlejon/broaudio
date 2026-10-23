@@ -136,6 +136,7 @@ float HostAudioParam::evaluate(double t) const {
 }
 
 void HostAudioParam::addSetValue(float val, double startTime) {
+    if (!std::isfinite(val) || !std::isfinite(startTime)) return;
     ParamTimelineEvent ev;
     ev.type = ParamEventType::SetValue;
     ev.time = startTime;
@@ -147,6 +148,7 @@ void HostAudioParam::addSetValue(float val, double startTime) {
 }
 
 void HostAudioParam::addLinearRamp(float val, double endTime) {
+    if (!std::isfinite(val) || !std::isfinite(endTime)) return;
     if (timeline.empty()) {
         auto* e = getAudioEngine();
         double curTime = e ? e->currentTime() : 0.0;
@@ -163,6 +165,7 @@ void HostAudioParam::addLinearRamp(float val, double endTime) {
 }
 
 void HostAudioParam::addExponentialRamp(float val, double endTime) {
+    if (!std::isfinite(val) || !std::isfinite(endTime)) return;
     if (timeline.empty()) {
         auto* e = getAudioEngine();
         double curTime = e ? e->currentTime() : 0.0;
@@ -179,6 +182,7 @@ void HostAudioParam::addExponentialRamp(float val, double endTime) {
 }
 
 void HostAudioParam::addSetTarget(float target, double startTime, float timeConstant) {
+    if (!std::isfinite(target) || !std::isfinite(startTime) || !std::isfinite(timeConstant)) return;
     if (timeline.empty()) {
         auto* e = getAudioEngine();
         double curTime = e ? e->currentTime() : 0.0;
@@ -196,6 +200,7 @@ void HostAudioParam::addSetTarget(float target, double startTime, float timeCons
 }
 
 void HostAudioParam::addSetValueCurve(const float* data, size_t count, double startTime, double duration) {
+    if (!std::isfinite(startTime) || !std::isfinite(duration)) return;
     ParamTimelineEvent ev;
     ev.type = ParamEventType::SetValueCurve;
     ev.time = startTime;
@@ -203,7 +208,7 @@ void HostAudioParam::addSetValueCurve(const float* data, size_t count, double st
     if (data && count > 0) {
         ev.curve.assign(data, data + count);
         for (auto& v : ev.curve) {
-            v = std::clamp(v, minValue, maxValue);
+            v = std::isfinite(v) ? std::clamp(v, minValue, maxValue) : defaultValue;
         }
     }
     auto it = std::upper_bound(timeline.begin(), timeline.end(), startTime,

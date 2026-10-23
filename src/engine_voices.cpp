@@ -109,30 +109,35 @@ void Engine::setVoiceWavetable(int id, std::shared_ptr<const WavetableBank> bank
 
 void Engine::setFrequency(int id, float freq)
 {
+    if (!std::isfinite(freq)) return;
     if (auto* v = findVoice(id))
-        v->frequency.store(freq, std::memory_order_relaxed);
+        v->frequency.store(std::clamp(freq, 0.0f, 100000.0f), std::memory_order_relaxed);
 }
 
 void Engine::setGain(int id, float gain)
 {
+    if (!std::isfinite(gain)) return;
     if (auto* v = findVoice(id))
-        v->gain.store(gain, std::memory_order_relaxed);
+        v->gain.store(std::max(0.0f, gain), std::memory_order_relaxed);
 }
 
 void Engine::setVoicePan(int id, float pan)
 {
+    if (!std::isfinite(pan)) return;
     if (auto* v = findVoice(id))
         v->pan.store(std::clamp(pan, -1.0f, 1.0f), std::memory_order_relaxed);
 }
 
 void Engine::setVoicePitchBend(int id, float semitones)
 {
+    if (!std::isfinite(semitones)) return;
     if (auto* v = findVoice(id))
         v->pitchBend.store(semitones, std::memory_order_relaxed);
 }
 
 void Engine::setMasterGain(float gain)
 {
+    if (!std::isfinite(gain)) return;
     masterGain_.store(std::clamp(gain, 0.0f, 2.0f), std::memory_order_relaxed);
 }
 
@@ -143,16 +148,19 @@ void Engine::setLimiterEnabled(bool enabled)
 
 void Engine::setLimiterThreshold(float thresholdDb)
 {
+    if (!std::isfinite(thresholdDb)) return;
     masterLimiter_.setThreshold(thresholdDb);
 }
 
 void Engine::setLimiterRelease(float releaseMs)
 {
+    if (!std::isfinite(releaseMs)) return;
     masterLimiter_.setRelease(releaseMs);
 }
 
 void Engine::setAttackTime(int id, float seconds)
 {
+    if (!std::isfinite(seconds)) return;
     if (auto* v = findVoice(id))
         v->attackRate.store(seconds > 0.0001f ? 1.0f / (seconds * static_cast<float>(sampleRate_)) : 1.0f,
                            std::memory_order_relaxed);
@@ -160,6 +168,7 @@ void Engine::setAttackTime(int id, float seconds)
 
 void Engine::setDecayTime(int id, float seconds)
 {
+    if (!std::isfinite(seconds)) return;
     if (auto* v = findVoice(id))
         v->decayCoeff.store(seconds > 0.0001f
             ? std::exp(-3.0f / (seconds * static_cast<float>(sampleRate_)))
@@ -168,12 +177,14 @@ void Engine::setDecayTime(int id, float seconds)
 
 void Engine::setSustainLevel(int id, float level)
 {
+    if (!std::isfinite(level)) return;
     if (auto* v = findVoice(id))
         v->sustainLevel.store(std::clamp(level, 0.0f, 1.0f), std::memory_order_relaxed);
 }
 
 void Engine::setReleaseTime(int id, float seconds)
 {
+    if (!std::isfinite(seconds)) return;
     if (auto* v = findVoice(id))
         v->releaseCoeff.store(seconds > 0.0001f
             ? std::exp(-3.0f / (seconds * static_cast<float>(sampleRate_)))
@@ -198,6 +209,7 @@ void Engine::setVoiceFilterType(int id, BiquadFilter::Type type)
 
 void Engine::setVoiceFilterFrequency(int id, float freq)
 {
+    if (!std::isfinite(freq)) return;
     if (auto* v = findVoice(id)) {
         v->filterFrequency.store(std::clamp(freq, 20.0f, 20000.0f), std::memory_order_relaxed);
         v->filterVersion.fetch_add(1, std::memory_order_release);
@@ -206,6 +218,7 @@ void Engine::setVoiceFilterFrequency(int id, float freq)
 
 void Engine::setVoiceFilterQ(int id, float q)
 {
+    if (!std::isfinite(q)) return;
     if (auto* v = findVoice(id)) {
         v->filterQ.store(std::clamp(q, 0.1f, 30.0f), std::memory_order_relaxed);
         v->filterVersion.fetch_add(1, std::memory_order_release);
@@ -222,6 +235,7 @@ void Engine::setVoiceUnisonCount(int id, int count)
 
 void Engine::setVoiceUnisonDetune(int id, float semitones)
 {
+    if (!std::isfinite(semitones)) return;
     if (auto* v = findVoice(id)) {
         v->unisonDetune.store(std::clamp(semitones, 0.0f, 2.0f), std::memory_order_relaxed);
         v->unisonVersion.fetch_add(1, std::memory_order_release);
@@ -230,6 +244,7 @@ void Engine::setVoiceUnisonDetune(int id, float semitones)
 
 void Engine::setVoiceUnisonStereoWidth(int id, float width)
 {
+    if (!std::isfinite(width)) return;
     if (auto* v = findVoice(id)) {
         v->unisonStereoWidth.store(std::clamp(width, 0.0f, 1.0f), std::memory_order_relaxed);
         v->unisonVersion.fetch_add(1, std::memory_order_release);
@@ -271,6 +286,7 @@ void Engine::stopVoice(int id, double when)
 
 void Engine::setListenerPosition(float x, float y, float z)
 {
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return;
     listener_.posX.store(x, std::memory_order_relaxed);
     listener_.posY.store(y, std::memory_order_relaxed);
     listener_.posZ.store(z, std::memory_order_relaxed);
@@ -279,6 +295,8 @@ void Engine::setListenerPosition(float x, float y, float z)
 void Engine::setListenerOrientation(float fx, float fy, float fz,
                                      float ux, float uy, float uz)
 {
+    if (!std::isfinite(fx) || !std::isfinite(fy) || !std::isfinite(fz) ||
+        !std::isfinite(ux) || !std::isfinite(uy) || !std::isfinite(uz)) return;
     listener_.fwdX.store(fx, std::memory_order_relaxed);
     listener_.fwdY.store(fy, std::memory_order_relaxed);
     listener_.fwdZ.store(fz, std::memory_order_relaxed);
@@ -289,6 +307,7 @@ void Engine::setListenerOrientation(float fx, float fy, float fz,
 
 void Engine::setListenerVelocity(float x, float y, float z)
 {
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return;
     listener_.velX.store(x, std::memory_order_relaxed);
     listener_.velY.store(y, std::memory_order_relaxed);
     listener_.velZ.store(z, std::memory_order_relaxed);
@@ -296,6 +315,7 @@ void Engine::setListenerVelocity(float x, float y, float z)
 
 void Engine::setDopplerFactor(float factor)
 {
+    if (!std::isfinite(factor)) return;
     dopplerFactor_.store(std::max(0.0f, factor), std::memory_order_relaxed);
 }
 
@@ -339,20 +359,22 @@ void Engine::setHeadModelCutoffRange(float minHz, float maxHz) {
 
 static void setSpatialEnabled(SpatialSource& s, bool enabled) { s.spatialEnabled.store(enabled, std::memory_order_relaxed); }
 static void setSpatialPosition(SpatialSource& s, float x, float y, float z) {
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return;
     s.posX.store(x, std::memory_order_relaxed);
     s.posY.store(y, std::memory_order_relaxed);
     s.posZ.store(z, std::memory_order_relaxed);
 }
 static void setSpatialVelocity(SpatialSource& s, float x, float y, float z) {
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return;
     s.velX.store(x, std::memory_order_relaxed);
     s.velY.store(y, std::memory_order_relaxed);
     s.velZ.store(z, std::memory_order_relaxed);
 }
-static void setSpatialRefDistance(SpatialSource& s, float d) { s.refDistance.store(std::max(0.001f, d), std::memory_order_relaxed); }
-static void setSpatialMaxDistance(SpatialSource& s, float d) { s.maxDistance.store(std::max(0.001f, d), std::memory_order_relaxed); }
-static void setSpatialRolloff(SpatialSource& s, float r) { s.rolloff.store(std::max(0.0f, r), std::memory_order_relaxed); }
+static void setSpatialRefDistance(SpatialSource& s, float d) { if (std::isfinite(d)) s.refDistance.store(std::max(0.001f, d), std::memory_order_relaxed); }
+static void setSpatialMaxDistance(SpatialSource& s, float d) { if (std::isfinite(d)) s.maxDistance.store(std::max(0.001f, d), std::memory_order_relaxed); }
+static void setSpatialRolloff(SpatialSource& s, float r) { if (std::isfinite(r)) s.rolloff.store(std::max(0.0f, r), std::memory_order_relaxed); }
 static void setSpatialDistanceModel(SpatialSource& s, DistanceModel m) { s.distanceModel.store(static_cast<int>(m), std::memory_order_relaxed); }
-static void setSpatialOcclusion(SpatialSource& s, float occ) { s.occlusion.store(std::clamp(occ, 0.0f, 1.0f), std::memory_order_relaxed); }
+static void setSpatialOcclusion(SpatialSource& s, float occ) { if (std::isfinite(occ)) s.occlusion.store(std::clamp(occ, 0.0f, 1.0f), std::memory_order_relaxed); }
 
 void Engine::setVoiceSpatialEnabled(int id, bool enabled) { if (auto* v = findVoice(id)) setSpatialEnabled(v->spatial, enabled); }
 void Engine::setVoiceSpatialPosition(int id, float x, float y, float z) { if (auto* v = findVoice(id)) setSpatialPosition(v->spatial, x, y, z); }

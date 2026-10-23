@@ -1,6 +1,7 @@
 #include "test_harness.h"
 #include "broaudio/dsp/biquad.h"
 #include <cmath>
+#include <limits>
 #include <numbers>
 
 using namespace broaudio;
@@ -156,6 +157,52 @@ TEST(filter_reset_clears_state) {
     f.reset();
     ASSERT_NEAR(f.z1[0], 0.0f, 1e-10f);
     ASSERT_NEAR(f.z2[0], 0.0f, 1e-10f);
+    PASS();
+}
+
+TEST(biquad_finite_float_gate_and_state_recovery) {
+    const float nanVal = std::numeric_limits<float>::quiet_NaN();
+    const float infVal = std::numeric_limits<float>::infinity();
+    const float badVals[] = {nanVal, infVal, -infVal, 0.0f, -500.0f, 1e9f};
+    const BiquadFilter::Type types[] = {
+        BiquadFilter::Type::Lowpass, BiquadFilter::Type::Highpass,
+        BiquadFilter::Type::Bandpass, BiquadFilter::Type::Notch,
+        BiquadFilter::Type::Allpass, BiquadFilter::Type::Peaking,
+        BiquadFilter::Type::Lowshelf, BiquadFilter::Type::Highshelf
+    };
+
+    for (auto t : types) {
+        for (float bf : badVals) {
+            for (float bq : badVals) {
+                for (float bg : badVals) {
+                    BiquadFilter f;
+                    f.type = t;
+                    f.frequency = bf;
+                    f.Q = bq;
+                    f.gainDB = bg;
+                    f.computeCoefficients(SR);
+                    f.snapToTarget();
+                    ASSERT_TRUE(std::isfinite(f.b0));
+                    ASSERT_TRUE(std::isfinite(f.b1));
+                    ASSERT_TRUE(std::isfinite(f.b2));
+                    ASSERT_TRUE(std::isfinite(f.a1));
+                    ASSERT_TRUE(std::isfinite(f.a2));
+
+                    // Feed non-finite input followed by normal input: filter state must never stay poisoned
+                    float yNan = f.process(nanVal, 0);
+                    float yInf = f.process(infVal, 0);
+                    ASSERT_TRUE(std::isfinite(yNan));
+                    ASSERT_TRUE(std::isfinite(yInf));
+                    for (int i = 0; i < 32; ++i) {
+                        float y = f.process(0.5f, 0);
+                        ASSERT_TRUE(std::isfinite(y));
+                        ASSERT_TRUE(std::isfinite(f.z1[0]));
+                        ASSERT_TRUE(std::isfinite(f.z2[0]));
+                    }
+                }
+            }
+        }
+    }
     PASS();
 }
 

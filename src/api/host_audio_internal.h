@@ -576,7 +576,7 @@ inline double numAt(std::span<const Value> args, size_t i) {
     Value v = args[i];
     if (ev::isObject(v)) return 0.0;
     double d = ev::toDouble(v);
-    return std::isnan(d) ? 0.0 : d;
+    return std::isfinite(d) ? d : 0.0;
 }
 
 // Optional trailing rampSeconds (setPlaybackGain / setPlaybackSend /
@@ -696,7 +696,7 @@ inline bool plainArrayData(Value v, std::vector<T>& storage, Convert convert,
     for (uint32_t i = 0; i < n; ++i) {
         Value e = ev::getElement(root.get(), i);
         double d = ev::isObject(e) ? 0.0 : ev::toDouble(e);
-        storage[i] = std::isnan(d) ? T{} : convert(d);
+        storage[i] = !std::isfinite(d) ? T{} : convert(d);
     }
     *outData = storage.data();
     *outCount = n;

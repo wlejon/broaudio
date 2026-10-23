@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 
 namespace broaudio {
@@ -78,9 +79,15 @@ struct BiquadFilter {
     }
 
     inline float process(float input, int ch = 0) {
-        float output = b0 * input + z1[ch];
-        z1[ch] = b1 * input - a1 * output + z2[ch];
-        z2[ch] = b2 * input - a2 * output;
+        const float x = std::isfinite(input) ? input : 0.0f;
+        float output = b0 * x + z1[ch];
+        z1[ch] = b1 * x - a1 * output + z2[ch];
+        z2[ch] = b2 * x - a2 * output;
+        if (!std::isfinite(output) || !std::isfinite(z1[ch]) || !std::isfinite(z2[ch])) {
+            z1[ch] = 0.0f;
+            z2[ch] = 0.0f;
+            return 0.0f;
+        }
         return output;
     }
 

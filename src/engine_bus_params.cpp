@@ -6,8 +6,15 @@
 #include "broaudio/dsp/equalizer.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace broaudio {
+
+namespace {
+inline float clampFinite(float v, float lo, float hi, float fallback) {
+    return std::isfinite(v) ? std::clamp(v, lo, hi) : fallback;
+}
+} // namespace
 
 // --- Per-bus delay control ---
 
@@ -23,7 +30,7 @@ void Engine::setBusDelayTime(int busId, float seconds)
 {
     auto* bus = findBus(busId);
     if (!bus) return;
-    bus->delayParams.time.store(std::clamp(seconds, 0.001f, 2.0f), std::memory_order_relaxed);
+    bus->delayParams.time.store(clampFinite(seconds, 0.001f, 2.0f, 0.3f), std::memory_order_relaxed);
     bus->delayParams.version.fetch_add(1, std::memory_order_release);
 }
 
@@ -31,7 +38,7 @@ void Engine::setBusDelayFeedback(int busId, float fb)
 {
     auto* bus = findBus(busId);
     if (!bus) return;
-    bus->delayParams.feedback.store(std::clamp(fb, 0.0f, 0.95f), std::memory_order_relaxed);
+    bus->delayParams.feedback.store(clampFinite(fb, 0.0f, 0.95f, 0.0f), std::memory_order_relaxed);
     bus->delayParams.version.fetch_add(1, std::memory_order_release);
 }
 
@@ -39,7 +46,7 @@ void Engine::setBusDelayMix(int busId, float mix)
 {
     auto* bus = findBus(busId);
     if (!bus) return;
-    bus->delayParams.mix.store(std::clamp(mix, 0.0f, 1.0f), std::memory_order_relaxed);
+    bus->delayParams.mix.store(clampFinite(mix, 0.0f, 1.0f, 0.5f), std::memory_order_relaxed);
     bus->delayParams.version.fetch_add(1, std::memory_order_release);
 }
 
@@ -77,7 +84,7 @@ void Engine::setBusCompressorThreshold(int busId, float threshold)
 {
     auto* bus = findBus(busId);
     if (!bus) return;
-    bus->compressorParams.threshold.store(std::clamp(threshold, 0.0f, 1.0f), std::memory_order_relaxed);
+    bus->compressorParams.threshold.store(clampFinite(threshold, 0.0f, 1.0f, 0.7f), std::memory_order_relaxed);
     bus->compressorParams.version.fetch_add(1, std::memory_order_release);
 }
 
@@ -85,7 +92,7 @@ void Engine::setBusCompressorRatio(int busId, float ratio)
 {
     auto* bus = findBus(busId);
     if (!bus) return;
-    bus->compressorParams.ratio.store(std::clamp(ratio, 1.0f, 20.0f), std::memory_order_relaxed);
+    bus->compressorParams.ratio.store(clampFinite(ratio, 1.0f, 20.0f, 4.0f), std::memory_order_relaxed);
     bus->compressorParams.version.fetch_add(1, std::memory_order_release);
 }
 
@@ -93,7 +100,7 @@ void Engine::setBusCompressorAttack(int busId, float ms)
 {
     auto* bus = findBus(busId);
     if (!bus) return;
-    bus->compressorParams.attackMs.store(std::clamp(ms, 0.1f, 100.0f), std::memory_order_relaxed);
+    bus->compressorParams.attackMs.store(clampFinite(ms, 0.1f, 100.0f, 1.0f), std::memory_order_relaxed);
     bus->compressorParams.version.fetch_add(1, std::memory_order_release);
 }
 
@@ -101,7 +108,7 @@ void Engine::setBusCompressorRelease(int busId, float ms)
 {
     auto* bus = findBus(busId);
     if (!bus) return;
-    bus->compressorParams.releaseMs.store(std::clamp(ms, 1.0f, 1000.0f), std::memory_order_relaxed);
+    bus->compressorParams.releaseMs.store(clampFinite(ms, 1.0f, 1000.0f, 100.0f), std::memory_order_relaxed);
     bus->compressorParams.version.fetch_add(1, std::memory_order_release);
 }
 
@@ -149,7 +156,7 @@ void Engine::setBusReverbRoomSize(int busId, float size)
 {
     auto* bus = findBus(busId);
     if (!bus) return;
-    bus->reverbParams.roomSize.store(std::clamp(size, 0.0f, 1.0f), std::memory_order_relaxed);
+    bus->reverbParams.roomSize.store(clampFinite(size, 0.0f, 1.0f, 0.85f), std::memory_order_relaxed);
     bus->reverbParams.version.fetch_add(1, std::memory_order_release);
 }
 
@@ -157,7 +164,7 @@ void Engine::setBusReverbDamping(int busId, float damping)
 {
     auto* bus = findBus(busId);
     if (!bus) return;
-    bus->reverbParams.damping.store(std::clamp(damping, 0.0f, 1.0f), std::memory_order_relaxed);
+    bus->reverbParams.damping.store(clampFinite(damping, 0.0f, 1.0f, 0.5f), std::memory_order_relaxed);
     bus->reverbParams.version.fetch_add(1, std::memory_order_release);
 }
 
@@ -165,7 +172,7 @@ void Engine::setBusReverbMix(int busId, float mix)
 {
     auto* bus = findBus(busId);
     if (!bus) return;
-    bus->reverbParams.mix.store(std::clamp(mix, 0.0f, 1.0f), std::memory_order_relaxed);
+    bus->reverbParams.mix.store(clampFinite(mix, 0.0f, 1.0f, 0.3f), std::memory_order_relaxed);
     bus->reverbParams.version.fetch_add(1, std::memory_order_release);
 }
 
@@ -183,7 +190,7 @@ void Engine::setBusChorusRate(int busId, float hz)
 {
     auto* bus = findBus(busId);
     if (!bus) return;
-    bus->chorusParams.rate.store(std::clamp(hz, 0.01f, 20.0f), std::memory_order_relaxed);
+    bus->chorusParams.rate.store(clampFinite(hz, 0.01f, 20.0f, 0.5f), std::memory_order_relaxed);
     bus->chorusParams.version.fetch_add(1, std::memory_order_release);
 }
 
@@ -191,7 +198,7 @@ void Engine::setBusChorusDepth(int busId, float seconds)
 {
     auto* bus = findBus(busId);
     if (!bus) return;
-    bus->chorusParams.depth.store(std::clamp(seconds, 0.0001f, 0.05f), std::memory_order_relaxed);
+    bus->chorusParams.depth.store(clampFinite(seconds, 0.0001f, 0.05f, 0.005f), std::memory_order_relaxed);
     bus->chorusParams.version.fetch_add(1, std::memory_order_release);
 }
 
@@ -199,7 +206,7 @@ void Engine::setBusChorusMix(int busId, float mix)
 {
     auto* bus = findBus(busId);
     if (!bus) return;
-    bus->chorusParams.mix.store(std::clamp(mix, 0.0f, 1.0f), std::memory_order_relaxed);
+    bus->chorusParams.mix.store(clampFinite(mix, 0.0f, 1.0f, 0.5f), std::memory_order_relaxed);
     bus->chorusParams.version.fetch_add(1, std::memory_order_release);
 }
 
@@ -207,7 +214,7 @@ void Engine::setBusChorusFeedback(int busId, float fb)
 {
     auto* bus = findBus(busId);
     if (!bus) return;
-    bus->chorusParams.feedback.store(std::clamp(fb, 0.0f, 0.95f), std::memory_order_relaxed);
+    bus->chorusParams.feedback.store(clampFinite(fb, 0.0f, 0.95f, 0.0f), std::memory_order_relaxed);
     bus->chorusParams.version.fetch_add(1, std::memory_order_release);
 }
 
@@ -215,7 +222,7 @@ void Engine::setBusChorusBaseDelay(int busId, float seconds)
 {
     auto* bus = findBus(busId);
     if (!bus) return;
-    bus->chorusParams.baseDelay.store(std::clamp(seconds, 0.001f, 0.05f), std::memory_order_relaxed);
+    bus->chorusParams.baseDelay.store(clampFinite(seconds, 0.001f, 0.05f, 0.01f), std::memory_order_relaxed);
     bus->chorusParams.version.fetch_add(1, std::memory_order_release);
 }
 
@@ -243,7 +250,7 @@ void Engine::setBusDistortionDrive(int busId, float drive)
 {
     auto* bus = findBus(busId);
     if (!bus) return;
-    bus->distortionParams.drive.store(std::clamp(drive, 0.1f, 100.0f), std::memory_order_relaxed);
+    bus->distortionParams.drive.store(clampFinite(drive, 0.1f, 100.0f, 1.0f), std::memory_order_relaxed);
     bus->distortionParams.version.fetch_add(1, std::memory_order_release);
 }
 
@@ -251,7 +258,7 @@ void Engine::setBusDistortionMix(int busId, float mix)
 {
     auto* bus = findBus(busId);
     if (!bus) return;
-    bus->distortionParams.mix.store(std::clamp(mix, 0.0f, 1.0f), std::memory_order_relaxed);
+    bus->distortionParams.mix.store(clampFinite(mix, 0.0f, 1.0f, 1.0f), std::memory_order_relaxed);
     bus->distortionParams.version.fetch_add(1, std::memory_order_release);
 }
 
@@ -259,7 +266,7 @@ void Engine::setBusDistortionOutputGain(int busId, float gain)
 {
     auto* bus = findBus(busId);
     if (!bus) return;
-    bus->distortionParams.outputGain.store(std::clamp(gain, 0.0f, 2.0f), std::memory_order_relaxed);
+    bus->distortionParams.outputGain.store(clampFinite(gain, 0.0f, 2.0f, 1.0f), std::memory_order_relaxed);
     bus->distortionParams.version.fetch_add(1, std::memory_order_release);
 }
 
@@ -267,7 +274,7 @@ void Engine::setBusDistortionCrushBits(int busId, float bits)
 {
     auto* bus = findBus(busId);
     if (!bus) return;
-    bus->distortionParams.crushBits.store(std::clamp(bits, 1.0f, 16.0f), std::memory_order_relaxed);
+    bus->distortionParams.crushBits.store(clampFinite(bits, 1.0f, 16.0f, 16.0f), std::memory_order_relaxed);
     bus->distortionParams.version.fetch_add(1, std::memory_order_release);
 }
 
@@ -275,7 +282,7 @@ void Engine::setBusDistortionCrushRate(int busId, float rate)
 {
     auto* bus = findBus(busId);
     if (!bus) return;
-    bus->distortionParams.crushRate.store(std::clamp(rate, 0.01f, 1.0f), std::memory_order_relaxed);
+    bus->distortionParams.crushRate.store(clampFinite(rate, 0.01f, 1.0f, 1.0f), std::memory_order_relaxed);
     bus->distortionParams.version.fetch_add(1, std::memory_order_release);
 }
 
@@ -351,7 +358,7 @@ void Engine::setBusEqBandGain(int busId, int band, float gainDB)
 {
     auto* bus = findBus(busId);
     if (!bus || band < 0 || band >= Equalizer::NUM_BANDS) return;
-    bus->eqParams.bandGains[band].store(std::clamp(gainDB, -12.0f, 12.0f), std::memory_order_relaxed);
+    bus->eqParams.bandGains[band].store(clampFinite(gainDB, -12.0f, 12.0f, 0.0f), std::memory_order_relaxed);
     bus->eqParams.version.fetch_add(1, std::memory_order_release);
 }
 
@@ -359,7 +366,7 @@ void Engine::setBusEqMasterGain(int busId, float gainDB)
 {
     auto* bus = findBus(busId);
     if (!bus) return;
-    bus->eqParams.masterGain.store(std::clamp(gainDB, 0.0f, 11.0f), std::memory_order_relaxed);
+    bus->eqParams.masterGain.store(clampFinite(gainDB, 0.0f, 11.0f, 0.0f), std::memory_order_relaxed);
     bus->eqParams.version.fetch_add(1, std::memory_order_release);
 }
 
@@ -560,7 +567,7 @@ void Engine::setVoiceSend(int voiceId, int sendBusId, float amount)
 {
     if (auto* v = findVoice(voiceId)) {
         v->sendBusId.store(sendBusId, std::memory_order_relaxed);
-        v->sendAmount.store(std::clamp(amount, 0.0f, 1.0f), std::memory_order_relaxed);
+        v->sendAmount.store(clampFinite(amount, 0.0f, 1.0f, 0.0f), std::memory_order_relaxed);
     }
 }
 
@@ -568,7 +575,8 @@ void Engine::setPlaybackSend(int instanceId, int sendBusId, float amount, float 
 {
     if (auto* pb = findPlayback(instanceId)) {
         pb->sendBusId.store(sendBusId, std::memory_order_relaxed);
-        pb->sendRamp.set(pb->sendAmount, std::clamp(amount, 0.0f, 1.0f), rampSeconds);
+        const float safeRamp = (std::isfinite(rampSeconds) && rampSeconds > 0.0f) ? rampSeconds : 0.0f;
+        pb->sendRamp.set(pb->sendAmount, clampFinite(amount, 0.0f, 1.0f, 0.0f), safeRamp);
     }
 }
 
@@ -576,7 +584,7 @@ void Engine::setBusSend(int busId, int sendBusId, float amount)
 {
     if (auto* b = findBus(busId)) {
         b->sendBusId.store(sendBusId, std::memory_order_relaxed);
-        b->sendAmount.store(std::clamp(amount, 0.0f, 1.0f), std::memory_order_relaxed);
+        b->sendAmount.store(clampFinite(amount, 0.0f, 1.0f, 0.0f), std::memory_order_relaxed);
     }
 }
 

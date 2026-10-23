@@ -206,12 +206,15 @@ std::vector<float> Engine::processEffectsOffline(int busId, const float* monoInp
 
 void Engine::setBusGain(int busId, float gain, float rampSeconds)
 {
+    if (!std::isfinite(gain)) return;
+    const float safeRamp = (std::isfinite(rampSeconds) && rampSeconds > 0.0f) ? rampSeconds : 0.0f;
     if (auto* b = findBus(busId))
-        b->gainRamp.set(b->gain, std::clamp(gain, 0.0f, 2.0f), rampSeconds);
+        b->gainRamp.set(b->gain, std::clamp(gain, 0.0f, 2.0f), safeRamp);
 }
 
 void Engine::setBusPan(int busId, float pan)
 {
+    if (!std::isfinite(pan)) return;
     if (auto* b = findBus(busId))
         b->pan.store(std::clamp(pan, -1.0f, 1.0f), std::memory_order_relaxed);
 }
@@ -345,6 +348,7 @@ void Engine::setBusFilterType(int busId, int slot, BiquadFilter::Type type)
 
 void Engine::setBusFilterFrequency(int busId, int slot, float freq)
 {
+    if (!std::isfinite(freq)) return;
     auto* bus = findBus(busId);
     if (!bus || slot < 0 || slot >= Bus::MAX_FILTERS) return;
     bus->filterParams[slot].frequency.store(std::clamp(freq, 20.0f, 20000.0f), std::memory_order_relaxed);
@@ -353,6 +357,7 @@ void Engine::setBusFilterFrequency(int busId, int slot, float freq)
 
 void Engine::setBusFilterQ(int busId, int slot, float q)
 {
+    if (!std::isfinite(q)) return;
     auto* bus = findBus(busId);
     if (!bus || slot < 0 || slot >= Bus::MAX_FILTERS) return;
     bus->filterParams[slot].Q.store(std::clamp(q, 0.1f, 30.0f), std::memory_order_relaxed);
@@ -361,6 +366,7 @@ void Engine::setBusFilterQ(int busId, int slot, float q)
 
 void Engine::setBusFilterGain(int busId, int slot, float gainDB)
 {
+    if (!std::isfinite(gainDB)) return;
     auto* bus = findBus(busId);
     if (!bus || slot < 0 || slot >= Bus::MAX_FILTERS) return;
     bus->filterParams[slot].gainDB.store(std::clamp(gainDB, -40.0f, 40.0f), std::memory_order_relaxed);

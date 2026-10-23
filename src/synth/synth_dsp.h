@@ -87,7 +87,7 @@ void filterCoefs(typename O::F cutoff, typename O::F q, typename O::F invFs, typ
     F w = O::min(O::max(cutoff * invFs, O::c(1e-5f)), O::c(0.49f));
     F hw = w * 0.5f;
     F g = sin01<O>(hw) / sin01<O>(hw + 0.25f);   // tan(pi w)
-    F kk = 1.0f / O::max(q, O::c(0.05f));
+    F kk = 1.0f / O::min(O::max(q, O::c(0.05f)), O::c(1000.0f));
     F a1 = 1.0f / (1.0f + g * (g + kk));
     F a2 = g * a1;
     out[0] = kk;

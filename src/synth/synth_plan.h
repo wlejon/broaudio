@@ -29,6 +29,11 @@
 #include <unordered_map>
 #include <vector>
 
+namespace brass {
+class Module;
+class Function;
+}
+
 namespace broaudio {
 
 enum class SynthKind : uint8_t {
@@ -136,6 +141,8 @@ bool compileSynthKernelSync(const SynthShape& shape);
 // Compile every requested shape not yet compiled (the engines' workers call
 // this on their timer). Cheap when nothing new was requested.
 void compilePendingSynthKernels();
+// Emit the unoptimized MIR function for a layer plan into `mod` (synth_jit.cpp); null without brass.
+brass::Function* buildSynthLayerMir(const LayerPlan& plan, brass::Module& mod);
 // Emit + compile the kernel for a plan (synth_jit.cpp); null without brass.
 void* buildSynthKernel(const LayerPlan& plan, std::shared_ptr<void>& keepAlive);
 

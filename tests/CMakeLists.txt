@@ -64,6 +64,7 @@ set(BROAUDIO_TESTS
     test_synth_loop
     test_synth_engine
     test_synth_graph_cost
+    test_synth_verify
 )
 
 foreach(test ${BROAUDIO_TESTS})

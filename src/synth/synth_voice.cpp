@@ -400,7 +400,8 @@ void SynthVoiceData::init(const SynthGraphData& g, int sampleRate, const SynthTr
                 double b = 0, a1 = 0, a2 = 0;
                 if (f > 0.0 && f < 0.49 * fs) {
                     const double w = 2.0 * 3.14159265358979323846 * f / fs;
-                    const double rr = std::exp(-6.907755278982137 / (static_cast<double>(v.values[md.decay]) * fs));
+                    const double decaySec = std::max(1e-4, static_cast<double>(v.values[md.decay]));
+                    const double rr = std::exp(-6.907755278982137 / (decaySec * fs));
                     b = v.values[md.gain] * std::sin(w);   // an impulse rings at amplitude `gain`
                     a1 = 2.0 * rr * std::cos(w);
                     a2 = -rr * rr;
@@ -415,7 +416,8 @@ void SynthVoiceData::init(const SynthGraphData& g, int sampleRate, const SynthTr
         lr.bufs.assign(std::max(1, plan.bufCount), nullptr);
         for (const CombDef& c : L.combs) {
             const NodePlan& nd = plan.nodes[c.node];
-            const double D = std::clamp(fs / v.values[c.freq], 2.0, 262144.0);
+            const double combFreq = std::max(1.0, static_cast<double>(v.values[c.freq]));
+            const double D = std::clamp(fs / combFreq, 2.0, 262144.0);
             const int di = static_cast<int>(std::floor(D));
             int cap = 16;
             while (cap < di + 4) cap <<= 1;

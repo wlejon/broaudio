@@ -1,6 +1,7 @@
 #pragma once
 
 #include "broaudio/dsp/jit/jit_types.h"
+#include <cmath>
 #include <memory>
 
 namespace brass::codegen {
@@ -36,8 +37,24 @@ public:
 
     // Execute the fused JIT kernel on the interleaved stereo buffer
     void process(float* buffer, int numFrames) noexcept {
-        if (fnPtr_) {
-            fnPtr_(buffer, numFrames, &params_, &state_);
+        if (!fnPtr_ || !buffer || numFrames <= 0) return;
+        const int totalSamples = numFrames * 2;
+        for (int i = 0; i < totalSamples; ++i) {
+            if (!std::isfinite(buffer[i])) buffer[i] = 0.0f;
+        }
+        fnPtr_(buffer, numFrames, &params_, &state_);
+        for (int i = 0; i < totalSamples; ++i) {
+            if (!std::isfinite(buffer[i])) buffer[i] = 0.0f;
+        }
+        for (int f = 0; f < JitTopology::MAX_FILTERS; ++f) {
+            if (!std::isfinite(state_.filterStateL[f].z1) || !std::isfinite(state_.filterStateL[f].z2)) {
+                state_.filterStateL[f].z1 = 0.0f;
+                state_.filterStateL[f].z2 = 0.0f;
+            }
+            if (!std::isfinite(state_.filterStateR[f].z1) || !std::isfinite(state_.filterStateR[f].z2)) {
+                state_.filterStateR[f].z1 = 0.0f;
+                state_.filterStateR[f].z2 = 0.0f;
+            }
         }
     }
 

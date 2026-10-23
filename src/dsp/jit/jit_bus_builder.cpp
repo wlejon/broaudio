@@ -6,6 +6,8 @@
 #include <brass/mir/builder.hpp>
 #include <brass/mir/module.hpp>
 #include <brass/mir/printer.hpp>
+#include <brass/mir/smt_guard_elim.hpp>
+#include <brass/mir/superopt.hpp>
 #include <brass/mir/types.hpp>
 
 #include <cstddef>
@@ -16,13 +18,41 @@
 
 namespace broaudio {
 
-std::shared_ptr<brass::codegen::KernelFunction> buildBusKernel(const JitTopology& topology)
+namespace {
+
+void lowerFmaToMulAdd(brass::Function& fn, brass::Module& mod)
+{
+    using namespace brass;
+    Builder b(mod);
+    b.set_function(&fn);
+    for (BasicBlock* bb : fn.blocks()) {
+        if (!bb) continue;
+        for (Instruction* inst = bb->head(); inst; inst = inst->next()) {
+            if ((inst->opcode() == Opcode::fma_f32 || inst->opcode() == Opcode::fma_f64) &&
+                inst->operand_count() == 3 && inst->result()) {
+                Value* op0 = inst->operand(0);
+                Value* op1 = inst->operand(1);
+                Value* op2 = inst->operand(2);
+                b.position_before(inst);
+                Value* prod = b.build_mul(op0, op1);
+
+                inst->set_opcode(Opcode::add);
+                inst->operands().clear();
+                inst->add_operand(prod);
+                inst->add_operand(op2);
+            }
+        }
+    }
+}
+
+} // namespace
+
+brass::Function* buildBusKernelMir(const JitTopology& topology, brass::Module& mod)
 {
     using namespace brass;
     using namespace brass::codegen;
 
-    Module mod("bus_jit_module");
-    mod.set_allow_fp_reassociation(true);
+    mod.set_allow_fp_reassociation(false);
 
     Function* fn = mod.create_function("bus_jit_kernel", Type::void_type(), {
         Type::ptr(), // buffer
@@ -159,9 +189,19 @@ std::shared_ptr<brass::codegen::KernelFunction> buildBusKernel(const JitTopology
                     break;
                 }
                 case DistortionMode::Foldback: {
-                    Value* one = b.const_f32(1.0f);
-                    wet_l = b.foldback(driven_l, one);
-                    wet_r = b.foldback(driven_r, one);
+                    auto emit_foldback = [&](Value* x) -> Value* {
+                        Value* qtr = b.const_f32(0.25f);
+                        Value* half = b.const_f32(0.5f);
+                        Value* one = b.const_f32(1.0f);
+                        Value* four = b.const_f32(4.0f);
+                        Value* t = b.add(b.mul(x, qtr), qtr);
+                        Value* fl = b.builder().build_floor_f32(t);
+                        t = b.sub(t, fl);
+                        Value* d = b.builder().build_fabs_f32(b.sub(t, half));
+                        return b.sub(one, b.mul(four, d));
+                    };
+                    wet_l = emit_foldback(driven_l);
+                    wet_r = emit_foldback(driven_r);
                     break;
                 }
                 default:
@@ -218,6 +258,20 @@ std::shared_ptr<brass::codegen::KernelFunction> buildBusKernel(const JitTopology
     }
 
     b.builder().build_ret_void();
+    lowerFmaToMulAdd(*fn, mod);
+    return fn;
+}
+
+std::shared_ptr<brass::codegen::KernelFunction> buildBusKernel(const JitTopology& topology)
+{
+    using namespace brass;
+    using namespace brass::codegen;
+
+    Module mod("bus_jit_module");
+    Function* fn = buildBusKernelMir(topology, mod);
+    brass::run_smt_guard_elimination(*fn, mod);
+    brass::run_mir_superopt(*fn, mod);
+    mod.set_allow_fp_reassociation(true);
 
     KernelOptions opts = KernelOptions::audio_realtime();
     opts.enable_unroll = false;

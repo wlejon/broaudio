@@ -21,6 +21,8 @@
 #include <brass/codegen/kernel_jit.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/module.hpp>
+#include <brass/mir/smt_guard_elim.hpp>
+#include <brass/mir/superopt.hpp>
 #include <brass/mir/types.hpp>
 #endif
 
@@ -252,10 +254,9 @@ void emitLayer(Builder& b, const LayerPlan& plan, Value* A, Value* W, Value* N)
 
 } // namespace
 
-void* buildSynthKernel(const LayerPlan& plan, std::shared_ptr<void>& keepAlive)
+brass::Function* buildSynthLayerMir(const LayerPlan& plan, brass::Module& mod)
 {
     using namespace brass::codegen;
-    Module mod("synth_layer_module");
     mod.set_allow_fp_reassociation(false);
     Function* fn = mod.create_function("synth_layer_kernel", Type::void_type(),
                                        {Type::ptr(), Type::ptr(), Type::i32()});
@@ -268,6 +269,16 @@ void* buildSynthKernel(const LayerPlan& plan, std::shared_ptr<void>& keepAlive)
     kb.position_at_end(entry);
     emitLayer(b, plan, a0, a1, n);
     b.build_ret_void();
+    return fn;
+}
+
+void* buildSynthKernel(const LayerPlan& plan, std::shared_ptr<void>& keepAlive)
+{
+    using namespace brass::codegen;
+    Module mod("synth_layer_module");
+    Function* fn = buildSynthLayerMir(plan, mod);
+    brass::run_smt_guard_elimination(*fn, mod);
+    brass::run_mir_superopt(*fn, mod);
 
     KernelOptions opts = KernelOptions::audio_realtime();
     // Bit-exact with the interpreter: no contraction, no reassociation.
@@ -284,6 +295,11 @@ void* buildSynthKernel(const LayerPlan& plan, std::shared_ptr<void>& keepAlive)
 }
 
 #else // !BROAUDIO_HAS_JIT
+
+brass::Function* buildSynthLayerMir(const LayerPlan&, brass::Module&)
+{
+    return nullptr;
+}
 
 void* buildSynthKernel(const LayerPlan&, std::shared_ptr<void>&)
 {

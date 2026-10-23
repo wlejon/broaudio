@@ -3,6 +3,11 @@
 #include "broaudio/spatial/voice_jit.h"
 #include <memory>
 
+namespace brass {
+class Module;
+class Function;
+}
+
 namespace brass::codegen {
 class KernelFunction;
 }
@@ -20,6 +25,9 @@ struct AirLaneSection {
     float z[kAirLanes];
     float xp[kAirLanes];
 };
+
+// Emits the unoptimized MIR function for a chain kernel into `mod`.
+brass::Function* buildVoiceKernelMir(const VoiceJitTopology& topology, brass::Module& mod);
 
 // Emits and compiles the chain kernel for one shape (a VoiceJitFn; the
 // topology has no air stage). Throws on a brass failure; null when the build

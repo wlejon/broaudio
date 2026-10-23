@@ -15,6 +15,8 @@
 #include <brass/codegen/kernel_jit.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/module.hpp>
+#include <brass/mir/smt_guard_elim.hpp>
+#include <brass/mir/superopt.hpp>
 #include <brass/mir/types.hpp>
 #endif
 
@@ -282,10 +284,9 @@ void Emitter::emitAir(Value* X, Value* SEC, Value* N)
 #undef SEC_OFF
 
 template <typename Emit>
-std::shared_ptr<brass::codegen::KernelFunction> compileKernel(Emit&& emit)
+brass::Function* emitKernelMir(brass::Module& mod, Emit&& emit)
 {
     using namespace brass::codegen;
-    Module mod("voice_jit_module");
     mod.set_allow_fp_reassociation(false);
     Function* fn = mod.create_function("voice_jit_kernel", Type::void_type(),
                                        {Type::ptr(), Type::ptr(), Type::i32()});
@@ -299,6 +300,17 @@ std::shared_ptr<brass::codegen::KernelFunction> compileKernel(Emit&& emit)
     Emitter e(b);
     emit(e, a0, a1, n);
     b.build_ret_void();
+    return fn;
+}
+
+template <typename Emit>
+std::shared_ptr<brass::codegen::KernelFunction> compileKernel(Emit&& emit)
+{
+    using namespace brass::codegen;
+    Module mod("voice_jit_module");
+    Function* fn = emitKernelMir(mod, std::forward<Emit>(emit));
+    brass::run_smt_guard_elimination(*fn, mod);
+    brass::run_mir_superopt(*fn, mod);
 
     KernelOptions opts = KernelOptions::audio_realtime();
     // Bit-exact with the interpreter: no contraction, no reassociation.
@@ -314,6 +326,13 @@ std::shared_ptr<brass::codegen::KernelFunction> compileKernel(Emit&& emit)
 
 } // namespace
 
+brass::Function* buildVoiceKernelMir(const VoiceJitTopology& topology, brass::Module& mod)
+{
+    if (topology.source || topology.air)
+        throw std::invalid_argument("buildVoiceKernelMir: no source or air stage in a chain kernel");
+    return emitKernelMir(mod, [&](Emitter& e, Value* a, Value* s, Value* n) { e.emitChain(topology, a, s, n); });
+}
+
 std::shared_ptr<brass::codegen::KernelFunction> buildVoiceKernel(const VoiceJitTopology& topology)
 {
     if (topology.source || topology.air)
@@ -327,6 +346,11 @@ std::shared_ptr<brass::codegen::KernelFunction> buildAirLaneKernel()
 }
 
 #else // !BROAUDIO_HAS_JIT
+
+brass::Function* buildVoiceKernelMir(const VoiceJitTopology&, brass::Module&)
+{
+    return nullptr;
+}
 
 std::shared_ptr<brass::codegen::KernelFunction> buildVoiceKernel(const VoiceJitTopology&)
 {

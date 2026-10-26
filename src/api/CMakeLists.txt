@@ -1,7 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
 set(BROAUDIO_API_SOURCES
-    host_class.cpp
     api.cpp
     host_audio_context.cpp
     host_audio_nodes.cpp

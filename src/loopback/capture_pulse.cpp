@@ -23,6 +23,7 @@
 // PipeWire compatibility shim), which is what most modern desktops actually run.
 
 #include "broaudio/loopback_capture.h"
+#include "broaudio/capture_gate.h"
 #include "broaudio/log.h"
 
 #include <pulse/pulseaudio.h>
@@ -268,6 +269,10 @@ std::vector<AudioProcess> LoopbackCapture::enumerateProcesses() {
 
 bool LoopbackCapture::start(const LoopbackConfig& cfg, LoopbackCallback cb) {
     if (!cb) return false;
+    if (std::string refused = checkCaptureGate("record other applications' audio"); !refused.empty()) {
+        log(LogLevel::Warn, "broaudio: loopback capture refused: %s", refused.c_str());
+        return false;
+    }
     if (impl_->running.load(std::memory_order_acquire)) return false;
 
     // PulseAudio cannot capture a single process tree without rerouting it; the

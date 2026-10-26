@@ -15,6 +15,7 @@
 // success/failure through an event; stop() sets an atomic and joins.
 
 #include "broaudio/loopback_capture.h"
+#include "broaudio/capture_gate.h"
 #include "broaudio/log.h"
 
 #include "../device/stream_resampler.h"
@@ -467,6 +468,10 @@ std::vector<AudioProcess> LoopbackCapture::enumerateProcesses() {
 
 bool LoopbackCapture::start(const LoopbackConfig& cfg, LoopbackCallback cb) {
     if (!cb) return false;
+    if (std::string refused = checkCaptureGate("record other applications' audio"); !refused.empty()) {
+        log(LogLevel::Warn, "broaudio: loopback capture refused: %s", refused.c_str());
+        return false;
+    }
     if (impl_->running.load(std::memory_order_acquire)) return false;
 #if !BROAUDIO_HAS_PROCESS_LOOPBACK
     if (cfg.mode != LoopbackMode::SystemOutput) return false;

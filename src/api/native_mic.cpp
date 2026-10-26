@@ -2,6 +2,7 @@
 #include "host_audio_internal.h"
 #include "object_builder.h"
 
+#include <broaudio/capture_gate.h>
 #include <broaudio/engine.h>
 #include <broaudio/mic_tap.h>
 
@@ -302,6 +303,12 @@ void installMic() {
 
         if (ev::isFunction(onChunkCb.get())) {
             g_mic.onChunk.set(onChunkCb.get());
+        }
+        // Asked here as well as at the tap, so a refusal says why rather than
+        // that the tap failed.
+        if (std::string refused = broaudio::checkCaptureGate("bro.mic.start"); !refused.empty()) {
+            g_mic.onChunk.set(ev::undefined());
+            return ev::throwError("bro.mic.start: " + refused);
         }
         auto sess = std::make_shared<MicSession>(chunkFrames, samples);
         g_mic.session = sess;

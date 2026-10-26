@@ -2,6 +2,7 @@
 // taps (resample + AGC + chunking), output recording, and spectrum analysis.
 
 #include "broaudio/engine.h"
+#include "broaudio/capture_gate.h"
 #include "broaudio/log.h"
 #include "broaudio/dsp/fft.h"
 #include "device/stream_resampler.h"
@@ -16,10 +17,30 @@ namespace broaudio {
 // Microphone capture
 // ---------------------------------------------------------------------------
 
+namespace {
+
+CaptureGate& captureGate() {
+    static CaptureGate g;
+    return g;
+}
+
+} // namespace
+
+void setCaptureGate(CaptureGate gate) { captureGate() = std::move(gate); }
+
+std::string checkCaptureGate(const std::string& what) {
+    const CaptureGate& g = captureGate();
+    return g ? g(what) : std::string();
+}
+
 bool Engine::startMicCapture()
 {
     if (micCapturing_) return true;
     if (!initialized_) return false;
+    if (std::string refused = checkCaptureGate("record from the microphone"); !refused.empty()) {
+        log(LogLevel::Warn, "broaudio: microphone refused: %s", refused.c_str());
+        return false;
+    }
 
     // A headless engine has no device backend, and the mic stays closed: a
     // headless run never claims the machine's sound hardware (offline mic
@@ -114,6 +135,12 @@ MicTapId Engine::addMicTap(const MicTapConfig& cfg, MicTapCallback cb)
 {
     if (!cb) return kInvalidMicTapId;
     if (cfg.targetRate < 0 || cfg.chunkFrames < 0) return kInvalidMicTapId;
+    // A tap is the microphone's samples, whether the device is open or a
+    // headless run injects them.
+    if (std::string refused = checkCaptureGate("record from the microphone"); !refused.empty()) {
+        log(LogLevel::Warn, "broaudio: microphone tap refused: %s", refused.c_str());
+        return kInvalidMicTapId;
+    }
 
     auto tap = std::make_shared<MicTap>();
     tap->cfg      = cfg;

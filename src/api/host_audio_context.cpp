@@ -1,6 +1,7 @@
 #include "host_audio_internal.h"
 #include "host_audio_synth_graph.h"
 #include "host_audio_verified_dsp.h"
+#include <broaudio/capture_gate.h>
 #include <broaudio/dsp/resampler.h>
 #include <broaudio/io/audio_file.h>
 
@@ -882,6 +883,11 @@ void installAudioGlobals() {
     // as navigator.mediaDevices.getUserMedia — the QuickJS binding's shape.
     ev::setGlobalFunction("__nativeGetUserMedia", 1, [](Value, std::span<const Value>) -> Value {
         ev::Persistent p(ev::createPromise());
+        if (std::string refused = broaudio::checkCaptureGate("getUserMedia"); !refused.empty()) {
+            ev::Persistent err(hostMakeDomError("NotAllowedError", refused));
+            ev::rejectPromise(p.get(), err.get());
+            return p.get();
+        }
         auto* e = getAudioEngine();
         if (!e || !e->startMicCapture()) {
             ev::Persistent err(hostMakeDomError(nullptr, "Failed to access microphone"));

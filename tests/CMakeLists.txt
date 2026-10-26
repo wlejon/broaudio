@@ -147,6 +147,28 @@ if(TARGET broaudio_api)
         endif()
     endif()
 
+    # The file loaders and savers under the host's access gate (api.h,
+    # "Access"): its own headless engine, a fake gate refusing a directory.
+    add_executable(broaudio_test_api_gate test_audio_api_gate.cpp)
+    target_link_libraries(broaudio_test_api_gate PRIVATE broaudio_api bronze_runtime_shared)
+    if(WIN32)
+        add_custom_command(TARGET broaudio_test_api_gate POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:bronze_runtime_shared>
+                $<TARGET_FILE_DIR:broaudio_test_api_gate>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_LINKER_FILE:bronze_runtime_shared>
+                $<TARGET_FILE_DIR:broaudio_test_api_gate>
+        )
+    endif()
+    if(BRASS_HOST_BACKEND)
+        add_test(NAME broaudio_test_api_gate COMMAND broaudio_test_api_gate)
+        if(WIN32)
+            set_tests_properties(broaudio_test_api_gate PROPERTIES
+                ENVIRONMENT "PATH=$<TARGET_FILE_DIR:bronze_runtime_shared>;$<TARGET_FILE_DIR:broaudio_test_api_gate>;$ENV{PATH}")
+        endif()
+    endif()
+
     # ctx.destination is a real AudioDestinationNode over AudioNode.prototype.
     add_executable(broaudio_test_destination test_audio_destination.cpp)
     target_link_libraries(broaudio_test_destination PRIVATE broaudio_api bronze_runtime_shared)

@@ -371,7 +371,7 @@ void decorateAudioContextProto(ObjectBuilder& b) {
 
     b.def("decodeAudioFile", 1, [](Value, std::span<const Value> a) -> Value {
         if (a.empty()) return ev::null();
-        std::string path = resolveAudioPath(ev::toUtf8(a[0]));
+        std::string path = audioReadPath(ev::toUtf8(a[0]));
         broaudio::AudioFileData data = broaudio::loadAudioFile(path.c_str());
         if (!data.valid()) return ev::null();
 
@@ -440,7 +440,7 @@ void decorateAudioContextProto(ObjectBuilder& b) {
     b.def("exportRecordingToWav", 1, [](Value, std::span<const Value> a) {
         auto* e = getAudioEngine();
         if (!e || a.empty()) return ev::fromBool(false);
-        std::string path = resolveAudioWritePath(ev::toUtf8(a[0]));
+        std::string path = audioWritePath(ev::toUtf8(a[0]));
         return ev::fromBool(e->exportRecordingToWav(path.c_str()));
     });
 
@@ -449,7 +449,7 @@ void decorateAudioContextProto(ObjectBuilder& b) {
     // through the host's resolver like every other file the context writes.
     b.def("saveWav", 4, [](Value, std::span<const Value> a) -> Value {
         if (a.size() < 4) return ev::fromBool(false);
-        std::string path = resolveAudioWritePath(ev::toUtf8(a[0]));
+        std::string path = audioWritePath(ev::toUtf8(a[0]));
         std::vector<float> samples;
         if (!readFloatArrayArg(a[1], FloatArrayArg::Float32Only, "saveWav: samples", samples)) {
             return ev::undefined();

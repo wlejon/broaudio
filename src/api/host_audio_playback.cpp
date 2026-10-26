@@ -256,7 +256,7 @@ void registerAudioContextPlayback(ObjectBuilder& b) {
         if (!e || a.empty() || ev::isUndefined(a[0])) {
             return ev::throwTypeError("createStreamFromFile: file path required");
         }
-        std::string path = resolveAudioPath(ev::toUtf8(a[0]));
+        std::string path = audioReadPath(ev::toUtf8(a[0]));
         broaudio::FileStreamOptions opts;
         if (a.size() >= 2 && ev::isObject(a[1])) {
             ev::Persistent opt(a[1]);

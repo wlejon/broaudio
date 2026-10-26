@@ -69,7 +69,7 @@ bool readClip(Value v, double fallbackRate, const char* who, ClipArg& out) {
     ev::Persistent root(v);
     if (ev::isString(root.get())) {
         const std::string given = ev::toUtf8(root.get());
-        const std::string path = resolveAudioPath(given);
+        const std::string path = audioReadPath(given);
         std::string err;
         if (!ear::loadClip(path, out.clip, &err)) {
             ev::throwError(std::string(who) + ": " + (err.empty() ? "could not decode " + given : err));
@@ -331,7 +331,7 @@ bool writeSpectrogramPng(const std::string& path, Value data, int w, int h, cons
             }
         }
     }
-    return ear::writePng(resolveAudioWritePath(path), img.rgba.data(), img.width, img.height);
+    return ear::writePng(audioWritePath(path), img.rgba.data(), img.width, img.height);
 }
 
 Value spectrogramFn(Value, std::span<const Value> a) {

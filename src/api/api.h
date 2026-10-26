@@ -61,6 +61,31 @@ void tickAsyncJobs();
 /// every realm shares the host's filesystem.
 void setPathResolver(std::function<std::string(const std::string&)> resolver);
 
+// ---- Access -----------------------------------------------------------------
+//
+// Which files a program may touch is the host's decision, not broaudio's:
+// every loader and saver asks the host's one access gate,
+// bronze::embed::checkAccess (embed/embed_access.h), with the path resolved
+// (setPathResolver; a saver's through its parent directory), absolute and
+// lexically normal (UTF-8), on the JS thread that made the call, before the
+// file is opened or any work is queued. With no gate installed every path is
+// allowed and nothing below changes. (Capture, the microphone and loopback,
+// asks its own question: AccessKind::Capture.)
+//
+// What each native asks:
+///   createClipFromFile, createClipFromFileAsync, createStreamFromFile,
+///   decodeAudioFile, loadPreset, bro.ear's clip paths (measure, compare,
+///   spectrogram, fit's reference)                    the path Read
+///   saveWav, exportRecordingToWav, savePreset,
+///   bro.ear.spectrogram's `path` PNG                 the path Write
+///   (written through bro.image.encodePngFile when the realm has it, which asks)
+//
+// A refusal is bronze::embed::newAccessError: an Error whose `message` is the
+// gate's sentence (named PermissionRevoked for a grant taken back), `code` is
+// "EACCES" and `path` the absolute path asked about. A synchronous native
+// throws it; createClipFromFileAsync returns a promise rejected with it and
+// starts no worker. Nothing is read or written.
+
 /// Retrieve the active broaudio::Engine pointer.
 /// If no engine has been set via setAudioEngine, lazily creates and initializes
 /// a shared default engine instance (trying device output first, falling back to headless).

@@ -4,7 +4,10 @@
 // decodeAudioFile, saveWav, exportRecordingToWav, savePreset, loadPreset)
 // goes through the host's resolver when one is set (api.h setPathResolver),
 // so a relative path or a mount path means what it means to the host's `fs`,
-// anchored at the app, rather than at the process's working directory.
+// anchored at the app, rather than at the process's working directory. The
+// resolved path is then asked of the host's access gate (askAudioRead /
+// askAudioWrite; api.h, "Access") on the JS thread, before anything opens it
+// or any work is queued.
 //
 // Background work: createClipFromFileAsync decodes + resamples on its own
 // thread (Engine::createClipFromFileEx is documented safe off the audio and
@@ -15,6 +18,7 @@
 
 #include "host_audio_internal.h"
 #include "host_audio_ear.h"
+#include "embed/embed_access.h"
 
 #include <atomic>
 #include <filesystem>
@@ -31,6 +35,31 @@ namespace {
 std::function<std::string(const std::string&)>& pathResolver() {
     static std::function<std::string(const std::string&)> r;
     return r;
+}
+
+std::string resolveAudioPath(const std::string& path) {
+    auto& r = pathResolver();
+    return r ? r(path) : path;
+}
+
+AudioPath ask(std::string resolved, ev::AccessKind kind) {
+    AudioPath out;
+    out.resolved = std::move(resolved);
+    if (!ev::accessGateActive()) return out;
+    namespace fs = std::filesystem;
+    fs::path p(std::u8string(out.resolved.begin(), out.resolved.end()));
+    std::error_code ec;
+    fs::path abs = fs::absolute(p, ec);
+    if (ec) abs = p;
+    const std::u8string u8 = abs.lexically_normal().u8string();
+    out.subject.assign(u8.begin(), u8.end());
+    out.refusal = ev::checkAccess(kind, out.subject);
+    return out;
+}
+
+std::string allowedOrThrow(AudioPath p) {
+    if (!p.refusal.empty()) ev::throwAccessError(p.refusal, "EACCES", p.subject);
+    return std::move(p.resolved);
 }
 
 // A file to be WRITTEN does not exist yet, so the host's resolver — which
@@ -92,13 +121,20 @@ void setPathResolver(std::function<std::string(const std::string&)> resolver) {
     pathResolver() = std::move(resolver);
 }
 
-std::string resolveAudioPath(const std::string& path) {
-    auto& r = pathResolver();
-    return r ? r(path) : path;
+AudioPath askAudioRead(const std::string& path) {
+    return ask(resolveAudioPath(path), ev::AccessKind::Read);
 }
 
-std::string resolveAudioWritePath(const std::string& path) {
-    return resolveWritePath(path);
+AudioPath askAudioWrite(const std::string& path) {
+    return ask(resolveWritePath(path), ev::AccessKind::Write);
+}
+
+std::string audioReadPath(const std::string& path) {
+    return allowedOrThrow(askAudioRead(path));
+}
+
+std::string audioWritePath(const std::string& path) {
+    return allowedOrThrow(askAudioWrite(path));
 }
 
 Value launchClipLoad(const std::string& resolvedPath) {

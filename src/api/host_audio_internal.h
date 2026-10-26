@@ -957,12 +957,21 @@ inline std::string sequenceLaneKey(int key) { return "k" + std::to_string(key); 
 // ---------------------------------------------------------------------------
 // File paths and background work (host_audio_io.cpp)
 // ---------------------------------------------------------------------------
-// A file path as the host's resolver sees it (api.h setPathResolver), or as
-// given when no resolver is set.
-std::string resolveAudioPath(const std::string& path);
-// The same for a file about to be written: the parent directory resolves
-// (it exists), the file name is appended.
-std::string resolveAudioWritePath(const std::string& path);
+// A path the app handed a loader or saver, resolved and asked of the host's
+// access gate (embed/embed_access.h; api.h, "Access").
+struct AudioPath {
+    std::string resolved;  // what the host's resolver made of it (api.h setPathResolver)
+    std::string subject;   // `resolved` absolute and lexically normal: what the gate was asked
+    std::string refusal;   // the gate's sentence; empty when allowed
+};
+// Read: the path resolves as given. Write: the parent directory resolves (it
+// exists), the file name is appended.
+AudioPath askAudioRead(const std::string& path);
+AudioPath askAudioWrite(const std::string& path);
+// The same for a synchronous native: the resolved path, or the refusal thrown
+// (an Error, code EACCES, the path; it never returns then).
+std::string audioReadPath(const std::string& path);
+std::string audioWritePath(const std::string& path);
 // createClipFromFileAsync's worker: decodes `resolvedPath` on a background
 // thread and returns the promise that tickAsyncJobs() (api.h) later settles
 // on the JS thread — resolved with the clip id, or rejected with an Error

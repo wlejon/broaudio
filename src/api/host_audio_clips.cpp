@@ -1,4 +1,5 @@
 #include "host_audio_internal.h"
+#include "embed/embed_access.h"
 
 namespace broaudio::api {
 
@@ -187,7 +188,7 @@ void registerAudioContextClips(ObjectBuilder& b) {
     b.def("createClipFromFile", 1, [](Value, std::span<const Value> a) -> Value {
         auto* e = getAudioEngine();
         if (!e || a.empty()) return ev::fromDouble(-1);
-        std::string path = resolveAudioPath(ev::toUtf8(a[0]));
+        std::string path = audioReadPath(ev::toUtf8(a[0]));
         return ev::fromDouble(e->createClipFromFile(path.c_str()));
     });
 
@@ -200,10 +201,12 @@ void registerAudioContextClips(ObjectBuilder& b) {
         if (a.empty() || ev::isUndefined(a[0])) {
             return ev::throwTypeError("createClipFromFileAsync: file path required");
         }
-        // Resolve on the JS thread — the worker has no notion of the app
-        // directory or the mount table.
-        std::string path = resolveAudioPath(ev::toUtf8(a[0]));
-        return launchClipLoad(path);
+        // Resolve and ask the host's gate on the JS thread — the worker has
+        // no notion of the app directory or the mount table. A refusal
+        // rejects the promise and starts no worker.
+        AudioPath path = askAudioRead(ev::toUtf8(a[0]));
+        if (!path.refusal.empty()) return ev::rejectedAccessPromise(path.refusal, "EACCES", path.subject);
+        return launchClipLoad(path.resolved);
     });
 }
 

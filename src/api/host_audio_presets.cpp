@@ -509,12 +509,12 @@ void registerAudioContextPresets(ObjectBuilder& b) {
     b.def("savePreset", 2, [](Value, std::span<const Value> a) {
         if (a.size() < 2) return ev::fromBool(false);
         std::string json = ev::toUtf8(a[0]);
-        std::string path = resolveAudioWritePath(ev::toUtf8(a[1]));
+        std::string path = audioWritePath(ev::toUtf8(a[1]));
         return ev::fromBool(broaudio::savePresetToFile(json, path.c_str()));
     });
     b.def("loadPreset", 1, [](Value, std::span<const Value> a) -> Value {
         if (a.empty()) return ev::null();
-        std::string path = resolveAudioPath(ev::toUtf8(a[0]));
+        std::string path = audioReadPath(ev::toUtf8(a[0]));
         std::string s = broaudio::loadPresetFromFile(path.c_str());
         if (s.empty()) return ev::null();
         return ev::fromUtf8(s);

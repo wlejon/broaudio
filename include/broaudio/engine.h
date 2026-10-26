@@ -1005,6 +1005,12 @@ private:
     // Single-writer-per-slot — callers must serialise addMicTap / removeMicTap
     // externally. nextMicTapId_ is only touched by those calls.
     MicTapId nextMicTapId_ = 1;
+    // What the host's capture holder holds (capture_gate.h): the microphone
+    // stream, and each tap by id.
+    uint64_t micHeld_ = 0;
+    std::mutex tapHoldsMu_;
+    std::vector<std::pair<MicTapId, uint64_t>> tapHolds_;
+    void revokeMicTap(MicTapId id, const std::string& refusal);
 
     // Dispatch a raw mic chunk to every active tap. Called by processMicSamples
     // on the audio thread, before the legacy callback and ring writes.

@@ -25,6 +25,8 @@
 // no lock on the audio path: the capture thread is the sole producer and stop()
 // signals it with an atomic + joins.
 
+#include "broaudio/capture_gate.h"
+
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -57,6 +59,9 @@ struct LoopbackConfig {
     std::uint32_t pid        = 0;     // target for ProcessInclude/ProcessExclude
     int           targetRate = 0;     // 0 = native; else resample to this
     bool          mono       = true;  // downmix to mono
+    // The host took back the grant to record (capture_gate.h): the capture
+    // has stopped, and this is called with the refusal on the main thread.
+    std::function<void(const std::string& refusal)> onRevoked;
 };
 
 struct LoopbackStats {
@@ -106,6 +111,18 @@ public:
     LoopbackStats stats() const;
 
 private:
+    // A started capture is held under the host's capture holder until it
+    // stops (stop() releases it), so taking the grant back stops it.
+    void holdWhileRunning(const LoopbackConfig& cfg) {
+        auto onRevoked = cfg.onRevoked;
+        held_ = holdCapture("record other applications' audio", [this, onRevoked](const std::string& refusal) {
+            held_ = 0;
+            stop();
+            if (onRevoked) onRevoked(refusal);
+        });
+    }
+    uint64_t held_ = 0;
+
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

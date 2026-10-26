@@ -425,6 +425,7 @@ bool LoopbackCapture::start(const LoopbackConfig& cfg, LoopbackCallback cb) {
             return fail("AudioDeviceStart failed");
         }
     }
+    holdWhileRunning(cfg);
     return true;
   }
 #endif
@@ -432,6 +433,7 @@ bool LoopbackCapture::start(const LoopbackConfig& cfg, LoopbackCallback cb) {
 }
 
 void LoopbackCapture::stop() {
+    releaseCapture(held_);
     impl_->running.store(false, std::memory_order_release);
     impl_->teardown();
     impl_->deliveredRate.store(0, std::memory_order_relaxed);

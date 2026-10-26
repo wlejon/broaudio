@@ -499,10 +499,12 @@ bool LoopbackCapture::start(const LoopbackConfig& cfg, LoopbackCallback cb) {
         return false;
     }
     impl_->running.store(true, std::memory_order_release);
+    holdWhileRunning(cfg);
     return true;
 }
 
 void LoopbackCapture::stop() {
+    releaseCapture(held_);
     impl_->stopFlag.store(true, std::memory_order_release);
     if (impl_->thread.joinable()) impl_->thread.join();
     impl_->running.store(false, std::memory_order_release);

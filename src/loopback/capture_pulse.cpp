@@ -384,10 +384,12 @@ bool LoopbackCapture::start(const LoopbackConfig& cfg, LoopbackCallback cb) {
     impl_->running.store(true, std::memory_order_release);
 
     pa_threaded_mainloop_unlock(impl_->ml);
+    holdWhileRunning(cfg);
     return true;
 }
 
 void LoopbackCapture::stop() {
+    releaseCapture(held_);
     impl_->running.store(false, std::memory_order_release);
     impl_->teardown();
     impl_->deliveredRate.store(0, std::memory_order_relaxed);

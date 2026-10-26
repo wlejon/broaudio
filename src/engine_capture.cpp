@@ -24,6 +24,16 @@ CaptureGate& captureGate() {
     return g;
 }
 
+struct Holder {
+    CaptureHolder hold;
+    CaptureReleaser release;
+};
+
+Holder& captureHolder() {
+    static Holder h;
+    return h;
+}
+
 } // namespace
 
 void setCaptureGate(CaptureGate gate) { captureGate() = std::move(gate); }
@@ -31,6 +41,22 @@ void setCaptureGate(CaptureGate gate) { captureGate() = std::move(gate); }
 std::string checkCaptureGate(const std::string& what) {
     const CaptureGate& g = captureGate();
     return g ? g(what) : std::string();
+}
+
+void setCaptureHolder(CaptureHolder hold, CaptureReleaser release) {
+    captureHolder() = Holder{std::move(hold), std::move(release)};
+}
+
+uint64_t holdCapture(const std::string& what, CaptureRevoke revoke) {
+    const Holder& h = captureHolder();
+    return h.hold ? h.hold(what, std::move(revoke)) : 0;
+}
+
+void releaseCapture(uint64_t& token) {
+    if (token == 0) return;
+    const Holder& h = captureHolder();
+    if (h.release) h.release(token);
+    token = 0;
 }
 
 bool Engine::startMicCapture()
@@ -69,11 +95,18 @@ bool Engine::startMicCapture()
         return false;
     }
     micCapturing_ = true;
+    micHeld_ = holdCapture("record from the microphone", [this](const std::string& refusal) {
+        micHeld_ = 0;
+        log(LogLevel::Warn, "broaudio: microphone stopped: %s", refusal.c_str());
+        reopenMic_ = false;
+        stopMicCapture();
+    });
     return true;
 }
 
 void Engine::stopMicCapture()
 {
+    releaseCapture(micHeld_);
     if (!micCapturing_) return;
     if (micStream_) {
         micStream_->stop();
@@ -168,12 +201,45 @@ MicTapId Engine::addMicTap(const MicTapConfig& cfg, MicTapCallback cb)
     auto next = std::make_shared<MicTapList>(*current);
     next->push_back(tap);
     micTaps_.store(std::shared_ptr<const MicTapList>(std::move(next)));
-    return tap->id;
+    const MicTapId id = tap->id;
+    if (uint64_t held = holdCapture("record from the microphone", [this, id](const std::string& refusal) {
+            revokeMicTap(id, refusal);
+        })) {
+        std::lock_guard<std::mutex> lock(tapHoldsMu_);
+        tapHolds_.emplace_back(id, held);
+    }
+    return id;
+}
+
+void Engine::revokeMicTap(MicTapId id, const std::string& refusal)
+{
+    {
+        std::lock_guard<std::mutex> lock(tapHoldsMu_);
+        tapHolds_.erase(std::remove_if(tapHolds_.begin(), tapHolds_.end(),
+                                       [id](const auto& h) { return h.first == id; }),
+                        tapHolds_.end());
+    }
+    std::function<void(const std::string&)> onRevoked;
+    for (auto& t : *micTaps_.load())
+        if (t->id == id) onRevoked = t->cfg.onRevoked;
+    log(LogLevel::Warn, "broaudio: microphone tap removed: %s", refusal.c_str());
+    if (onRevoked) onRevoked(refusal);
+    removeMicTap(id);
 }
 
 void Engine::removeMicTap(MicTapId id)
 {
     if (id == kInvalidMicTapId) return;
+    {
+        std::lock_guard<std::mutex> lock(tapHoldsMu_);
+        for (auto it = tapHolds_.begin(); it != tapHolds_.end(); ++it) {
+            if (it->first != id) continue;
+            uint64_t token = it->second;
+            tapHolds_.erase(it);
+            releaseCapture(token);
+            break;
+        }
+    }
     auto current = micTaps_.load();
     auto next = std::make_shared<MicTapList>();
     next->reserve(current->size());

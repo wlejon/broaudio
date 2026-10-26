@@ -21,6 +21,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <string>
 
 namespace broaudio {
 
@@ -79,6 +80,10 @@ struct MicTapConfig {
     int       chunkFrames = 0;
     bool      agc         = false;
     AgcConfig agcCfg      = {};
+    // The host took back the microphone (capture_gate.h): called with the
+    // refusal, on the thread that added the tap, just before the tap is
+    // removed. The consumer tells its own users why the samples stopped.
+    std::function<void(const std::string& refusal)> onRevoked;
 };
 
 using MicTapCallback = std::function<void(const float* samples, int numSamples)>;

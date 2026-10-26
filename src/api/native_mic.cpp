@@ -2,6 +2,8 @@
 #include "host_audio_internal.h"
 #include "object_builder.h"
 
+#include "embed/embed_access.h"
+
 #include <broaudio/capture_gate.h>
 #include <broaudio/engine.h>
 #include <broaudio/mic_tap.h>
@@ -153,11 +155,26 @@ struct MicState {
     bool active = false;
 
     bronze::embed::Persistent onChunk;
+    bronze::embed::Persistent onError;   // opts.onError: why the capture stopped
 };
 
 static MicState g_mic;
 
 } // namespace
+
+void shutdownActiveMic();
+
+// The host took back the microphone while bro.mic ran (capture_gate.h): the
+// capture stops, and opts.onError hears why (an Error named
+// PermissionRevoked).
+static void revokeActiveMic(const std::string& refusal) {
+    ev::Persistent onError{g_mic.onError.get()};
+    shutdownActiveMic();
+    if (!ev::isFunction(onError.get())) return;
+    ev::Persistent err{ev::newAccessError(refusal, "EACCES")};
+    Value arg = err.get();
+    ev::call(onError.get(), ev::undefined(), std::span<const Value>(&arg, 1));
+}
 
 void shutdownActiveMic() {
     if (g_mic.active) {
@@ -168,6 +185,7 @@ void shutdownActiveMic() {
     }
     g_mic.tapId = broaudio::kInvalidMicTapId;
     g_mic.onChunk.set(ev::undefined());
+    g_mic.onError.set(ev::undefined());
     // The callback's own reference keeps the ring alive for a callback that
     // is still in flight; this only drops the main thread's.
     g_mic.session.reset();
@@ -240,6 +258,7 @@ void installMic() {
         bool samples = false;
         // Held rooted: the option reads after it allocate.
         ev::Persistent onChunkCb;
+        ev::Persistent onErrorCb;
 
         broaudio::MicTapConfig cfg;
 
@@ -265,6 +284,9 @@ void installMic() {
 
             Value cb = ev::getProperty(opt, "onChunk");
             if (ev::isFunction(cb)) onChunkCb.set(cb);
+
+            Value eb = ev::getProperty(opt, "onError");
+            if (ev::isFunction(eb)) onErrorCb.set(eb);
 
             Value tp = ev::getProperty(opt, "targetPeak");
             if (!ev::isUndefined(tp) && !ev::isObject(tp)) cfg.agcCfg.targetPeak = static_cast<float>(ev::toDouble(tp));
@@ -304,10 +326,15 @@ void installMic() {
         if (ev::isFunction(onChunkCb.get())) {
             g_mic.onChunk.set(onChunkCb.get());
         }
+        if (ev::isFunction(onErrorCb.get())) {
+            g_mic.onError.set(onErrorCb.get());
+        }
+        cfg.onRevoked = [](const std::string& refusal) { revokeActiveMic(refusal); };
         // Asked here as well as at the tap, so a refusal says why rather than
         // that the tap failed.
         if (std::string refused = broaudio::checkCaptureGate("bro.mic.start"); !refused.empty()) {
             g_mic.onChunk.set(ev::undefined());
+            g_mic.onError.set(ev::undefined());
             return ev::throwError("bro.mic.start: " + refused);
         }
         auto sess = std::make_shared<MicSession>(chunkFrames, samples);
@@ -321,6 +348,7 @@ void installMic() {
             // Not active yet, so shutdownActiveMic would skip this.
             g_mic.session.reset();
             g_mic.onChunk.set(ev::undefined());
+            g_mic.onError.set(ev::undefined());
             return ev::throwError("bro.mic.start: addMicTap failed");
         }
 

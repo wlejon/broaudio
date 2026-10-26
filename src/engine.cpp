@@ -3,6 +3,7 @@
 // synthesis (generateSamples) and finished-voice reaping.
 
 #include "broaudio/engine.h"
+#include "broaudio/capture_gate.h"
 #include "broaudio/clip/file_stream.h"
 #include "broaudio/log.h"
 #include "broaudio/synth/oscillator.h"
@@ -342,6 +343,11 @@ void Engine::shutdown()
     // they hold clip/playback refs and a resampler each.
     stopAllFileStreams();
     stopMicCapture();
+    {
+        std::lock_guard<std::mutex> lock(tapHoldsMu_);
+        for (auto& hold : tapHolds_) releaseCapture(hold.second);
+        tapHolds_.clear();
+    }
     jitCompiler_.shutdown();
     // Stop before destroying: once stop() returns no callback is running.
     if (outStream_) outStream_->stop();

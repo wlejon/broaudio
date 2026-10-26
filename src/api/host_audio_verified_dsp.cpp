@@ -80,15 +80,19 @@ bool extractKernelSourceAndOptions(
     outThrowOnError = false;
     if (outPrecompiled) *outPrecompiled = nullptr;
 
-    if (const CustomDspKernel* pre = lookupCompiledKernel(fnOrSource)) {
+    // Both are read after allocating calls (the kernel-id lookup, the name and
+    // toString reads, each option), which can move them: rooted from the start.
+    ev::Persistent fnObj(fnOrSource);
+    ev::Persistent opts(optsVal);
+
+    if (const CustomDspKernel* pre = lookupCompiledKernel(fnObj.get())) {
         if (outPrecompiled) *outPrecompiled = pre;
         outSource = pre->source;
         outOpts.maxAmp = pre->maxAmp;
         outOpts.name = pre->kernelName;
-    } else if (fnOrSource.isString()) {
-        outSource = ev::toUtf8(fnOrSource);
-    } else if (ev::isFunction(fnOrSource)) {
-        ev::Persistent fnObj(fnOrSource);
+    } else if (fnObj.get().isString()) {
+        outSource = ev::toUtf8(fnObj.get());
+    } else if (ev::isFunction(fnObj.get())) {
         Value nameVal = ev::getProperty(fnObj.get(), "name");
         if (nameVal.isString()) {
             std::string nm = ev::toUtf8(nameVal);
@@ -103,8 +107,7 @@ bool extractKernelSourceAndOptions(
         }
     }
 
-    if (ev::isObject(optsVal) && !ev::isFunction(optsVal)) {
-        ev::Persistent opts(optsVal);
+    if (ev::isObject(opts.get()) && !ev::isFunction(opts.get())) {
         Value maxAmpV = ev::getProperty(opts.get(), "maxAmp");
         if (maxAmpV.isNumber()) {
             float ma = static_cast<float>(maxAmpV.asNumber());
@@ -262,12 +265,15 @@ Value createVerifiedDspNodeValue(Value ctxVal, std::span<const Value> args) {
     VerifiedDspCompileOptions opts;
     bool throwOnError = true;
     const CustomDspKernel* precompiled = nullptr;
-    Value optsVal = (args.size() >= 2) ? args[1] : ev::undefined();
+    // The context and the options are read again after the compile and the
+    // node's allocation, either of which can move them.
+    ev::Persistent ctx(ctxVal);
+    ev::Persistent optsRoot((args.size() >= 2) ? args[1] : ev::undefined());
 
-    bool extracted = extractKernelSourceAndOptions(args[0], optsVal, source, opts, throwOnError, &precompiled);
+    bool extracted = extractKernelSourceAndOptions(args[0], optsRoot.get(), source, opts, throwOnError, &precompiled);
     // For createVerifiedDspNode, default throwOnError is true unless explicitly set to false in opts
-    if (ev::isObject(optsVal) && !ev::isFunction(optsVal)) {
-        Value tv = ev::getProperty(optsVal, "throwOnError");
+    if (ev::isObject(optsRoot.get()) && !ev::isFunction(optsRoot.get())) {
+        Value tv = ev::getProperty(optsRoot.get(), "throwOnError");
         if (!ev::isBool(tv)) throwOnError = true;
     } else {
         throwOnError = true;
@@ -292,10 +298,10 @@ Value createVerifiedDspNodeValue(Value ctxVal, std::span<const Value> args) {
     }
 
     // Apply initial params if provided in opts.params = [p0, p1, ...]
-    if (ev::isObject(optsVal) && !ev::isFunction(optsVal)) {
-        Value p0v = ev::getProperty(optsVal, "p0");
+    if (ev::isObject(optsRoot.get()) && !ev::isFunction(optsRoot.get())) {
+        Value p0v = ev::getProperty(optsRoot.get(), "p0");
         if (p0v.isNumber()) proc->setParam(0, static_cast<float>(p0v.asNumber()));
-        Value p1v = ev::getProperty(optsVal, "p1");
+        Value p1v = ev::getProperty(optsRoot.get(), "p1");
         if (p1v.isNumber()) proc->setParam(1, static_cast<float>(p1v.asNumber()));
     }
 
@@ -325,8 +331,8 @@ Value createVerifiedDspNodeValue(Value ctxVal, std::span<const Value> args) {
     b.set("channelCount", ev::fromDouble(2.0));
     b.set("channelCountMode", ev::fromUtf8("max"));
     b.set("channelInterpretation", ev::fromUtf8("speakers"));
-    if (ev::isObject(ctxVal)) {
-        b.set("context", ctxVal);
+    if (ev::isObject(ctx.get())) {
+        b.set("context", ctx.get());
     } else if (ev::GlobalValue g = ev::globalValue("__defaultAudioCtx"); g.found && ev::isObject(g.value)) {
         b.set("context", g.value);
     }

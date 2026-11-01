@@ -231,8 +231,8 @@ namespace {
 // Persistent inside the finalized HostVoiceAllocator. Any path that can
 // allocate voices — noteOn, a Sequence's update(), MidiInput.processEvents()
 // — installs it on the C++ allocator for the duration of the call through
-// this scope, so the callback fires for every voice the allocator hands out,
-// the way the QuickJS binding's permanently-installed callback did. The
+// this scope, so the callback fires for every voice the allocator hands out.
+// The
 // callback is held in a Persistent: it runs JS, which allocates, and it may
 // be called once per voice.
 class ScopedVoiceSetup {
@@ -279,8 +279,8 @@ void callLaneCallback(int key, float val) {
     ev::call(cb.get(), ev::undefined(), std::span<const Value>(&arg, 1));
 }
 
-// MidiRawEvent.type: the lowercase label the QuickJS binding (and
-// audio-api.js) use, not the enum's number.
+// MidiRawEvent.type: the lowercase label audio-api.js documents, not the
+// enum's number.
 const char* midiEventTypeName(broaudio::MidiEvent::Type t) {
     switch (t) {
         case broaudio::MidiEvent::Type::NoteOn:          return "noteon";

@@ -1,8 +1,11 @@
-// Behavioural checks for broaudio_api against the pre-bronze (QuickJS)
-// binding: every behaviour the bronze port drifted from, plus the
-// node-level restorations the static shape diff found (analyser `source`,
-// oscillator gain-through-connect, biquad connect/disconnect, the filter
-// slot error, the sequence note `beat` key).
+// Behavioural checks for broaudio_api's AudioContext argument and result
+// contracts: playClip(clip, gain, loop, when), createClip resampling, clip
+// waveforms as Float32Array, the path resolver on every file entry point,
+// the async clip loader's Promise, stream ring defaults, renderBlock's
+// mixdown, wavetables, preset JSON as objects, the master and bus effect
+// setters, TypeErrors on bad arguments, and the node-level behaviour
+// (analyser `source`, oscillator gain-through-connect, biquad
+// connect/disconnect, the filter slot error, the sequence note `beat` key).
 //
 // Runs on its own headless broaudio::Engine so renderBlock() drives the
 // pipeline deterministically, and a path resolver that maps "vfs/..." into
@@ -160,7 +163,7 @@ static void test_async() {
     TEST_CHECK(ev::isString(missing));
     std::string missingMsg = ev::toUtf8(missing);
     TEST_CHECK(missingMsg != "resolved");
-    // The rejection names the resolved path, as the old binding did.
+    // The rejection names the resolved path.
     TEST_CHECK(missingMsg.find("nope.wav") != std::string::npos);
 }
 

@@ -420,7 +420,7 @@ Value enginePresetToJs(const broaudio::EnginePreset& p) {
 }
 
 // The JSON-string argument of a *PresetFromJson call: a string is taken as
-// is; anything else is ToString'd the way the old binding's JS_ToCString did.
+// is; any other primitive is ToString'd.
 std::string jsonArg(Value v) {
     if (ev::isObject(v)) return "";
     return ev::toUtf8(v);

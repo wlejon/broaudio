@@ -880,7 +880,7 @@ void installAudioGlobals() {
     // MediaStream (for createMediaStreamSource), or rejects with
     // Error("Failed to access microphone"). Installed as the global
     // `__nativeGetUserMedia` and, when the realm already has a `navigator`,
-    // as navigator.mediaDevices.getUserMedia — the QuickJS binding's shape.
+    // as navigator.mediaDevices.getUserMedia.
     ev::setGlobalFunction("__nativeGetUserMedia", 1, [](Value, std::span<const Value>) -> Value {
         ev::Persistent p(ev::createPromise());
         if (std::string refused = broaudio::checkCaptureGate("getUserMedia"); !refused.empty()) {

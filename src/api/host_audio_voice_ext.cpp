@@ -1,12 +1,140 @@
-// AudioContext voice methods beyond the core set in host_audio_synth.cpp:
-// the short ADSR spellings the public surface documents (setVoiceAttack /
-// Decay / Sustain / Release, beside the *Time / *Level names), unison,
-// per-voice spatialization, bus routing and sample-accurate note scheduling.
-// Every method is a thin call into broaudio::Engine.
+// AudioContext voice methods: core voice creation, playback, oscillator,
+// envelope, and per-voice filter controls (`registerAudioContextVoice`), plus
+// the extended voice surface (`registerAudioContextVoiceExt`): short ADSR
+// spellings (setVoiceAttack / Decay / Sustain / Release, beside the *Time /
+// *Level names), unison, per-voice spatialization, bus routing and
+// sample-accurate note scheduling. Every method is a thin call into
+// broaudio::Engine.
 
 #include "host_audio_internal.h"
 
 namespace broaudio::api {
+
+void registerAudioContextVoice(ObjectBuilder& b) {
+    b.def("createVoice", 0, [](Value, std::span<const Value>) {
+        auto* e = getAudioEngine();
+        return ev::fromDouble(e ? e->createVoice() : -1);
+    });
+
+    b.def("removeVoice", 1, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && !a.empty()) e->removeVoice(i32At(a, 0));
+        return ev::undefined();
+    });
+
+    b.def("startVoice", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && !a.empty()) {
+            double when = a.size() >= 2 ? numAt(a, 1) : 0.0;
+            e->startVoice(i32At(a, 0), when);
+        }
+        return ev::undefined();
+    });
+
+    b.def("stopVoice", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && !a.empty()) {
+            double when = a.size() >= 2 ? numAt(a, 1) : 0.0;
+            e->stopVoice(i32At(a, 0), when);
+        }
+        return ev::undefined();
+    });
+
+    b.def("setVoicePersistent", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 2) e->setVoicePersistent(i32At(a, 0), boolAt(a, 1));
+        return ev::undefined();
+    });
+
+    b.def("setVoiceNote", 3, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 2) {
+            float vel = a.size() >= 3 ? static_cast<float>(numAt(a, 2)) : 1.0f;
+            e->setVoiceNote(i32At(a, 0), i32At(a, 1), vel);
+        }
+        return ev::undefined();
+    });
+
+    b.def("setVoiceWaveform", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 2) {
+            e->setWaveform(i32At(a, 0), parseWaveform(ev::toUtf8(a[1])));
+        }
+        return ev::undefined();
+    });
+
+    b.def("setVoiceFrequency", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 2) e->setFrequency(i32At(a, 0), static_cast<float>(numAt(a, 1)));
+        return ev::undefined();
+    });
+
+    b.def("setVoiceGain", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 2) e->setGain(i32At(a, 0), static_cast<float>(numAt(a, 1)));
+        return ev::undefined();
+    });
+
+    b.def("setVoicePan", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 2) e->setVoicePan(i32At(a, 0), static_cast<float>(numAt(a, 1)));
+        return ev::undefined();
+    });
+
+    b.def("setVoicePitchBend", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 2) e->setVoicePitchBend(i32At(a, 0), static_cast<float>(numAt(a, 1)));
+        return ev::undefined();
+    });
+
+    b.def("setVoiceAttackTime", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 2) e->setAttackTime(i32At(a, 0), static_cast<float>(numAt(a, 1)));
+        return ev::undefined();
+    });
+
+    b.def("setVoiceDecayTime", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 2) e->setDecayTime(i32At(a, 0), static_cast<float>(numAt(a, 1)));
+        return ev::undefined();
+    });
+
+    b.def("setVoiceSustainLevel", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 2) e->setSustainLevel(i32At(a, 0), static_cast<float>(numAt(a, 1)));
+        return ev::undefined();
+    });
+
+    b.def("setVoiceReleaseTime", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 2) e->setReleaseTime(i32At(a, 0), static_cast<float>(numAt(a, 1)));
+        return ev::undefined();
+    });
+
+    b.def("setVoiceFilterEnabled", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 2) e->setVoiceFilterEnabled(i32At(a, 0), boolAt(a, 1));
+        return ev::undefined();
+    });
+
+    b.def("setVoiceFilterType", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 2) e->setVoiceFilterType(i32At(a, 0), parseFilterType(ev::toUtf8(a[1])));
+        return ev::undefined();
+    });
+
+    b.def("setVoiceFilterFrequency", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 2) e->setVoiceFilterFrequency(i32At(a, 0), static_cast<float>(numAt(a, 1)));
+        return ev::undefined();
+    });
+
+    b.def("setVoiceFilterQ", 2, [](Value, std::span<const Value> a) {
+        auto* e = getAudioEngine();
+        if (e && a.size() >= 2) e->setVoiceFilterQ(i32At(a, 0), static_cast<float>(numAt(a, 1)));
+        return ev::undefined();
+    });
+}
 
 void registerAudioContextVoiceExt(ObjectBuilder& b) {
     // ---- ADSR, short names -------------------------------------------------

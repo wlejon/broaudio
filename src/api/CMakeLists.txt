@@ -4,6 +4,7 @@ set(BROAUDIO_API_SOURCES
     api.cpp
     host_audio_context.cpp
     host_audio_nodes.cpp
+    host_audio_analyser.cpp
     host_audio_param.cpp
     host_audio_live.cpp
     host_audio_spatial.cpp

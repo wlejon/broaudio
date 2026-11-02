@@ -1,6 +1,8 @@
 #pragma once
 
 #include "api.h"
+#include "host_class.h"
+#include "object_builder.h"
 
 #include <algorithm>
 #include <cmath>

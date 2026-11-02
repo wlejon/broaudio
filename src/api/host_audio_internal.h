@@ -1,9 +1,9 @@
 #pragma once
 
 #include "api.h"
-#include "host_audio_args.h"
 #include "host_class.h"
 #include "object_builder.h"
+#include "host_audio_args.h"
 
 #include <broaudio/dsp/biquad.h>
 #include <broaudio/dsp/delay.h>

@@ -19,8 +19,11 @@
 // readers in flight at retire-time have exited).
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <type_traits>
+#include <utility>
 
 namespace broaudio {
 
@@ -67,7 +70,20 @@ public:
 
     using Deleter = void (*)(void*) noexcept;
     void retire(void* node, Deleter deleter) noexcept;
+
+    template <class Fn>
+    void retire(Fn&& fn) noexcept {
+        using Decayed = std::decay_t<Fn>;
+        auto* heapFn = new Decayed(std::forward<Fn>(fn));
+        retire(heapFn, [](void* p) noexcept {
+            auto* f = static_cast<Decayed*>(p);
+            (*f)();
+            delete f;
+        });
+    }
+
     void reclaim() noexcept;
+    std::size_t pendingCount() const noexcept;
 
     class ReadScope {
     public:
@@ -88,7 +104,7 @@ private:
     };
 
     std::atomic<uint64_t> state_{0};
-    std::mutex            retireMutex_;
+    mutable std::mutex    retireMutex_;
     Retired*              retired_ = nullptr;
 };
 

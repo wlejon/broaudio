@@ -233,6 +233,52 @@ TEST(verified_dsp_engine_master_bus_integration)
     PASS();
 }
 
+TEST(verified_dsp_rcu_reclaims_hot_swapped_jit_kernels)
+{
+    VerifiedDspProcessor proc;
+    std::vector<std::weak_ptr<void>> weakKeepAlives;
+    weakKeepAlives.reserve(105);
+
+    VerifiedDspCompileOptions opts;
+    opts.enableSuperopt = false; // Fast compile for 100+ hot-swap stress test
+
+    float inBuf[32];
+    float outBuf[32];
+    for (int i = 0; i < 32; ++i) inBuf[i] = 0.25f;
+
+    for (int i = 0; i < 104; ++i) {
+        std::string src = "(sample, time, p0) => sample * " +
+                          std::to_string(0.1f + 0.005f * static_cast<float>(i)) + " + p0";
+        if (i % 2 == 0) {
+            CustomDspKernel k = compileVerifiedDspKernel(src, opts);
+            ASSERT_TRUE(k.valid && k.verified && k.jitKeepAlive != nullptr);
+            weakKeepAlives.push_back(k.jitKeepAlive);
+            ASSERT_TRUE(proc.installKernel(std::move(k), i > 0));
+        } else {
+            ASSERT_TRUE(proc.hotSwap(src, opts));
+        }
+        proc.setParam(0, 0.05f);
+        float y = proc.evalSample(0.5f, 0.0f);
+        ASSERT_TRUE(std::isfinite(y));
+        proc.processBlock(inBuf, outBuf, 32, 0.0, 48000.0);
+        ASSERT_TRUE(std::isfinite(outBuf[0]));
+    }
+
+    ASSERT_EQ(proc.hotSwapCount(), 104u);
+    ASSERT_EQ(proc.reclaimRetiredKernels(), 0u);
+
+    // At most the 2 ping-pong slots may still retain a kernel; all earlier
+    // hot-swapped JIT kernels must have been reclaimed by RcuDomain.
+    size_t aliveCount = 0;
+    for (const auto& wp : weakKeepAlives) {
+        if (!wp.expired()) ++aliveCount;
+    }
+    ASSERT_TRUE(aliveCount <= 2);
+    ASSERT_TRUE(weakKeepAlives.size() >= 50);
+    ASSERT_TRUE(weakKeepAlives.front().expired());
+    PASS();
+}
+
 #endif // BROAUDIO_HAS_JIT
 
 int main() {

@@ -8,6 +8,8 @@
 // via the Brass bitvector SMT solver, and hot-swaps the native function pointer
 // onto the real-time audio thread with zero locks and zero allocations.
 
+#include "broaudio/rcu.h"
+
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -15,7 +17,6 @@
 #include <mutex>
 #include <string>
 #include <string_view>
-#include <vector>
 
 namespace broaudio {
 
@@ -59,7 +60,7 @@ public:
     static constexpr size_t MAX_PARAMS = 4;
 
     VerifiedDspProcessor();
-    ~VerifiedDspProcessor() = default;
+    ~VerifiedDspProcessor();
 
     VerifiedDspProcessor(const VerifiedDspProcessor&) = delete;
     VerifiedDspProcessor& operator=(const VerifiedDspProcessor&) = delete;
@@ -80,7 +81,11 @@ public:
         std::string* outError = nullptr);
 
     // Install a pre-compiled CustomDspKernel.
-    bool installKernel(const CustomDspKernel& kernel, bool isHotSwap = false);
+    bool installKernel(CustomDspKernel kernel, bool isHotSwap = false);
+
+    // Reclaim any retired kernels whose RCU grace period has elapsed; returns
+    // the number of retired kernels still awaiting reader completion.
+    std::size_t reclaimRetiredKernels() noexcept;
 
     // Directly swap a raw native C function pointer (lock-free).
     void setRawFunction(DspKernelFnPtr fn, bool recordSwap = true) noexcept;
@@ -105,7 +110,9 @@ public:
 
     // Evaluate a single sample using the currently active kernel and atomic params.
     float evalSample(float sample, float time = 0.0f) const noexcept {
-        DspKernelFnPtr fn = activeFn_.load(std::memory_order_acquire);
+        RcuDomain::ReadScope guard(rcu_);
+        const CustomDspKernel& k = kernels_[activeIdx_.load(std::memory_order_acquire)];
+        DspKernelFnPtr fn = k.fn ? k.fn : activeFn_.load(std::memory_order_acquire);
         if (!fn) return sample;
         float p0 = params_[0].load(std::memory_order_relaxed);
         float p1 = params_[1].load(std::memory_order_relaxed);
@@ -113,7 +120,9 @@ public:
     }
 
     float evalSampleWithParams(float sample, float time, float p0, float p1) const noexcept {
-        DspKernelFnPtr fn = activeFn_.load(std::memory_order_acquire);
+        RcuDomain::ReadScope guard(rcu_);
+        const CustomDspKernel& k = kernels_[activeIdx_.load(std::memory_order_acquire)];
+        DspKernelFnPtr fn = k.fn ? k.fn : activeFn_.load(std::memory_order_acquire);
         if (!fn) return sample;
         return fn(sample, time, p0, p1);
     }
@@ -172,7 +181,9 @@ private:
     std::atomic<float> maxAmp_{1.0f};
 
     mutable std::mutex controlMutex_;
-    std::vector<CustomDspKernel> retainedKernels_;
+    mutable RcuDomain rcu_;
+    CustomDspKernel kernels_[2];
+    std::atomic<uint32_t> activeIdx_{0};
     std::string lastError_;
     std::string kernelName_;
     std::string currentSource_;

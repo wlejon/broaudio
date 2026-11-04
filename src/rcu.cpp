@@ -63,4 +63,14 @@ void RcuDomain::reclaim() noexcept
     }
 }
 
+std::size_t RcuDomain::pendingCount() const noexcept
+{
+    std::lock_guard<std::mutex> lock(retireMutex_);
+    std::size_t count = 0;
+    for (const Retired* cur = retired_; cur != nullptr; cur = cur->next) {
+        ++count;
+    }
+    return count;
+}
+
 } // namespace broaudio

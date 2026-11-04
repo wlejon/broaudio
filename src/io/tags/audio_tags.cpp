@@ -258,7 +258,7 @@ void fillEmpty(AudioTags& t, const AudioTags& from)
 
 namespace {
 
-enum class Kind { Unknown, Mp3, Flac, Ogg, Wav, Mp4 };
+enum class Kind { Unknown, Mp3, Flac, Ogg, Wav, Mp4, Matroska };
 
 Kind sniff(ByteSource& src)
 {
@@ -270,6 +270,7 @@ Kind sniff(ByteSource& src)
     if (isAscii(b.data(), n, 0, "OggS")) return Kind::Ogg;
     if (isAscii(b.data(), n, 0, "RIFF") && isAscii(b.data(), n, 8, "WAVE")) return Kind::Wav;
     if (isAscii(b.data(), n, 4, "ftyp")) return Kind::Mp4;
+    if (b[0] == 0x1a && b[1] == 0x45 && b[2] == 0xdf && b[3] == 0xa3) return Kind::Matroska;
     if (isAscii(b.data(), n, 0, "ID3")) {
         // A FLAC can hide behind an ID3v2 tag too.
         const uint64_t size = tags::id3v2Size(b.data(), n);
@@ -290,11 +291,12 @@ bool readFrom(ByteSource& src, AudioTags& out, std::string* error)
         case Kind::Ogg:  ok = tags::readOgg(src, out); break;
         case Kind::Wav:  ok = tags::readWav(src, out); break;
         case Kind::Mp4:  ok = tags::readMp4(src, out); break;
+        case Kind::Matroska: ok = tags::readMatroska(src, out); break;
         default: break;
     }
     if (!ok) {
         out = AudioTags{};
-        if (error) *error = "not a recognised audio file (MP3, FLAC, Ogg, WAV, MP4/M4A)";
+        if (error) *error = "not a recognised audio file (MP3, FLAC, Ogg, WAV, MP4/M4A, Matroska/WebM)";
     }
     return ok;
 }

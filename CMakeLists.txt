@@ -133,6 +133,7 @@ add_library(broaudio STATIC
     src/io/serialization.cpp
     src/io/tags/audio_tags.cpp
     src/io/tags/id3.cpp
+    src/io/tags/matroska.cpp
     src/io/tags/mp3.cpp
     src/io/tags/mp4.cpp
     src/io/tags/ogg.cpp

@@ -38,6 +38,7 @@ set(BROAUDIO_TESTS
     test_vorbis
     test_file_stream
     test_audio_tags
+    test_audio_tags_matroska
     test_m4a
     test_serialization
     test_atomic_shared_ptr

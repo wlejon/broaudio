@@ -23,6 +23,14 @@ namespace broaudio {
 //   WAV        LIST/INFO, an "id3 " chunk                data size over byte rate
 //   MP4/M4A    moov/udta/meta/ilst (©nam ©ART ©alb aART  edit list, else mdhd, else
 //              trkn disk ©day ©gen gnre covr)            mvhd
+//   Matroska / Tags/SimpleTag (flat as ffmpeg writes     Segment Info Duration x
+//   WebM       them, or levelled 30/50), an image        TimecodeScale (0 for a live
+//              attachment ("cover.*" first)              recording, which has none)
+//
+// Matroska's codec, rate and channels are its first audio track's (a video
+// with no audio track has an empty codec); the top level is read up to the
+// first Cluster and the SeekHead followed past it, so the Clusters are never
+// read.
 //
 // Strings are UTF-8, empty when absent; numbers are 0 when absent. Several
 // artists (repeated Vorbis ARTIST, ID3v2.4 zero-separated values) are joined
@@ -44,7 +52,7 @@ struct AudioTags {
     int channels = 0;
     int bitrate = 0;        // average bits per second of the audio; 0 when unknown
     std::string codec;      // "mp3", "flac", "vorbis", "opus", "pcm", "float", "aac", "alac", ...
-    std::string container;  // "mp3", "flac", "ogg", "wav", "mp4"
+    std::string container;  // "mp3", "flac", "ogg", "wav", "mp4", "webm", "matroska" (the DocType)
 
     // The front cover (picture type 3), else the first picture.
     struct Picture {

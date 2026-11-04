@@ -86,6 +86,7 @@ bool readFlac(ByteSource& src, AudioTags& t);  // vorbis.cpp
 bool readOgg(ByteSource& src, AudioTags& t);   // ogg.cpp
 bool readWav(ByteSource& src, AudioTags& t);   // wav.cpp
 bool readMp4(ByteSource& src, AudioTags& t);   // mp4.cpp
+bool readMatroska(ByteSource& src, AudioTags& t);  // matroska.cpp (WebM too)
 
 // What the MP4 demuxer needs beyond minimp4's sample tables: the first sound
 // track's timing (edit list, media timescale) and its codec. mp4.cpp.

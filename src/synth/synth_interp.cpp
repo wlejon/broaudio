@@ -1,6 +1,11 @@
 // The interpreted synthesis layer: synth_dsp.h over plain floats. This is the
 // reference the compiled kernels (synth_jit.cpp) reproduce bit for bit.
 
+#if defined(__clang__)
+#pragma clang fp contract(off)
+#endif
+#pragma STDC FP_CONTRACT OFF
+
 #include "synth_dsp.h"
 
 #include <cmath>

@@ -243,6 +243,9 @@ target_include_directories(broaudio PRIVATE
 
 if(MSVC)
     target_compile_options(broaudio PRIVATE /MP /permissive- /utf-8)
+else()
+    set_source_files_properties(src/synth/synth_interp.cpp PROPERTIES
+        COMPILE_OPTIONS "-ffp-contract=off")
 endif()
 
 # SDL3 is private: broaudio's public headers name no SDL type (device I/O is

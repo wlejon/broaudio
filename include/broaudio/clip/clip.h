@@ -57,6 +57,11 @@ struct AudioClip {
     // counted as underrun. Both stay 0 for live PCM streams.
     std::atomic<uint64_t> streamSeekRequested{0};
     std::atomic<uint64_t> streamSeekApplied{0};
+    // The latest seek's target in seconds, stored before streamSeekRequested
+    // is bumped: while a seek is outstanding a position query reports it, so
+    // a caller reads back the time it just seeked to (as media currentTime
+    // does) rather than the pre-seek position the ring still holds.
+    std::atomic<double> streamSeekTargetSeconds{0.0};
 
     // Disk streams: the file's length in seconds, or 0 when the container
     // cannot say. Stored once by createStreamFromFile right after the clip is

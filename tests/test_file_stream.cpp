@@ -462,6 +462,46 @@ TEST(file_stream_seek_lands_in_file_time) {
     PASS();
 }
 
+// A seek reads back at once: the position query right after seekPlayback
+// reports the target, not the pre-seek position the ring still holds while
+// the worker has not applied it yet (helm's music app read 1.4 s after
+// "stop" rewound to 0), and once applied it plays on from there.
+TEST(file_stream_seek_reads_back_its_target) {
+    const int sr = 44100;
+    auto tone = sineMono(sr * 2, 440.0f, sr);   // 2 s
+    ASSERT_TRUE(saveWav(WAV_PATH, tone.data(), sr * 2, 1, sr));
+
+    Engine e;
+    ASSERT_TRUE(e.initHeadless());
+    std::string err;
+    int id = e.createStreamFromFile(WAV_PATH, &err);
+    ASSERT_TRUE(id >= 0);
+    ASSERT_TRUE(renderFed(e, id, sr));          // 1 s in
+    ASSERT_TRUE(e.getPlaybackPositionSeconds(id) > 0.5);
+
+    e.seekPlayback(id, 0.0);
+    ASSERT_TRUE(e.getPlaybackPositionSeconds(id) < 0.01);
+    e.seekPlayback(id, 1.25);
+    double p = e.getPlaybackPositionSeconds(id);
+    ASSERT_TRUE(p > 1.24 && p < 1.26);
+    // Past the end reads as the file's length, as the worker clamps it.
+    e.seekPlayback(id, 99.0);
+    ASSERT_TRUE(e.getPlaybackPositionSeconds(id) <= 2.0 + 1e-6);
+
+    // Applied: the position runs on from the last target's file time.
+    e.seekPlayback(id, 0.5);
+    ASSERT_TRUE(waitFor([&] {
+        e.renderBlock(512);
+        return e.getBusPeakL(Engine::MASTER_BUS_ID) > 0.05f;
+    }));
+    p = e.getPlaybackPositionSeconds(id);
+    ASSERT_TRUE(p >= 0.5 && p < 1.0);
+
+    e.closeStream(id);
+    std::remove(WAV_PATH);
+    PASS();
+}
+
 TEST(file_stream_seek_restarts_finished_stream) {
     const int sr = 44100;
     auto tone = sineMono(sr / 2, 440.0f, sr);   // 0.5 s tone

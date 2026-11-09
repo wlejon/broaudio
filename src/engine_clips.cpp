@@ -611,6 +611,13 @@ double Engine::getPlaybackPositionSeconds(int instanceId) const
     uint64_t pos = pb->playPos.load(std::memory_order_relaxed);
 
     if (clip->streaming) {
+        // A seek the worker has not applied yet reads as its target.
+        if (clip->streamSeekApplied.load(std::memory_order_acquire) !=
+            clip->streamSeekRequested.load(std::memory_order_acquire)) {
+            const double t = clip->streamSeekTargetSeconds.load(std::memory_order_relaxed);
+            const double dur = clip->streamDurationSeconds.load(std::memory_order_relaxed);
+            return dur > 0.0 && t > dur ? dur : t;
+        }
         // playPos counts consumed engine-rate frames; the seek fence + base
         // rebase it into file time (both zero for never-seeked streams and
         // live PCM streams).

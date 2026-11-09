@@ -59,6 +59,7 @@ void FileStreamRunner::join()
 void FileStreamRunner::requestSeek(double seconds)
 {
     seekSeconds_.store(seconds < 0.0 ? 0.0 : seconds, std::memory_order_release);
+    clip_->streamSeekTargetSeconds.store(seconds < 0.0 ? 0.0 : seconds, std::memory_order_relaxed);
     // After the target: a worker that sees this count also sees a target at
     // least this new (see AudioClip::streamSeekRequested).
     clip_->streamSeekRequested.fetch_add(1, std::memory_order_acq_rel);

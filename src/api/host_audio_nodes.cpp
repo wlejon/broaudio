@@ -73,7 +73,8 @@ void hostOscillatorDtor(void* p) {
     auto* osc = static_cast<HostOscillatorNode*>(p);
     if (osc) {
         if (osc->voiceId >= 0) {
-            auto* e = getAudioEngine();
+            // Runs in the sweep: never create the default engine from here.
+            auto* e = existingAudioEngine();
             if (e) {
                 e->stopVoice(osc->voiceId, e->currentTime());
                 e->removeVoice(osc->voiceId);
@@ -91,7 +92,8 @@ void hostBiquadFilterDtor(void* p) {
     auto* filter = static_cast<HostBiquadFilterNode*>(p);
     if (filter) {
         if (filter->slot >= 0) {
-            auto* e = getAudioEngine();
+            // Runs in the sweep: never create the default engine from here.
+            auto* e = existingAudioEngine();
             if (e) {
                 e->releaseFilterSlot(filter->slot);
             }

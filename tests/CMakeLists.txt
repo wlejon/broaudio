@@ -1,6 +1,6 @@
 enable_testing()
 
-if(CMAKE_CXX_FLAGS MATCHES "--coverage" OR CMAKE_C_FLAGS MATCHES "--coverage")
+if(BROAUDIO_COVERAGE OR CMAKE_CXX_FLAGS MATCHES "--coverage" OR CMAKE_C_FLAGS MATCHES "--coverage")
     add_compile_definitions(BROAUDIO_COVERAGE_BUILD=1)
 endif()
 

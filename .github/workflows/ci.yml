@@ -92,14 +92,14 @@ jobs:
           add-to-environment: true
           install-linux-dependencies: true
 
-      - name: Install gcovr
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends gcovr
+      - name: Install packages
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends ninja-build gcovr
 
       - name: Configure (instrumented)
         run: |
-          cmake -S broaudio -B build -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_CXX_FLAGS="--coverage" \
-            -DCMAKE_EXE_LINKER_FLAGS="--coverage"
+          cmake -S broaudio -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DBROAUDIO_COVERAGE=ON
 
       - name: Build
         run: cmake --build build --parallel 4
@@ -135,7 +135,11 @@ jobs:
             echo 'SDL, bromath, and the vendored third_party libraries are filtered out.'
             echo
             echo '```'
-            cat coverage-summary.txt
+            if [ -f coverage-summary.txt ]; then
+              cat coverage-summary.txt
+            else
+              echo '(no coverage report produced)'
+            fi
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 

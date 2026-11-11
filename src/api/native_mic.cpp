@@ -158,7 +158,12 @@ struct MicState {
     bronze::embed::Persistent onError;   // opts.onError: why the capture stopped
 };
 
-static MicState g_mic;
+// Heap-allocated on first use so its Persistent members never touch bronze's
+// handle table during C++ static initialization or static destruction.
+MicState& micState() {
+    static auto* m = new MicState();
+    return *m;
+}
 
 } // namespace
 
@@ -168,7 +173,8 @@ void shutdownActiveMic();
 // capture stops, and opts.onError hears why (an Error named
 // PermissionRevoked).
 static void revokeActiveMic(const std::string& refusal) {
-    ev::Persistent onError{g_mic.onError.get()};
+    auto& mic = micState();
+    ev::Persistent onError{mic.onError.get()};
     shutdownActiveMic();
     if (!ev::isFunction(onError.get())) return;
     ev::Persistent err{ev::newAccessError(refusal, "EACCES")};
@@ -177,19 +183,20 @@ static void revokeActiveMic(const std::string& refusal) {
 }
 
 void shutdownActiveMic() {
-    if (g_mic.active) {
+    auto& mic = micState();
+    if (mic.active) {
         auto* e = existingAudioEngine();
-        if (e && g_mic.tapId != broaudio::kInvalidMicTapId) {
-            e->removeMicTap(g_mic.tapId);
+        if (e && mic.tapId != broaudio::kInvalidMicTapId) {
+            e->removeMicTap(mic.tapId);
         }
     }
-    g_mic.tapId = broaudio::kInvalidMicTapId;
-    g_mic.onChunk.set(ev::undefined());
-    g_mic.onError.set(ev::undefined());
+    mic.tapId = broaudio::kInvalidMicTapId;
+    mic.onChunk.set(ev::undefined());
+    mic.onError.set(ev::undefined());
     // The callback's own reference keeps the ring alive for a callback that
     // is still in flight; this only drops the main thread's.
-    g_mic.session.reset();
-    g_mic.active = false;
+    mic.session.reset();
+    mic.active = false;
 }
 
 void drainMicChunks() {
@@ -197,12 +204,13 @@ void drainMicChunks() {
     // loads here too (api.h tickAsyncJobs), so createClipFromFileAsync
     // resolves without the host pumping a second thing.
     tickAsyncJobs();
-    if (!g_mic.active || !g_mic.session) return;
+    auto& mic = micState();
+    if (!mic.active || !mic.session) return;
     // Held for the whole batch: a chunk callback may stop or restart the mic.
-    std::shared_ptr<MicSession> sess = g_mic.session;
+    std::shared_ptr<MicSession> sess = mic.session;
     uint64_t w = sess->writeCount.load(std::memory_order_acquire);
     if (w == sess->lastFired) return;
-    if (!ev::isFunction(g_mic.onChunk.get())) {
+    if (!ev::isFunction(mic.onChunk.get())) {
         sess->lastFired = w;
         return;
     }
@@ -216,7 +224,7 @@ void drainMicChunks() {
     for (uint64_t i = start; i < w; ++i) {
         // A chunk callback may have called bro.mic.stop() (or restarted
         // with a new handler): stop delivering the old batch then.
-        if (!g_mic.active || g_mic.session != sess || !ev::isFunction(g_mic.onChunk.get()))
+        if (!mic.active || mic.session != sess || !ev::isFunction(mic.onChunk.get()))
             return;
         sess->lastFired = i + 1;
         int pk = 0, rms = 0;
@@ -235,7 +243,7 @@ void drainMicChunks() {
             o.set("samples", makeFloat32Array(chunkBuf.data(), chunkBuf.size()));
         }
         Value chunkVal = o.get();
-        ev::call(g_mic.onChunk.get(), ev::undefined(), std::span<const Value>(&chunkVal, 1));
+        ev::call(mic.onChunk.get(), ev::undefined(), std::span<const Value>(&chunkVal, 1));
     }
 }
 
@@ -318,44 +326,45 @@ void installMic() {
         }
 
         shutdownActiveMic();
+        auto& ms = micState();
 
         cfg.chunkFrames = chunkFrames;
         cfg.targetRate = targetRate;
         cfg.agc = agc;
 
         if (ev::isFunction(onChunkCb.get())) {
-            g_mic.onChunk.set(onChunkCb.get());
+            ms.onChunk.set(onChunkCb.get());
         }
         if (ev::isFunction(onErrorCb.get())) {
-            g_mic.onError.set(onErrorCb.get());
+            ms.onError.set(onErrorCb.get());
         }
         cfg.onRevoked = [](const std::string& refusal) { revokeActiveMic(refusal); };
         // Asked here as well as at the tap, so a refusal says why rather than
         // that the tap failed.
         if (std::string refused = broaudio::checkCaptureGate("bro.mic.start"); !refused.empty()) {
-            g_mic.onChunk.set(ev::undefined());
-            g_mic.onError.set(ev::undefined());
+            ms.onChunk.set(ev::undefined());
+            ms.onError.set(ev::undefined());
             return ev::throwError("bro.mic.start: " + refused);
         }
         auto sess = std::make_shared<MicSession>(chunkFrames, samples);
-        g_mic.session = sess;
+        ms.session = sess;
 
-        g_mic.tapId = e->addMicTap(cfg, [sess](const float* s, int n) {
+        ms.tapId = e->addMicTap(cfg, [sess](const float* s, int n) {
             if (n > 0) sess->write(s, n);
         });
 
-        if (g_mic.tapId == broaudio::kInvalidMicTapId) {
+        if (ms.tapId == broaudio::kInvalidMicTapId) {
             // Not active yet, so shutdownActiveMic would skip this.
-            g_mic.session.reset();
-            g_mic.onChunk.set(ev::undefined());
-            g_mic.onError.set(ev::undefined());
+            ms.session.reset();
+            ms.onChunk.set(ev::undefined());
+            ms.onError.set(ev::undefined());
             return ev::throwError("bro.mic.start: addMicTap failed");
         }
 
         if (live && !e->isMicCapturing()) {
             e->startMicCapture();
         }
-        g_mic.active = true;
+        ms.active = true;
         return ev::undefined();
     });
 
@@ -365,7 +374,7 @@ void installMic() {
     });
 
     mic.def("isActive", 0, [](Value, std::span<const Value>) -> Value {
-        return ev::fromBool(g_mic.active);
+        return ev::fromBool(micState().active);
     });
 
     mic.def("engineRate", 0, [](Value, std::span<const Value>) -> Value {
@@ -374,16 +383,17 @@ void installMic() {
     });
 
     mic.def("stats", 0, [](Value, std::span<const Value>) -> Value {
+        auto& ms = micState();
         auto* e = getAudioEngine();
-        if (!g_mic.active || !e || g_mic.tapId == broaudio::kInvalidMicTapId) {
+        if (!ms.active || !e || ms.tapId == broaudio::kInvalidMicTapId) {
             return ev::null();
         }
-        auto s = e->getMicTapStats(g_mic.tapId);
+        auto s = e->getMicTapStats(ms.tapId);
         ObjectBuilder res;
         res.set("framesDelivered", static_cast<double>(s.framesDelivered));
         res.set("samplesDelivered", static_cast<double>(s.samplesDelivered));
         res.set("rollingPeak", static_cast<double>(s.rollingPeak));
-        const MicSession* sess = g_mic.session.get();
+        const MicSession* sess = ms.session.get();
         res.set("chunkCount", static_cast<double>(sess ? sess->writeCount.load(std::memory_order_acquire) : 0));
         res.set("dropped", static_cast<double>(sess ? sess->dropped : 0));
         res.set("chunkFrames", static_cast<double>(sess ? sess->chunkFrames : 0));
@@ -398,7 +408,7 @@ void installMic() {
         }
         // Held across the array build (which allocates and so may run code
         // that stops the mic).
-        std::shared_ptr<MicSession> sess = g_mic.session;
+        std::shared_ptr<MicSession> sess = micState().session;
         uint64_t w = sess ? sess->writeCount.load(std::memory_order_acquire) : 0;
         int avail = static_cast<int>(w < static_cast<uint64_t>(kMicRing) ? w : static_cast<uint64_t>(kMicRing));
         int count = avail < limit ? avail : limit;
@@ -412,7 +422,7 @@ void installMic() {
     });
 
     mic.def("feed", 2, [](Value, std::span<const Value> a) -> Value {
-        if (!g_mic.active) {
+        if (!micState().active) {
             return ev::throwError("bro.mic.feed: mic capture not started");
         }
         auto* e = getAudioEngine();

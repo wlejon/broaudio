@@ -2,6 +2,12 @@ cmake_minimum_required(VERSION 3.24)
 # C is required for the vendored stb_vorbis translation unit
 # (src/codec/stb_vorbis_impl.c does not compile as C++).
 project(broaudio LANGUAGES CXX C)
+if(APPLE)
+    # Enable Objective-C/C++ at directory scope before bro_dependency() (a
+    # CMake function) adds SDL3 or libremidi; enabling a language inside a
+    # function leaves CMAKE_OBJCXX_COMPILE_OBJECT unset in the caller's scope.
+    enable_language(OBJC OBJCXX)
+endif()
 
 # When built standalone, set the MSVC runtime to static
 if(MSVC AND CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
@@ -72,6 +78,18 @@ if(BROAUDIO_MIDI)
         set(BROAUDIO_MIDI OFF)
         message(STATUS "broaudio: libremidi not found, MIDI support disabled")
     endif()
+endif()
+
+# Coverage. Scoped to a top-level build after dependencies so _deps (bronze,
+# brass, libremidi, SDL) are not instrumented with --coverage -O0.
+option(BROAUDIO_COVERAGE "Instrument broaudio for gcov coverage (GCC/Clang)" OFF)
+if(BROAUDIO_COVERAGE AND CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    if(MSVC)
+        message(FATAL_ERROR "BROAUDIO_COVERAGE requires GCC or Clang (gcov instrumentation)")
+    endif()
+    add_compile_options(--coverage -fprofile-update=atomic -O0 -g -UNDEBUG)
+    add_link_options(--coverage)
+    message(STATUS "broaudio: coverage instrumentation ON (-O0)")
 endif()
 
 # Vendored single-header codec implementations (dr_wav/dr_flac/dr_mp3 and

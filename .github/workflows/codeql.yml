@@ -9,8 +9,8 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: codeql-${{ github.ref }}
-  cancel-in-progress: true
+  group: codeql-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 # broaudio parses untrusted audio containers (WAV/FLAC/MP3/Ogg via dr_libs) and
 # does frame-count / channel / offset arithmetic across ring buffers, resamplers

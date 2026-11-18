@@ -178,12 +178,16 @@ static bool sameListener(const ev::Persistent& entry, const Value& fnSlot) {
     return ev::toBits(l) == ev::toBits(fnSlot);
 }
 
-void dispatchNodeEvent(Value nodeValue, const char* type) {
+void dispatchTargetEvent(Value nodeValue, const char* type, Value eventValue) {
     ev::Persistent node(nodeValue);
-    ObjectBuilder evt;
-    evt.set("type", type);
-    evt.set("target", node.get());
-    evt.set("currentTarget", node.get());
+    ev::Persistent evt(eventValue);
+    if (!ev::isObject(evt.get())) {
+        ObjectBuilder made;
+        made.set("type", type);
+        made.set("target", node.get());
+        made.set("currentTarget", node.get());
+        evt.set(made.get());
+    }
 
     // The `on<type>` handler property first, then the listeners in the
     // order they were added. The listener list is snapshotted before any is
@@ -210,6 +214,63 @@ void dispatchNodeEvent(Value nodeValue, const char* type) {
         const Value arg = evt.get();
         ev::call(fn.get(), node.get(), std::span<const Value>(&arg, 1));
     }
+}
+
+void decorateEventTargetMembers(ObjectBuilder& b) {
+    // addEventListener(type, listener, options?): a function listener,
+    // added once per (type, listener) pair; `options.once` removes it after
+    // its first call. The events fired are a buffer source's 'ended' and a
+    // context's 'statechange'. Non-string types and non-function listeners
+    // are ignored.
+    b.def("addEventListener", 3, [](Value self_, std::span<const Value> a) -> Value {
+        ev::Persistent self(self_);
+        if (!ev::isObject(self.get()) || a.size() < 2 || !ev::isString(a[0]) || !ev::isFunction(a[1])) {
+            return ev::undefined();
+        }
+        const std::string type = ev::toUtf8(a[0]);
+        bool once = false;
+        if (a.size() >= 3 && ev::isObject(a[2])) once = ev::toBool(ev::getProperty(a[2], "once"));
+        std::vector<ev::Persistent> entries;
+        readListenerEntries(self, type, entries);
+        for (const auto& en : entries) {
+            if (sameListener(en, a[1])) return ev::undefined();
+        }
+        ObjectBuilder entry;
+        entry.set("listener", a[1]);
+        entry.set("once", once);
+        entries.emplace_back(entry.get());
+        writeListenerEntries(self, type, entries);
+        return ev::undefined();
+    });
+
+    b.def("removeEventListener", 3, [](Value self_, std::span<const Value> a) -> Value {
+        ev::Persistent self(self_);
+        if (!ev::isObject(self.get()) || a.size() < 2 || !ev::isString(a[0])) return ev::undefined();
+        const std::string type = ev::toUtf8(a[0]);
+        std::vector<ev::Persistent> entries, kept;
+        readListenerEntries(self, type, entries);
+        bool removed = false;
+        for (auto& en : entries) {
+            if (sameListener(en, a[1])) removed = true;
+            else kept.push_back(std::move(en));
+        }
+        if (removed) writeListenerEntries(self, type, kept);
+        return ev::undefined();
+    });
+
+    // dispatchEvent(event): `on<type>`, then the listeners, each called with
+    // the event; answers !event.defaultPrevented.
+    b.def("dispatchEvent", 1, [](Value self_, std::span<const Value> a) -> Value {
+        ev::Persistent self(self_);
+        if (!hasArg(a, 0) || !ev::isObject(a[0])) {
+            return ev::throwTypeError("dispatchEvent: the argument is not an Event");
+        }
+        ev::Persistent evt(a[0]);
+        ev::Persistent typeV(ev::getProperty(evt.get(), "type"));
+        if (!ev::isString(typeV.get())) return ev::fromBool(true);
+        dispatchTargetEvent(self.get(), ev::toUtf8(typeV.get()).c_str(), evt.get());
+        return ev::fromBool(!ev::toBool(ev::getProperty(evt.get(), "defaultPrevented")));
+    });
 }
 
 // The master-bus effect a Delay / DynamicsCompressor / WaveShaper /
@@ -347,45 +408,7 @@ void decorateAudioNodeProto(ObjectBuilder& b) {
         return ev::undefined();
     });
 
-    // addEventListener(type, listener, options?): a function listener,
-    // added once per (type, listener) pair; `options.once` removes it after
-    // its first call. The only event a node dispatches is a buffer source's
-    // 'ended'. Non-string types and non-function listeners are ignored.
-    b.def("addEventListener", 3, [](Value self_, std::span<const Value> a) -> Value {
-        ev::Persistent self(self_);
-        if (!ev::isObject(self.get()) || a.size() < 2 || !ev::isString(a[0]) || !ev::isFunction(a[1])) {
-            return ev::undefined();
-        }
-        const std::string type = ev::toUtf8(a[0]);
-        bool once = false;
-        if (a.size() >= 3 && ev::isObject(a[2])) once = ev::toBool(ev::getProperty(a[2], "once"));
-        std::vector<ev::Persistent> entries;
-        readListenerEntries(self, type, entries);
-        for (const auto& en : entries) {
-            if (sameListener(en, a[1])) return ev::undefined();
-        }
-        ObjectBuilder entry;
-        entry.set("listener", a[1]);
-        entry.set("once", once);
-        entries.emplace_back(entry.get());
-        writeListenerEntries(self, type, entries);
-        return ev::undefined();
-    });
-
-    b.def("removeEventListener", 3, [](Value self_, std::span<const Value> a) -> Value {
-        ev::Persistent self(self_);
-        if (!ev::isObject(self.get()) || a.size() < 2 || !ev::isString(a[0])) return ev::undefined();
-        const std::string type = ev::toUtf8(a[0]);
-        std::vector<ev::Persistent> entries, kept;
-        readListenerEntries(self, type, entries);
-        bool removed = false;
-        for (auto& en : entries) {
-            if (sameListener(en, a[1])) removed = true;
-            else kept.push_back(std::move(en));
-        }
-        if (removed) writeListenerEntries(self, type, kept);
-        return ev::undefined();
-    });
+    decorateEventTargetMembers(b);
 
     b.accessor("numberOfInputs", [](Value self_, std::span<const Value>) {
         HostAudioNode* node = hostAudioNodeOf(self_);

@@ -21,6 +21,7 @@ struct LiveRegistry {
     std::vector<std::weak_ptr<LiveFilter>> filters;
     std::vector<std::weak_ptr<HostAudioParam>> automated;
     std::vector<PlayingHold> playing;
+    std::vector<std::pair<ev::Persistent, std::string>> queuedEvents;
 };
 
 // Per thread, like every JS value the holds root. Deliberately leaked: a
@@ -203,6 +204,11 @@ void tickLiveParams() {
     auto* e = existingAudioEngine();
     if (!e) return;
     refreshLiveParams(e->currentTime());
+    if (!r.queuedEvents.empty()) {
+        auto queued = std::move(r.queuedEvents);
+        r.queuedEvents.clear();
+        for (auto& [target, type] : queued) dispatchTargetEvent(target.get(), type.c_str(), ev::undefined());
+    }
     if (r.playing.empty()) return;
 
     // Take the finished holds out first: an onended handler runs JS that
@@ -222,12 +228,17 @@ void tickLiveParams() {
     }
 
     // `onended`, then any addEventListener('ended', ...) listeners.
-    for (auto& node : ended) dispatchNodeEvent(node.get(), "ended");
+    for (auto& node : ended) dispatchTargetEvent(node.get(), "ended", ev::undefined());
+}
+
+void queueTargetEvent(Value target, const char* type) {
+    registry().queuedEvents.emplace_back(ev::Persistent(target), type);
 }
 
 void shutdownLiveParams() {
     auto& r = registry();
     r.playing.clear();
+    r.queuedEvents.clear();
     r.sources.clear();
     r.filters.clear();
     r.automated.clear();

@@ -392,10 +392,17 @@ struct HostConvolverNode {
 // node type is ignored. (host_audio_nodes.cpp)
 void engageMasterEffect(broaudio::Engine& eng, HostAudioNode* node, double t);
 
-// Fire event `type` at a node: its `on<type>` property, then the listeners
-// added with addEventListener, each called with this = node and one event
-// {type, target, currentTarget}. Runs JS. (host_audio_nodes.cpp)
-void dispatchNodeEvent(Value node, const char* type);
+// Fire event `type` at a node or context: its `on<type>` property, then the
+// listeners added with addEventListener, each called with this = the target
+// and `event`, or, when that is not an object, a fresh {type, target,
+// currentTarget}. Runs JS. (host_audio_nodes.cpp)
+void dispatchTargetEvent(Value target, const char* type, Value event);
+// addEventListener / removeEventListener / dispatchEvent on a prototype (the
+// EventTarget members of AudioNode and AudioContext).
+void decorateEventTargetMembers(ObjectBuilder& b);
+// Fire `type` at `target` on the next tick (tickLiveParams), as the context's
+// statechange is queued after the change it reports.
+void queueTargetEvent(Value target, const char* type);
 
 struct HostChannelSplitterNode {
     HostAudioNode base;

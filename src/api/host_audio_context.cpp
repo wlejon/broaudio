@@ -29,6 +29,7 @@ Value makeAudioContextValue() {
 
     b.set("destination", makeDestinationNodeValue());
     b.set("listener", makeListenerValue());
+    b.set("onstatechange", ev::null());
 
     return b.get();
 }
@@ -119,11 +120,16 @@ void decorateAudioContextProto(ObjectBuilder& b) {
             return ev::undefined();
         });
 
+    // BaseAudioContext is an EventTarget: 'statechange' fires on the tick
+    // after suspend(), resume() or close() changes `state`.
+    decorateEventTargetMembers(b);
+
     // 2. Lifecycle
     b.def("suspend", 0, [](Value self_, std::span<const Value>) {
         HostAudioContext* ctx = hostAudioContextOf(self_);
-        if (ctx && ctx->state != "closed") {
+        if (ctx && ctx->state != "closed" && ctx->state != "suspended") {
             ctx->state = "suspended";
+            queueTargetEvent(self_, "statechange");
             auto* e = getAudioEngine();
             if (e) e->setMasterPaused(true);
         }
@@ -134,8 +140,9 @@ void decorateAudioContextProto(ObjectBuilder& b) {
 
     b.def("resume", 0, [](Value self_, std::span<const Value>) {
         HostAudioContext* ctx = hostAudioContextOf(self_);
-        if (ctx && ctx->state != "closed") {
+        if (ctx && ctx->state != "closed" && ctx->state != "running") {
             ctx->state = "running";
+            queueTargetEvent(self_, "statechange");
             auto* e = getAudioEngine();
             if (e) e->setMasterPaused(false);
         }
@@ -146,8 +153,9 @@ void decorateAudioContextProto(ObjectBuilder& b) {
 
     b.def("close", 0, [](Value self_, std::span<const Value>) {
         HostAudioContext* ctx = hostAudioContextOf(self_);
-        if (ctx) {
+        if (ctx && ctx->state != "closed") {
             ctx->state = "closed";
+            queueTargetEvent(self_, "statechange");
             auto* e = getAudioEngine();
             if (e) {
                 for (int vid : ctx->voiceIds) {

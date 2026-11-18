@@ -71,8 +71,21 @@ enum class AudioNodeType : uint8_t {
     ChannelSplitter,
     ChannelMerger,
     MediaStreamSource,
+    ConstantSource,
+    IIRFilter,
     Generic,
 };
+
+// An OfflineAudioContext's clock (host_audio_offline.cpp): the time its
+// rendering has reached. Shared by the context and every param made for it,
+// which schedule against it rather than the engine's clock.
+struct OfflineClock {
+    double time = 0.0;
+};
+
+// A node's state between an offline render's quanta (its phase, filter
+// memory, delay line, ...): host_audio_offline_graph.cpp owns the type.
+struct OfflineNodeState;
 
 // A node's native half. It holds no JS values: what a node references in JS
 // (its connect() targets, callbacks) lives as properties on its own JS
@@ -82,6 +95,20 @@ enum class AudioNodeType : uint8_t {
 struct HostAudioNode {
     uint32_t tag = kHostAudioNodeTag;
     AudioNodeType nodeType = AudioNodeType::Generic;
+    // Made by an OfflineAudioContext: rendered by its graph
+    // (host_audio_offline_graph.cpp), never by the engine.
+    bool offline = false;
+    // The channel mixing of the node's inputs (Web Audio's channelCount,
+    // channelCountMode, channelInterpretation), which the offline graph
+    // follows. 0 = max / speakers.
+    enum : uint8_t { kModeMax = 0, kModeClampedMax = 1, kModeExplicit = 2 };
+    uint32_t channelCount = 2;
+    uint8_t channelCountMode = kModeMax;
+    bool discrete = false;
+    // The output and input of each connect() edge, in the order of the
+    // node's `_targets` (output << 16 | input; 0 for an AudioParam's).
+    std::vector<uint32_t> targetPorts;
+    std::shared_ptr<OfflineNodeState> offlineState;
 };
 
 enum class AudioParamTarget : uint8_t {
@@ -145,6 +172,14 @@ struct HostAudioParam {
     float defaultValue = 1.0f;
     float minValue = -3.402823466e+38f;
     float maxValue = 3.402823466e+38f;
+    // k-rate params (a buffer source's playbackRate and detune, a panner's
+    // ...) are evaluated once per render quantum, the rest per sample.
+    bool kRate = false;
+    // An offline context's param: scheduled against that context's clock.
+    std::shared_ptr<const OfflineClock> clock;
+
+    // The time a schedule call counts as "now".
+    double now() const;
 
     std::vector<ParamTimelineEvent> timeline;
 
@@ -216,6 +251,12 @@ inline float compressorThresholdLinear(float thresholdDb) {
     return std::pow(10.0f, thresholdDb / 20.0f);
 }
 
+// While an OfflineAudioContext's factory makes a node (host_audio_offline.cpp):
+// that context's clock, else null. The node and param makers read it: an
+// offline node takes nothing from the engine (no voice, no filter slot) and
+// its params schedule on the clock and drive no engine state.
+std::shared_ptr<const OfflineClock> offlineCreationClock();
+
 // Registration. The registry keeps weak references (the node owns its
 // LiveSource / LiveFilter) except for playing buffer sources, below.
 void registerLiveSource(const std::shared_ptr<LiveSource>& src);
@@ -257,6 +298,12 @@ struct HostOscillatorNode {
     ParamRef gainParam;
     ParamRef panParam;
     std::shared_ptr<LiveSource> live;  // registered at creation: the voice exists from then
+    // start() / stop() times (an offline node's schedule) and the custom
+    // wave setPeriodicWave gave it.
+    double startTime = -1.0;
+    double stopTime = 1e300;
+    std::vector<float> waveReal, waveImag;
+    bool waveNormalize = true;
 };
 
 struct HostPeriodicWave {
@@ -332,6 +379,27 @@ struct HostAudioBufferSourceNode {
     bool started = false;
     bool stopped = false;
     std::shared_ptr<LiveSource> live;  // set by start()
+    // start(when, offset, duration) and stop(when), for an offline node.
+    double startTime = -1.0;
+    double startOffset = 0.0;
+    double startDuration = -1.0;  // none
+    double stopTime = 1e300;
+};
+
+// ConstantSourceNode (an offline context's): `offset` on its output while
+// started.
+struct HostConstantSourceNode {
+    HostAudioNode base;
+    ParamRef offsetParam;
+    bool started = false;
+    double startTime = -1.0;
+    double stopTime = 1e300;
+};
+
+// IIRFilterNode (an offline context's): the coefficients as given.
+struct HostIIRFilterNode {
+    HostAudioNode base;
+    std::vector<double> feedforward, feedback;
 };
 
 struct HostPannerNode {
@@ -614,7 +682,39 @@ Value makeAudioBufferSourceNodeValue();
 
 // Context creators & decorators (host_audio_context.cpp)
 void decorateAudioContextProto(ObjectBuilder& b);
+// The node factories and decodeAudioData, on AudioContext.prototype and
+// OfflineAudioContext.prototype alike.
+void decorateBaseAudioContextMembers(ObjectBuilder& b);
 Value makeAudioContextValue();
+
+// OfflineAudioContext (host_audio_offline.cpp)
+// The sample rate a context renders at: an OfflineAudioContext's own, else
+// the engine's.
+int contextSampleRate(Value context);
+// A node factory call on `context` (a receiver, or a node constructor's
+// context argument). When it is an OfflineAudioContext, the nodes made while
+// the scope lives are that context's (offlineCreationClock) and finish()
+// marks one offline, records it in the context's graph and sets its
+// `context`; for any other value both do nothing.
+class OfflineNodeScope {
+public:
+    explicit OfflineNodeScope(Value context);
+    ~OfflineNodeScope();
+    OfflineNodeScope(const OfflineNodeScope&) = delete;
+    OfflineNodeScope& operator=(const OfflineNodeScope&) = delete;
+    Value finish(Value node);
+
+private:
+    ev::Persistent context_;
+    std::shared_ptr<const OfflineClock> previous_;
+    bool active_ = false;
+};
+// OfflineAudioContext, OfflineAudioCompletionEvent, ConstantSourceNode and
+// IIRFilterNode on the global object.
+void installOfflineAudioGlobals();
+extern HostClass g_offlineAudioContextClass;
+extern HostClass g_constantSourceNodeClass;
+extern HostClass g_iirFilterNodeClass;
 
 // Spatial creators & decorators (host_audio_spatial.cpp)
 void decoratePannerNodeProto(ObjectBuilder& b);

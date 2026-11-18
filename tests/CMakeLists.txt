@@ -236,6 +236,21 @@ if(TARGET broaudio_api)
         )
     endif()
 
+    # OfflineAudioContext: rendered samples against Chromium's, the
+    # promise / complete / statechange order, suspend and resume.
+    add_executable(broaudio_test_api_offline test_audio_api_offline.cpp)
+    target_link_libraries(broaudio_test_api_offline PRIVATE broaudio_api bronze_runtime_shared)
+    if(WIN32)
+        add_custom_command(TARGET broaudio_test_api_offline POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:bronze_runtime_shared>
+                $<TARGET_FILE_DIR:broaudio_test_api_offline>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_LINKER_FILE:bronze_runtime_shared>
+                $<TARGET_FILE_DIR:broaudio_test_api_offline>
+        )
+    endif()
+
     # Synthesis graphs: SynthGraph construction and validation errors,
     # render() determinism, bro.ear on a render, playSynth / releaseSynth.
     add_executable(broaudio_test_api_synth test_audio_api_synth.cpp)
@@ -268,7 +283,7 @@ if(TARGET broaudio_api)
 
     if(BRASS_HOST_BACKEND)
         foreach(plain_test broaudio_test_api_gc broaudio_test_api_live broaudio_test_api_contract
-                           broaudio_test_api_synth broaudio_test_api_ear_fit)
+                           broaudio_test_api_synth broaudio_test_api_ear_fit broaudio_test_api_offline)
             add_test(NAME ${plain_test} COMMAND ${plain_test})
             if(WIN32)
                 set_tests_properties(${plain_test} PROPERTIES
@@ -283,7 +298,7 @@ if(TARGET broaudio_api)
         foreach(api_test broaudio_test_api broaudio_test_api_drift
                          broaudio_test_destination broaudio_test_api_gc
                          broaudio_test_api_live broaudio_test_api_contract
-                         broaudio_test_api_synth broaudio_test_api_ear_fit)
+                         broaudio_test_api_synth broaudio_test_api_ear_fit broaudio_test_api_offline)
             add_test(NAME ${api_test}_gcstress COMMAND ${api_test})
             if(WIN32)
                 set_tests_properties(${api_test}_gcstress PROPERTIES

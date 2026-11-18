@@ -34,6 +34,201 @@ Value makeAudioContextValue() {
     return b.get();
 }
 
+// The node factories and decodeAudioData: BaseAudioContext's members, on
+// AudioContext and OfflineAudioContext alike. On an offline context each
+// node is made under its OfflineNodeScope: it takes nothing from the engine
+// and joins that context's graph (host_audio_offline.cpp).
+void decorateBaseAudioContextMembers(ObjectBuilder& b) {
+    b.def("createGain", 0, [](Value self_, std::span<const Value>) {
+        OfflineNodeScope scope(self_);
+        return scope.finish(makeGainNodeValue());
+    });
+
+    b.def("createOscillator", 0, [](Value self_, std::span<const Value>) {
+        OfflineNodeScope scope(self_);
+        // The receiver is a plain copy: unwrap it before the node allocates.
+        HostAudioContext* ctx = hostAudioContextOf(self_);
+        Value oscVal = makeOscillatorNodeValue();
+        if (ctx) {
+            HostOscillatorNode* osc = oscOf(oscVal);
+            if (osc && osc->voiceId >= 0) {
+                ctx->voiceIds.push_back(osc->voiceId);
+            }
+        }
+        return scope.finish(oscVal);
+    });
+
+    b.def("createPeriodicWave", 3, [](Value, std::span<const Value> a) -> Value {
+        if (a.size() < 2) return ev::null();
+        // The options read may run a getter and move the heap, so it goes
+        // first and the arrays' bytes are copied out after it.
+        bool disableNorm = false;
+        if (a.size() >= 3 && ev::isObject(a[2])) {
+            Value dn = ev::getProperty(a[2], "disableNormalization");
+            if (ev::isBool(dn)) disableNorm = ev::toBool(dn);
+        }
+        std::vector<float> real, imag;
+        if (!readFloatArrayArg(a[0], FloatArrayArg::Float32OrPlain, "createPeriodicWave: real", real) ||
+            !readFloatArrayArg(a[1], FloatArrayArg::Float32OrPlain, "createPeriodicWave: imag", imag)) {
+            return ev::undefined();
+        }
+        // Web Audio requires equal lengths; the shorter half is zero-padded
+        // instead, as `new PeriodicWave` does.
+        size_t count = std::max(real.size(), imag.size());
+        real.resize(count, 0.0f);
+        imag.resize(count, 0.0f);
+        return makePeriodicWaveValue(real.data(), imag.data(), static_cast<int>(count), disableNorm);
+    });
+
+    b.def("createBiquadFilter", 0, [](Value self_, std::span<const Value>) {
+        OfflineNodeScope scope(self_);
+        return scope.finish(makeBiquadFilterNodeValue());
+    });
+
+    b.def("createAnalyser", 0, [](Value self_, std::span<const Value>) {
+        OfflineNodeScope scope(self_);
+        return scope.finish(makeAnalyserNodeValue());
+    });
+
+    b.def("createBufferSource", 0, [](Value self_, std::span<const Value>) {
+        OfflineNodeScope scope(self_);
+        return scope.finish(makeAudioBufferSourceNodeValue());
+    });
+
+    b.def("createBuffer", 3, [](Value self_, std::span<const Value> a) {
+        int ch = a.size() >= 1 ? i32At(a, 0) : 1;
+        int len = a.size() >= 2 ? i32At(a, 1) : 0;
+        // A buffer plays at its own rate, so a missing rate is the context's
+        // (no resampling), not a fixed 44100.
+        int sr = hasArg(a, 2) ? i32At(a, 2) : contextSampleRate(self_);
+        return makeAudioBufferValue(ch, len, sr);
+    });
+
+    b.def("createPanner", 0, [](Value self_, std::span<const Value>) {
+        OfflineNodeScope scope(self_);
+        return scope.finish(makePannerNodeValue());
+    });
+
+    b.def("createStereoPanner", 0, [](Value self_, std::span<const Value>) {
+        OfflineNodeScope scope(self_);
+        return scope.finish(makeStereoPannerNodeValue());
+    });
+
+    b.def("createDelay", 1, [](Value self_, std::span<const Value> a) {
+        double maxTime = !a.empty() ? numAt(a, 0) : 1.0;
+        OfflineNodeScope scope(self_);
+        return scope.finish(makeDelayNodeValue(maxTime));
+    });
+
+    b.def("createDynamicsCompressor", 0, [](Value self_, std::span<const Value>) {
+        OfflineNodeScope scope(self_);
+        return scope.finish(makeDynamicsCompressorNodeValue());
+    });
+
+    b.def("createWaveShaper", 0, [](Value self_, std::span<const Value>) {
+        OfflineNodeScope scope(self_);
+        return scope.finish(makeWaveShaperNodeValue());
+    });
+
+    b.def("createConvolver", 0, [](Value self_, std::span<const Value>) {
+        OfflineNodeScope scope(self_);
+        return scope.finish(makeConvolverNodeValue());
+    });
+
+    b.def("createChannelSplitter", 1, [](Value self_, std::span<const Value> a) {
+        int outputs = !a.empty() ? i32At(a, 0) : 6;
+        OfflineNodeScope scope(self_);
+        return scope.finish(makeChannelSplitterNodeValue(outputs));
+    });
+
+    b.def("createChannelMerger", 1, [](Value self_, std::span<const Value> a) {
+        int inputs = !a.empty() ? i32At(a, 0) : 6;
+        OfflineNodeScope scope(self_);
+        return scope.finish(makeChannelMergerNodeValue(inputs));
+    });
+
+    // decodeAudioData
+    b.def("decodeAudioData", 3, [](Value self_, std::span<const Value> a) -> Value {
+        // Decoded to the context's rate: the engine's, or an offline context's own.
+        const int engRate = contextSampleRate(self_);
+        // The callbacks are read from `a` (rooted) at each use, never from a
+        // local copy: every call below allocates.
+        const bool hasSuccessCb = a.size() >= 2 && ev::isFunction(a[1]);
+        const bool hasErrorCb = a.size() >= 3 && ev::isFunction(a[2]);
+        ev::Persistent p(ev::createPromise());
+        auto fail = [&](const std::string& msg) -> Value {
+            ev::Persistent err(hostMakeDomError("EncodingError", msg));
+            if (hasErrorCb) {
+                const Value arg = err.get();
+                ev::call(a[2], ev::undefined(), std::span<const Value>(&arg, 1));
+            }
+            ev::rejectPromise(p.get(), err.get());
+            return p.get();
+        };
+        if (a.empty()) {
+            ev::Persistent err(hostMakeDomError("TypeError", "decodeAudioData: audio buffer argument required"));
+            ev::rejectPromise(p.get(), err.get());
+            return p.get();
+        }
+
+        const uint8_t* rawData = nullptr;
+        size_t rawLen = 0, elemSize = 1;
+        if (!bufferBytes(a[0], &rawData, &rawLen, &elemSize) || rawLen == 0) {
+            if (!hasSuccessCb && !hasErrorCb) return ev::null();
+            return fail("decodeAudioData: invalid buffer");
+        }
+
+        // rawData points into the moving heap; the decode consumes it before
+        // anything allocates.
+        broaudio::AudioFileData data = broaudio::loadAudioFileFromMemory(rawData, rawLen);
+        if (!data.valid()) {
+            if (!hasSuccessCb && !hasErrorCb) return ev::null();
+            return fail(data.error.empty() ? "decodeAudioData: failed to decode audio" : data.error);
+        }
+
+        std::vector<float> samples;
+        int numFrames = data.numFrames;
+        if (data.sampleRate > 0 && data.sampleRate != engRate && data.channels > 0) {
+            samples = broaudio::resample(data.samples.data(), data.numFrames, data.channels, data.sampleRate, engRate);
+            numFrames = static_cast<int>(samples.size() / data.channels);
+        } else {
+            samples = std::move(data.samples);
+        }
+
+        ev::Persistent bufVal(makeAudioBufferValue(data.channels, numFrames, engRate));
+        HostAudioBuffer* hostBuf = hostAudioBufferOf(bufVal.get());
+        if (hostBuf && numFrames > 0 && data.channels > 0) {
+            hostBuf->channels.resize(data.channels, std::vector<float>(numFrames, 0.0f));
+            for (int c = 0; c < data.channels; ++c) {
+                for (int i = 0; i < numFrames; ++i) {
+                    hostBuf->channels[c][i] = samples[i * data.channels + c];
+                }
+            }
+        }
+
+        ev::Persistent samplesArr(makeFloat32Array(samples));
+        // The AudioDecodedBuffer fields, on the AudioBuffer and (for the
+        // synchronous `ctx.decodeAudioData(bytes).samples` form) on the
+        // promise itself.
+        auto decorate = [&](ev::Persistent& target) {
+            target.set(ev::setProperty(target.get(), "samples", samplesArr.get()));
+            target.set(ev::setProperty(target.get(), "channels", ev::fromDouble(data.channels)));
+            target.set(ev::setProperty(target.get(), "sampleRate", ev::fromDouble(engRate)));
+            target.set(ev::setProperty(target.get(), "numFrames", ev::fromDouble(numFrames)));
+        };
+        decorate(bufVal);
+        decorate(p);
+
+        if (hasSuccessCb) {
+            const Value arg = bufVal.get();
+            ev::call(a[1], ev::undefined(), std::span<const Value>(&arg, 1));
+        }
+        ev::resolvePromise(p.get(), bufVal.get());
+        return p.get();
+    });
+
+}
+
 void decorateAudioContextProto(ObjectBuilder& b) {
     // 1. Properties
     b.accessor("currentTime", [](Value, std::span<const Value>) {
@@ -173,102 +368,8 @@ void decorateAudioContextProto(ObjectBuilder& b) {
         return p.get();
     });
 
-    // 3. Node factories
-    b.def("createGain", 0, [](Value, std::span<const Value>) {
-        return makeGainNodeValue();
-    });
-
-    b.def("createOscillator", 0, [](Value self_, std::span<const Value>) {
-        // The receiver is a plain copy: unwrap it before the node allocates.
-        HostAudioContext* ctx = hostAudioContextOf(self_);
-        Value oscVal = makeOscillatorNodeValue();
-        if (ctx) {
-            HostOscillatorNode* osc = oscOf(oscVal);
-            if (osc && osc->voiceId >= 0) {
-                ctx->voiceIds.push_back(osc->voiceId);
-            }
-        }
-        return oscVal;
-    });
-
-    b.def("createPeriodicWave", 3, [](Value, std::span<const Value> a) -> Value {
-        if (a.size() < 2) return ev::null();
-        // The options read may run a getter and move the heap, so it goes
-        // first and the arrays' bytes are copied out after it.
-        bool disableNorm = false;
-        if (a.size() >= 3 && ev::isObject(a[2])) {
-            Value dn = ev::getProperty(a[2], "disableNormalization");
-            if (ev::isBool(dn)) disableNorm = ev::toBool(dn);
-        }
-        std::vector<float> real, imag;
-        if (!readFloatArrayArg(a[0], FloatArrayArg::Float32OrPlain, "createPeriodicWave: real", real) ||
-            !readFloatArrayArg(a[1], FloatArrayArg::Float32OrPlain, "createPeriodicWave: imag", imag)) {
-            return ev::undefined();
-        }
-        // Web Audio requires equal lengths; the shorter half is zero-padded
-        // instead, as `new PeriodicWave` does.
-        size_t count = std::max(real.size(), imag.size());
-        real.resize(count, 0.0f);
-        imag.resize(count, 0.0f);
-        return makePeriodicWaveValue(real.data(), imag.data(), static_cast<int>(count), disableNorm);
-    });
-
-    b.def("createBiquadFilter", 0, [](Value, std::span<const Value>) {
-        return makeBiquadFilterNodeValue();
-    });
-
-    b.def("createAnalyser", 0, [](Value, std::span<const Value>) {
-        return makeAnalyserNodeValue();
-    });
-
-    b.def("createBufferSource", 0, [](Value, std::span<const Value>) {
-        return makeAudioBufferSourceNodeValue();
-    });
-
-    b.def("createBuffer", 3, [](Value, std::span<const Value> a) {
-        int ch = a.size() >= 1 ? i32At(a, 0) : 1;
-        int len = a.size() >= 2 ? i32At(a, 1) : 0;
-        // A buffer plays at its own rate, so a missing rate is the context's
-        // (no resampling), not a fixed 44100.
-        auto* e = getAudioEngine();
-        int sr = hasArg(a, 2) ? i32At(a, 2) : (e ? e->sampleRate() : 44100);
-        return makeAudioBufferValue(ch, len, sr);
-    });
-
-    b.def("createPanner", 0, [](Value, std::span<const Value>) {
-        return makePannerNodeValue();
-    });
-
-    b.def("createStereoPanner", 0, [](Value, std::span<const Value>) {
-        return makeStereoPannerNodeValue();
-    });
-
-    b.def("createDelay", 1, [](Value, std::span<const Value> a) {
-        double maxTime = !a.empty() ? numAt(a, 0) : 1.0;
-        return makeDelayNodeValue(maxTime);
-    });
-
-    b.def("createDynamicsCompressor", 0, [](Value, std::span<const Value>) {
-        return makeDynamicsCompressorNodeValue();
-    });
-
-    b.def("createWaveShaper", 0, [](Value, std::span<const Value>) {
-        return makeWaveShaperNodeValue();
-    });
-
-    b.def("createConvolver", 0, [](Value, std::span<const Value>) {
-        return makeConvolverNodeValue();
-    });
-
-    b.def("createChannelSplitter", 1, [](Value, std::span<const Value> a) {
-        int outputs = !a.empty() ? i32At(a, 0) : 6;
-        return makeChannelSplitterNodeValue(outputs);
-    });
-
-    b.def("createChannelMerger", 1, [](Value, std::span<const Value> a) {
-        int inputs = !a.empty() ? i32At(a, 0) : 6;
-        return makeChannelMergerNodeValue(inputs);
-    });
+    // 3. The BaseAudioContext members, shared with OfflineAudioContext.
+    decorateBaseAudioContextMembers(b);
 
     b.def("createMediaStreamSource", 1, [](Value, std::span<const Value> a) -> Value {
         if (a.empty()) return ev::undefined();
@@ -295,86 +396,6 @@ void decorateAudioContextProto(ObjectBuilder& b) {
         HostVoiceAllocator* va = ev::isObject(a[0]) ? hostVoiceAllocatorOf(a[0]) : nullptr;
         if (!va) return ev::throwTypeError("Expected VoiceAllocator argument");
         return makeSequenceValue(a[0]);
-    });
-
-    // 4. decodeAudioData
-    b.def("decodeAudioData", 3, [](Value, std::span<const Value> a) -> Value {
-        // The callbacks are read from `a` (rooted) at each use, never from a
-        // local copy: every call below allocates.
-        const bool hasSuccessCb = a.size() >= 2 && ev::isFunction(a[1]);
-        const bool hasErrorCb = a.size() >= 3 && ev::isFunction(a[2]);
-        ev::Persistent p(ev::createPromise());
-        auto fail = [&](const std::string& msg) -> Value {
-            ev::Persistent err(hostMakeDomError("EncodingError", msg));
-            if (hasErrorCb) {
-                const Value arg = err.get();
-                ev::call(a[2], ev::undefined(), std::span<const Value>(&arg, 1));
-            }
-            ev::rejectPromise(p.get(), err.get());
-            return p.get();
-        };
-        if (a.empty()) {
-            ev::Persistent err(hostMakeDomError("TypeError", "decodeAudioData: audio buffer argument required"));
-            ev::rejectPromise(p.get(), err.get());
-            return p.get();
-        }
-
-        const uint8_t* rawData = nullptr;
-        size_t rawLen = 0, elemSize = 1;
-        if (!bufferBytes(a[0], &rawData, &rawLen, &elemSize) || rawLen == 0) {
-            if (!hasSuccessCb && !hasErrorCb) return ev::null();
-            return fail("decodeAudioData: invalid buffer");
-        }
-
-        // rawData points into the moving heap; the decode consumes it before
-        // anything allocates.
-        broaudio::AudioFileData data = broaudio::loadAudioFileFromMemory(rawData, rawLen);
-        if (!data.valid()) {
-            if (!hasSuccessCb && !hasErrorCb) return ev::null();
-            return fail(data.error.empty() ? "decodeAudioData: failed to decode audio" : data.error);
-        }
-
-        auto* e = getAudioEngine();
-        int engRate = e ? e->sampleRate() : 44100;
-        std::vector<float> samples;
-        int numFrames = data.numFrames;
-        if (data.sampleRate > 0 && data.sampleRate != engRate && data.channels > 0) {
-            samples = broaudio::resample(data.samples.data(), data.numFrames, data.channels, data.sampleRate, engRate);
-            numFrames = static_cast<int>(samples.size() / data.channels);
-        } else {
-            samples = std::move(data.samples);
-        }
-
-        ev::Persistent bufVal(makeAudioBufferValue(data.channels, numFrames, engRate));
-        HostAudioBuffer* hostBuf = hostAudioBufferOf(bufVal.get());
-        if (hostBuf && numFrames > 0 && data.channels > 0) {
-            hostBuf->channels.resize(data.channels, std::vector<float>(numFrames, 0.0f));
-            for (int c = 0; c < data.channels; ++c) {
-                for (int i = 0; i < numFrames; ++i) {
-                    hostBuf->channels[c][i] = samples[i * data.channels + c];
-                }
-            }
-        }
-
-        ev::Persistent samplesArr(makeFloat32Array(samples));
-        // The AudioDecodedBuffer fields, on the AudioBuffer and (for the
-        // synchronous `ctx.decodeAudioData(bytes).samples` form) on the
-        // promise itself.
-        auto decorate = [&](ev::Persistent& target) {
-            target.set(ev::setProperty(target.get(), "samples", samplesArr.get()));
-            target.set(ev::setProperty(target.get(), "channels", ev::fromDouble(data.channels)));
-            target.set(ev::setProperty(target.get(), "sampleRate", ev::fromDouble(engRate)));
-            target.set(ev::setProperty(target.get(), "numFrames", ev::fromDouble(numFrames)));
-        };
-        decorate(bufVal);
-        decorate(p);
-
-        if (hasSuccessCb) {
-            const Value arg = bufVal.get();
-            ev::call(a[1], ev::undefined(), std::span<const Value>(&arg, 1));
-        }
-        ev::resolvePromise(p.get(), bufVal.get());
-        return p.get();
     });
 
     b.def("decodeAudioFile", 1, [](Value, std::span<const Value> a) -> Value {
@@ -832,6 +853,10 @@ void installAudioGlobals() {
         },
         decorateChannelMergerNodeProto);
     g_channelMergerNodeClass.inherit(g_audioNodeClass);
+
+    // 14b. OfflineAudioContext and the nodes only it makes
+    // (host_audio_offline.cpp).
+    installOfflineAudioGlobals();
 
     // 15. PeriodicWave
     g_periodicWaveClass.install("PeriodicWave", 0,

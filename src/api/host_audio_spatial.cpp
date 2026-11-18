@@ -250,8 +250,10 @@ Value makeStereoPannerNodeValue() {
 // chain is AudioDestinationNode.prototype -> AudioNode.prototype (connect and
 // disconnect stay the single base methods the class check pins).
 void decorateAudioDestinationNodeProto(ObjectBuilder& b) {
-    b.accessor("maxChannelCount", [](Value, std::span<const Value>) {
-        return ev::fromDouble(2.0);
+    b.accessor("maxChannelCount", [](Value self_, std::span<const Value>) {
+        // An offline context's destination has the context's channels.
+        HostAudioNode* n = hostAudioNodeOf(self_);
+        return ev::fromDouble(n && n->offline ? n->channelCount : 2.0);
     }, nullptr);
 }
 

@@ -312,6 +312,7 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
                    HostAudioBufferSourceNode* src = bufSrcOf(self_);
                    if (!src) return ev::undefined();
                    src->loop = boolAt(a, 0);
+                   if (src->base.offline) return ev::undefined();
                    auto* e = getAudioEngine();
                    if (e && src->playbackId >= 0) {
                        e->setPlaybackLoop(src->playbackId, src->loop);
@@ -350,9 +351,9 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
     b.def("start", 3, [](Value thisValue, std::span<const Value> a) -> Value {
         HostAudioBufferSourceNode* src = bufSrcOf(thisValue);
         if (!src) return ev::undefined();
-        auto* e = getAudioEngine();
-        if (!e) return ev::undefined();
-        if (src->started) return ev::throwError("AudioBufferSourceNode cannot be started more than once");
+        auto* e = src->base.offline ? nullptr : getAudioEngine();
+        if (!e && !src->base.offline) return ev::undefined();
+        if (src->started) return throwInvalidStateError("AudioBufferSourceNode cannot be started more than once");
 
         // start(when = 0, offset = 0, duration): seconds, as Web Audio
         // defines them -- `when` on the context clock (past = now), `offset`
@@ -368,6 +369,13 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
             return ev::throwRangeError("start: duration must be a non-negative number");
         }
         src->started = true;
+        if (src->base.offline) {
+            // An offline context's render plays it (host_audio_offline_graph.cpp).
+            src->startTime = when;
+            src->startOffset = offset;
+            src->startDuration = hasDuration ? duration : -1.0;
+            return ev::undefined();
+        }
 
         // Every getProperty below may allocate: the node and its buffer are
         // read back through Persistents, never through a held Value.
@@ -598,6 +606,11 @@ void decorateAudioBufferSourceNodeProto(ObjectBuilder& b) {
         }
         const double when = hasArg(a, 0) ? numAt(a, 0) : 0.0;
         if (!(when >= 0.0)) return ev::throwRangeError("stop: when must be a non-negative number");
+        if (src->base.offline) {
+            src->stopTime = when;
+            src->stopped = true;
+            return ev::undefined();
+        }
         auto* e = getAudioEngine();
         if (e && src->playbackId >= 0) e->stopPlaybackAt(src->playbackId, when);
         src->stopped = true;
@@ -611,6 +624,8 @@ Value makeAudioBufferSourceNodeValue() {
 
     src->playbackRateParam = makeAudioParam(AudioParamTarget::PlaybackRate, -1, 1.0f, 0.0f, 1024.0f, 1.0f);
     src->detuneParam = makeAudioParam(AudioParamTarget::PlaybackDetune, -1, 0.0f, -153600.0f, 153600.0f, 0.0f);
+    src->playbackRateParam->kRate = true;
+    src->detuneParam->kRate = true;
 
     ObjectBuilder b(g_audioBufferSourceNodeClass.make(src, hostAudioBufferSourceDtor));
     b.set("playbackRate", makeAudioParamValue(src->playbackRateParam));

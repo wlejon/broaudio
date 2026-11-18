@@ -10,6 +10,9 @@ set(BROAUDIO_API_SOURCES
     host_audio_spatial.cpp
     host_audio_buffer.cpp
     host_audio_dsp.cpp
+    host_audio_offline.cpp
+    host_audio_offline_graph.cpp
+    host_audio_offline_kernels.cpp
     host_audio_synth.cpp
     host_audio_clips.cpp
     host_audio_playback.cpp

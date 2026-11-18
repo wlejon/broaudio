@@ -333,8 +333,23 @@ void decorateAudioNodeProto(ObjectBuilder& b) {
         }
         ev::Persistent self(self_);
         HostAudioNode* node = hostAudioNodeOf(self.get());
+        const bool toParam = hostAudioParamOf(target.get()) != nullptr;
         if (node) {
+            const uint32_t output = hasArg(a, 1) ? saturateU32(numAt(a, 1)) : 0;
+            const uint32_t input = hasArg(a, 2) && !toParam ? saturateU32(numAt(a, 2)) : 0;
+            const uint32_t port = (std::min<uint32_t>(output, 0xffff) << 16) | std::min<uint32_t>(input, 0xffff);
+            // The same edge twice is one edge.
+            std::vector<ev::Persistent> existing = connectTargetsOf(self.get());
+            node->targetPorts.resize(existing.size(), 0);
+            for (size_t i = 0; i < existing.size(); ++i) {
+                if (node->targetPorts[i] == port && sameNode(existing[i].get(), target.get()))
+                    return toParam ? ev::undefined() : target.get();
+            }
             appendConnectTarget(self, target);
+            node->targetPorts.push_back(port);
+            // An offline context's graph is rendered from these edges alone
+            // (host_audio_offline_graph.cpp); nothing in the engine changes.
+            if (node->offline) return toParam ? ev::undefined() : target.get();
             auto* eng = getAudioEngine();
             const double now = eng ? eng->currentTime() : 0.0;
             switch (node->nodeType) {
@@ -364,28 +379,45 @@ void decorateAudioNodeProto(ObjectBuilder& b) {
                 if (HostAudioNode* destNode = hostAudioNodeOf(target.get())) driveMasterEffect(*eng, destNode, now);
             }
         }
-        return target.get();
+        return toParam ? ev::undefined() : target.get();
     });
 
     b.def("disconnect", 1, [](Value self_, std::span<const Value> a) -> Value {
         ev::Persistent self(self_);
         HostAudioNode* node = hostAudioNodeOf(self.get());
         if (node) {
+            // disconnect(), disconnect(output), disconnect(destination
+            // [, output [, input]]).
             const bool all = a.empty() || ev::isUndefined(a[0]);
-            ev::Persistent target(all ? ev::undefined() : a[0]);
+            const bool byOutput = !all && ev::isNumber(a[0]);
+            ev::Persistent target(all || byOutput ? ev::undefined() : a[0]);
+            const bool hasOut = byOutput || hasArg(a, 1);
+            const uint32_t output = byOutput ? saturateU32(numAt(a, 0)) : hasArg(a, 1) ? saturateU32(numAt(a, 1)) : 0;
+            const bool hasIn = !byOutput && hasArg(a, 2);
+            const uint32_t input = hasIn ? saturateU32(numAt(a, 2)) : 0;
+            std::vector<ev::Persistent> targets = connectTargetsOf(self.get());
+            node->targetPorts.resize(targets.size(), 0);
             std::vector<ev::Persistent> kept;
-            for (auto& t : connectTargetsOf(self.get())) {
-                if (all || sameNode(t.get(), target.get())) {
-                    if (HostAnalyserNode* an = analyserOf(t.get())) an->hasConnectedInput = false;
+            std::vector<uint32_t> keptPorts;
+            for (size_t i = 0; i < targets.size(); ++i) {
+                const uint32_t port = node->targetPorts[i];
+                const bool match = all || ((byOutput || sameNode(targets[i].get(), target.get())) &&
+                                           (!hasOut || (port >> 16) == output) &&
+                                           (!hasIn || (port & 0xffff) == input));
+                if (match) {
+                    if (HostAnalyserNode* an = analyserOf(targets[i].get())) an->hasConnectedInput = false;
                 } else {
-                    kept.push_back(std::move(t));
+                    kept.push_back(std::move(targets[i]));
+                    keptPorts.push_back(port);
                 }
             }
+            node->targetPorts = std::move(keptPorts);
             ev::Persistent arr(ev::makeArray(0));
             for (size_t i = 0; i < kept.size(); ++i) {
                 arr.set(ev::setElement(arr.get(), static_cast<uint32_t>(i), kept[i].get()));
             }
             ev::setProperty(self.get(), "_targets", arr.get());
+            if (node->offline) return ev::undefined();
             if (node->nodeType == AudioNodeType::BiquadFilter) {
                 if (HostBiquadFilterNode* filter = filterOf(self.get())) {
                     auto* eng = getAudioEngine();
@@ -437,14 +469,46 @@ void decorateAudioNodeProto(ObjectBuilder& b) {
         return ev::fromDouble(1.0);
     }, nullptr);
 
-    b.accessor("channelCount", [](Value, std::span<const Value>) {
-        return ev::fromDouble(2.0);
-    }, [](Value, std::span<const Value>) {
+    // The channel mixing of the node's inputs: kept on the node and followed
+    // by an offline context's render; the engine mixes as it always does.
+    b.accessor("channelCount", [](Value self_, std::span<const Value>) {
+        HostAudioNode* node = hostAudioNodeOf(self_);
+        return ev::fromDouble(node ? node->channelCount : 2.0);
+    }, [](Value self_, std::span<const Value> a) {
+        HostAudioNode* node = hostAudioNodeOf(self_);
+        if (!node) return ev::undefined();
+        const double n = numAt(a, 0);
+        if (!(n >= 1.0 && n <= 32.0)) return throwNotSupportedError("AudioNode.channelCount: out of range");
+        node->channelCount = static_cast<uint32_t>(n);
         return ev::undefined();
     });
 
-    b.set("channelCountMode", ev::fromUtf8("max"));
-    b.set("channelInterpretation", ev::fromUtf8("speakers"));
+    b.accessor("channelCountMode", [](Value self_, std::span<const Value>) {
+        HostAudioNode* node = hostAudioNodeOf(self_);
+        const uint8_t m = node ? node->channelCountMode : HostAudioNode::kModeMax;
+        return ev::fromUtf8(m == HostAudioNode::kModeExplicit ? "explicit"
+                            : m == HostAudioNode::kModeClampedMax ? "clamped-max" : "max");
+    }, [](Value self_, std::span<const Value> a) {
+        HostAudioNode* node = hostAudioNodeOf(self_);
+        if (!node || a.empty() || !ev::isString(a[0])) return ev::undefined();
+        const std::string m = ev::toUtf8(a[0]);
+        if (m == "max") node->channelCountMode = HostAudioNode::kModeMax;
+        else if (m == "clamped-max") node->channelCountMode = HostAudioNode::kModeClampedMax;
+        else if (m == "explicit") node->channelCountMode = HostAudioNode::kModeExplicit;
+        return ev::undefined();
+    });
+
+    b.accessor("channelInterpretation", [](Value self_, std::span<const Value>) {
+        HostAudioNode* node = hostAudioNodeOf(self_);
+        return ev::fromUtf8(node && node->discrete ? "discrete" : "speakers");
+    }, [](Value self_, std::span<const Value> a) {
+        HostAudioNode* node = hostAudioNodeOf(self_);
+        if (!node || a.empty() || !ev::isString(a[0])) return ev::undefined();
+        const std::string m = ev::toUtf8(a[0]);
+        if (m == "discrete") node->discrete = true;
+        else if (m == "speakers") node->discrete = false;
+        return ev::undefined();
+    });
 }
 
 Value makeGainNodeValue() {
@@ -540,6 +604,13 @@ void decorateOscillatorNodeProto(ObjectBuilder& b) {
                    HostOscillatorNode* osc = oscOf(self_);
                    if (!osc || a.empty() || ev::isObject(a[0]) || ev::isUndefined(a[0])) return ev::undefined();
                    std::string t = ev::toUtf8(a[0]);
+                   if (osc->base.offline) {
+                       // Web Audio's four, and 'custom' only through setPeriodicWave.
+                       if (t == "custom") return throwInvalidStateError("OscillatorNode.type: 'custom' is set by setPeriodicWave");
+                       if (t != "sine" && t != "square" && t != "sawtooth" && t != "triangle") return ev::undefined();
+                       osc->type = t;
+                       return ev::undefined();
+                   }
                    osc->type = t;
                    auto* eng = getAudioEngine();
                    if (eng && osc->voiceId >= 0) {
@@ -559,6 +630,10 @@ void decorateOscillatorNodeProto(ObjectBuilder& b) {
             return ev::throwRangeError("OscillatorNode.start: when must be a non-negative number");
         }
         osc->started = true;
+        if (osc->base.offline) {
+            osc->startTime = hasArg(a, 0) ? numAt(a, 0) : osc->frequencyParam->now();
+            return ev::undefined();
+        }
         auto* eng = getAudioEngine();
         if (!eng || osc->voiceId < 0) return ev::undefined();
         double when = hasArg(a, 0) ? numAt(a, 0) : eng->currentTime();
@@ -618,6 +693,10 @@ void decorateOscillatorNodeProto(ObjectBuilder& b) {
             return ev::throwRangeError("OscillatorNode.stop: when must be a non-negative number");
         }
         osc->stopped = true;
+        if (osc->base.offline) {
+            osc->stopTime = hasArg(a, 0) ? numAt(a, 0) : osc->frequencyParam->now();
+            return ev::undefined();
+        }
         auto* eng = getAudioEngine();
         if (eng && osc->voiceId >= 0) {
             double when = hasArg(a, 0) ? numAt(a, 0) : eng->currentTime();
@@ -637,6 +716,10 @@ void decorateOscillatorNodeProto(ObjectBuilder& b) {
         HostPeriodicWave* pw = hostPeriodicWaveOf(a[0]);
         if (!pw) return ev::throwTypeError("setPeriodicWave: expected PeriodicWave");
         osc->type = "custom";
+        osc->waveReal = pw->real;
+        osc->waveImag = pw->imag;
+        osc->waveNormalize = !pw->disableNormalization;
+        if (osc->base.offline) return ev::undefined();
         auto* eng = getAudioEngine();
         if (eng && osc->voiceId >= 0 && pw->wavetable) {
             eng->setWaveform(osc->voiceId, broaudio::Waveform::Wavetable);
@@ -650,7 +733,8 @@ Value makeOscillatorNodeValue() {
     auto* osc = new HostOscillatorNode();
     osc->base.nodeType = AudioNodeType::Oscillator;
 
-    auto* eng = getAudioEngine();
+    const bool offline = offlineCreationClock() != nullptr;
+    auto* eng = offline ? nullptr : getAudioEngine();
     if (eng) {
         osc->voiceId = eng->createVoice();
         eng->setWaveform(osc->voiceId, broaudio::Waveform::Sine);
@@ -666,14 +750,16 @@ Value makeOscillatorNodeValue() {
     // The voice's frequency, gain and pan are functions of these params (and,
     // once started, of the params on its path): live from creation, so a set
     // before start() reaches the voice as one after it does.
-    osc->live = std::make_shared<LiveSource>();
-    osc->live->kind = LiveSource::Kind::Voice;
-    osc->live->id = voiceId;
-    osc->live->pitch = osc->frequencyParam;
-    osc->live->detune = osc->detuneParam;
-    osc->live->ownGain = osc->gainParam;
-    osc->live->ownPan = osc->panParam;
-    registerLiveSource(osc->live);
+    if (!offline) {
+        osc->live = std::make_shared<LiveSource>();
+        osc->live->kind = LiveSource::Kind::Voice;
+        osc->live->id = voiceId;
+        osc->live->pitch = osc->frequencyParam;
+        osc->live->detune = osc->detuneParam;
+        osc->live->ownGain = osc->gainParam;
+        osc->live->ownPan = osc->panParam;
+        registerLiveSource(osc->live);
+    }
 
     ObjectBuilder b(g_oscillatorNodeClass.make(osc, hostOscillatorDtor));
     b.set("frequency", makeAudioParamValue(osc->frequencyParam));
@@ -857,7 +943,8 @@ Value makeBiquadFilterNodeValue() {
     auto* filter = new HostBiquadFilterNode();
     filter->base.nodeType = AudioNodeType::BiquadFilter;
 
-    auto* eng = getAudioEngine();
+    const bool offline = offlineCreationClock() != nullptr;
+    auto* eng = offline ? nullptr : getAudioEngine();
     if (eng) {
         filter->slot = eng->allocateFilterSlot();
         if (filter->slot < 0) {
@@ -881,12 +968,14 @@ Value makeBiquadFilterNodeValue() {
 
     // The slot's cutoff is the computed frequency, frequency * 2^(detune /
     // 1200), recomputed whenever either param moves (host_audio_live.cpp).
-    filter->live = std::make_shared<LiveFilter>();
-    filter->live->slot = filter->slot;
-    filter->live->frequency = filter->frequencyParam;
-    filter->live->detune = filter->detuneParam;
-    filter->live->lastFrequency = 350.0f;
-    registerLiveFilter(filter->live);
+    if (!offline) {
+        filter->live = std::make_shared<LiveFilter>();
+        filter->live->slot = filter->slot;
+        filter->live->frequency = filter->frequencyParam;
+        filter->live->detune = filter->detuneParam;
+        filter->live->lastFrequency = 350.0f;
+        registerLiveFilter(filter->live);
+    }
 
     ObjectBuilder b(g_biquadFilterNodeClass.make(filter, hostBiquadFilterDtor));
     b.set("frequency", makeAudioParamValue(filter->frequencyParam));

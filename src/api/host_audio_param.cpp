@@ -135,6 +135,12 @@ float HostAudioParam::evaluate(double t) const {
     return std::clamp(curVal, minValue, maxValue);
 }
 
+double HostAudioParam::now() const {
+    if (clock) return clock->time;
+    auto* e = getAudioEngine();
+    return e ? e->currentTime() : 0.0;
+}
+
 void HostAudioParam::addSetValue(float val, double startTime) {
     if (!std::isfinite(val) || !std::isfinite(startTime)) return;
     ParamTimelineEvent ev;
@@ -150,9 +156,7 @@ void HostAudioParam::addSetValue(float val, double startTime) {
 void HostAudioParam::addLinearRamp(float val, double endTime) {
     if (!std::isfinite(val) || !std::isfinite(endTime)) return;
     if (timeline.empty()) {
-        auto* e = getAudioEngine();
-        double curTime = e ? e->currentTime() : 0.0;
-        addSetValue(value, curTime);
+        addSetValue(value, now());
     }
     ParamTimelineEvent ev;
     ev.type = ParamEventType::LinearRamp;
@@ -167,9 +171,7 @@ void HostAudioParam::addLinearRamp(float val, double endTime) {
 void HostAudioParam::addExponentialRamp(float val, double endTime) {
     if (!std::isfinite(val) || !std::isfinite(endTime)) return;
     if (timeline.empty()) {
-        auto* e = getAudioEngine();
-        double curTime = e ? e->currentTime() : 0.0;
-        addSetValue(value, curTime);
+        addSetValue(value, now());
     }
     ParamTimelineEvent ev;
     ev.type = ParamEventType::ExponentialRamp;
@@ -184,9 +186,7 @@ void HostAudioParam::addExponentialRamp(float val, double endTime) {
 void HostAudioParam::addSetTarget(float target, double startTime, float timeConstant) {
     if (!std::isfinite(target) || !std::isfinite(startTime) || !std::isfinite(timeConstant)) return;
     if (timeline.empty()) {
-        auto* e = getAudioEngine();
-        double curTime = e ? e->currentTime() : 0.0;
-        addSetValue(value, curTime);
+        addSetValue(value, now());
     }
     ParamTimelineEvent ev;
     ev.type = ParamEventType::SetTarget;
@@ -234,9 +234,7 @@ void decorateAudioParamProto(ObjectBuilder& b) {
                    ParamRef p = hostAudioParamRef(self_);
                    if (!p) return ev::undefined();
                    if (p->timeline.empty()) return ev::fromDouble(p->value);
-                   auto* e = getAudioEngine();
-                   double t = e ? e->currentTime() : 0.0;
-                   return ev::fromDouble(p->evaluate(t));
+                   return ev::fromDouble(p->evaluate(p->now()));
                },
                [](Value self_, std::span<const Value> a) {
                    ParamRef p = hostAudioParamRef(self_);
@@ -355,6 +353,12 @@ void decorateAudioParamProto(ObjectBuilder& b) {
 ParamRef makeAudioParam(AudioParamTarget target, int targetId,
                         float initialVal, float minVal, float maxVal, float defaultVal) {
     auto param = std::make_shared<HostAudioParam>();
+    // An offline context's param drives no engine state: its render reads it.
+    if (auto clock = offlineCreationClock()) {
+        target = AudioParamTarget::Generic;
+        targetId = -1;
+        param->clock = std::move(clock);
+    }
     param->target = target;
     param->targetId = targetId;
     param->value = initialVal;

@@ -71,17 +71,17 @@ inline bool boolAt(std::span<const Value> args, size_t i) {
     return ev::toBool(args[i]);
 }
 
-// Throw Web Audio's InvalidStateError: a DOMException when the realm has
-// the constructor (bro installs one), otherwise an Error whose name is
-// 'InvalidStateError'. Returns undefined with the exception pending, for a
-// native to return straight away.
-inline Value throwInvalidStateError(const std::string& message) {
+// Throw a DOMException named `name` (InvalidStateError, NotSupportedError,
+// IndexSizeError, ...): a DOMException when the realm has the constructor
+// (bro installs one), otherwise an Error with that name. Returns undefined
+// with the exception pending, for a native to return straight away.
+inline Value throwDomException(const char* name, const std::string& message) {
     ev::GlobalValue dom = ev::globalValue("DOMException");
     if (dom.found && ev::isFunction(dom.value)) {
         ev::Persistent ctor(dom.value);
         ev::Persistent msg(ev::fromUtf8(message));
-        ev::Persistent name(ev::fromUtf8("InvalidStateError"));
-        const Value args[2] = {msg.get(), name.get()};
+        ev::Persistent nameV(ev::fromUtf8(name));
+        const Value args[2] = {msg.get(), nameV.get()};
         ev::CallResult r = ev::construct(ctor.get(), std::span<const Value>(args, 2));
         if (!r.thrown) {
             ev::throwValue(r.value);
@@ -95,10 +95,18 @@ inline Value throwInvalidStateError(const std::string& message) {
     ev::CallResult r = ev::construct(ctor.get(), std::span<const Value>(&arg, 1));
     if (r.thrown) return ev::throwError(message);
     ev::Persistent err(r.value);
-    ev::Persistent name(ev::fromUtf8("InvalidStateError"));
-    ev::setProperty(err.get(), "name", name.get());
+    ev::Persistent nameV(ev::fromUtf8(name));
+    ev::setProperty(err.get(), "name", nameV.get());
     ev::throwValue(err.get());
     return ev::undefined();
+}
+
+inline Value throwInvalidStateError(const std::string& message) {
+    return throwDomException("InvalidStateError", message);
+}
+
+inline Value throwNotSupportedError(const std::string& message) {
+    return throwDomException("NotSupportedError", message);
 }
 
 inline bool hasArg(std::span<const Value> args, size_t i) {

@@ -122,6 +122,7 @@ void applyDirectTarget(broaudio::Engine& e, const HostAudioParam& p, float v) {
 
 void syncAudioParamValue(HostAudioParam* p, float val) {
     p->value = std::clamp(val, p->minValue, p->maxValue);
+    if (p->clock) return;  // an offline context's: its render reads it
     auto* e = getAudioEngine();
     if (!e) return;
     applyDirectTarget(*e, *p, p->value);
@@ -129,7 +130,7 @@ void syncAudioParamValue(HostAudioParam* p, float val) {
 }
 
 void paramTimelineChanged(const ParamRef& p) {
-    if (!p) return;
+    if (!p || p->clock) return;
     if (!p->timeline.empty()) noteAutomatedParam(p);
     auto* e = getAudioEngine();
     if (!e) return;

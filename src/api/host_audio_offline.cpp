@@ -118,7 +118,10 @@ void renderStep(const ev::Persistent& ctx) {
         ev::Persistent evt(g_offlineCompletionEventClass.make(new HostCompletionEvent(), [](void* p) {
             delete static_cast<HostCompletionEvent*>(p);
         }));
-        ev::setProperty(evt.get(), "type", ev::fromUtf8("complete"));
+        {
+            ev::Persistent typeStr(ev::fromUtf8("complete"));
+            ev::setProperty(evt.get(), "type", typeStr.get());
+        }
         ev::setProperty(evt.get(), "renderedBuffer", buffer.get());
         ev::setProperty(evt.get(), "target", target.get());
         ev::setProperty(evt.get(), "currentTarget", target.get());
@@ -298,8 +301,14 @@ Value constructOfflineContext(std::span<const Value> a) {
     c->render.sampleRate = std::floor(rate);
     c->render.clock = std::make_shared<OfflineClock>();
     ev::Persistent ctx(g_offlineAudioContextClass.make(c, [](void* p) { delete static_cast<HostOfflineContext*>(p); }));
-    ev::setProperty(ctx.get(), "_nodes", ev::makeArray(0));
-    ev::setProperty(ctx.get(), "_suspends", ev::createObject());
+    {
+        ev::Persistent nodes(ev::makeArray(0));
+        ev::setProperty(ctx.get(), "_nodes", nodes.get());
+    }
+    {
+        ev::Persistent suspends(ev::createObject());
+        ev::setProperty(ctx.get(), "_suspends", suspends.get());
+    }
     {
         OfflineNodeScope scope(ctx.get());
         ev::Persistent dest(makeDestinationNodeValue());

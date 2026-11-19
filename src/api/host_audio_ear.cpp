@@ -214,8 +214,9 @@ Value measureFn(Value, std::span<const Value> a) {
     if (a.empty()) return ev::throwTypeError("bro.ear.measure(clip, opts?): clip is required");
     ev::Persistent clip(a[0]);
     ev::Persistent opts(a.size() > 1 ? a[1] : ev::undefined());
+    const double rate = optRate(opts.get());
     ClipArg c;
-    if (!readClip(clip.get(), optRate(opts.get()), "bro.ear.measure", c)) return ev::undefined();
+    if (!readClip(clip.get(), rate, "bro.ear.measure", c)) return ev::undefined();
     ear::MeasureOptions o;
     if (ev::isObject(opts.get())) {
         double d;

@@ -860,6 +860,7 @@ static void decorateSequenceProto(ObjectBuilder& b) {
         auto* h = hostSequenceOf(self);
         if (!h || !h->seq || a.empty() || !ev::isFunction(a[0])) return ev::fromDouble(-1);
         ev::Persistent seqObj(self);
+        ev::Persistent cb(a[0]);
         int laneIdx = h->seq->automationLaneCount();
         int key = h->nextLaneKey++;
         ev::Persistent cbs(ev::getProperty(seqObj.get(), "_laneCbs"));
@@ -867,7 +868,7 @@ static void decorateSequenceProto(ObjectBuilder& b) {
             cbs.set(ev::createObject());
             ev::setProperty(seqObj.get(), "_laneCbs", cbs.get());
         }
-        ev::setProperty(cbs.get(), sequenceLaneKey(key), a[0]);
+        ev::setProperty(cbs.get(), sequenceLaneKey(key), cb.get());
         h->laneKeys.push_back(key);
         h->seq->addAutomationLane([key](float val) { callLaneCallback(key, val); });
         return ev::fromDouble(laneIdx);

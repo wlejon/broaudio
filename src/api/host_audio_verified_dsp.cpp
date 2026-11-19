@@ -98,9 +98,9 @@ bool extractKernelSourceAndOptions(
             std::string nm = ev::toUtf8(nameVal);
             if (!nm.empty()) outOpts.name = nm;
         }
-        Value toStrFn = ev::getProperty(fnObj.get(), "toString");
-        if (ev::isFunction(toStrFn)) {
-            auto r = ev::call(toStrFn, fnObj.get(), {});
+        ev::Persistent toStrFn(ev::getProperty(fnObj.get(), "toString"));
+        if (ev::isFunction(toStrFn.get())) {
+            auto r = ev::call(toStrFn.get(), fnObj.get(), {});
             if (!r.thrown && r.value.isString()) {
                 outSource = ev::toUtf8(r.value);
             }

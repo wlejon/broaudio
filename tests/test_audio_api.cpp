@@ -85,20 +85,21 @@ static void test_context_direct() {
         }
     }
 
-    Value createGain = ev::getProperty(ctx.get(), "createGain");
-    ev::CallResult gainRes = ev::call(createGain, ctx.get(), {});
+    ev::Persistent createGain(ev::getProperty(ctx.get(), "createGain"));
+    ev::CallResult gainRes = ev::call(createGain.get(), ctx.get(), {});
     TEST_CHECK(!gainRes.thrown);
     TEST_CHECK(ev::isObject(gainRes.value));
     ev::Persistent gain(gainRes.value);
     TEST_CHECK(ev::isObject(ev::getProperty(gain.get(), "gain")));
     TEST_CHECK(ev::isFunction(ev::getProperty(gain.get(), "connect")));
     TEST_CHECK(ev::isFunction(ev::getProperty(gain.get(), "disconnect")));
-    Value gainValue = ev::getProperty(ev::getProperty(gain.get(), "gain"), "value");
+    ev::Persistent gainProp(ev::getProperty(gain.get(), "gain"));
+    Value gainValue = ev::getProperty(gainProp.get(), "value");
     TEST_CHECK(ev::isNumber(gainValue));
     TEST_CHECK(ev::toDouble(gainValue) == 1.0);
 
-    Value createOsc = ev::getProperty(ctx.get(), "createOscillator");
-    ev::CallResult oscRes = ev::call(createOsc, ctx.get(), {});
+    ev::Persistent createOsc(ev::getProperty(ctx.get(), "createOscillator"));
+    ev::CallResult oscRes = ev::call(createOsc.get(), ctx.get(), {});
     TEST_CHECK(!oscRes.thrown);
     TEST_CHECK(ev::isObject(oscRes.value));
     ev::Persistent osc(oscRes.value);
@@ -108,36 +109,38 @@ static void test_context_direct() {
     TEST_CHECK(ev::isFunction(ev::getProperty(osc.get(), "start")));
     TEST_CHECK(ev::isFunction(ev::getProperty(osc.get(), "stop")));
     TEST_CHECK(ev::isFunction(ev::getProperty(osc.get(), "connect")));
-    Value freqValue = ev::getProperty(ev::getProperty(osc.get(), "frequency"), "value");
+    ev::Persistent freqProp(ev::getProperty(osc.get(), "frequency"));
+    Value freqValue = ev::getProperty(freqProp.get(), "value");
     TEST_CHECK(ev::isNumber(freqValue));
     TEST_CHECK(ev::toDouble(freqValue) == 440.0);
 
     // connect chain: osc -> gain -> destination, each returning its argument.
-    Value connectOsc = ev::getProperty(osc.get(), "connect");
+    ev::Persistent connectOsc(ev::getProperty(osc.get(), "connect"));
     Value gainArg = gain.get();
-    ev::CallResult c1 = ev::call(connectOsc, osc.get(), std::span<const Value>(&gainArg, 1));
+    ev::CallResult c1 = ev::call(connectOsc.get(), osc.get(), std::span<const Value>(&gainArg, 1));
     TEST_CHECK(!c1.thrown);
     TEST_CHECK(ev::isObject(c1.value));
-    Value connectGain = ev::getProperty(gain.get(), "connect");
-    Value destArg = ev::getProperty(ctx.get(), "destination");
-    ev::CallResult c2 = ev::call(connectGain, gain.get(), std::span<const Value>(&destArg, 1));
+    ev::Persistent connectGain(ev::getProperty(gain.get(), "connect"));
+    ev::Persistent destArg(ev::getProperty(ctx.get(), "destination"));
+    Value destArgVal = destArg.get();
+    ev::CallResult c2 = ev::call(connectGain.get(), gain.get(), std::span<const Value>(&destArgVal, 1));
     TEST_CHECK(!c2.thrown);
 
     // createBus() hands back a bus index.
-    Value createBus = ev::getProperty(ctx.get(), "createBus");
-    TEST_CHECK(ev::isFunction(createBus));
-    ev::CallResult busRes = ev::call(createBus, ctx.get(), {});
+    ev::Persistent createBus(ev::getProperty(ctx.get(), "createBus"));
+    TEST_CHECK(ev::isFunction(createBus.get()));
+    ev::CallResult busRes = ev::call(createBus.get(), ctx.get(), {});
     TEST_CHECK(!busRes.thrown);
     TEST_CHECK(ev::isNumber(busRes.value));
     TEST_CHECK(ev::toDouble(busRes.value) >= 0.0);
 
     // Bad arguments throw TypeError rather than silently succeeding.
-    ev::CallResult badConnect = ev::call(connectGain, gain.get(), {});
+    ev::CallResult badConnect = ev::call(connectGain.get(), gain.get(), {});
     TEST_CHECK(badConnect.thrown);
     TEST_CHECK(errorName(badConnect.value) == "TypeError");
 
-    Value bufCtor = ev::globalValue("AudioBuffer").value;
-    ev::CallResult badBuf = ev::construct(bufCtor, {});
+    ev::Persistent bufCtor(ev::globalValue("AudioBuffer").value);
+    ev::CallResult badBuf = ev::construct(bufCtor.get(), {});
     TEST_CHECK(badBuf.thrown);
     TEST_CHECK(errorName(badBuf.value) == "TypeError");
 }

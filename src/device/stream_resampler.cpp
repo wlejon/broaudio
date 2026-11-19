@@ -15,8 +15,16 @@ std::unique_ptr<StreamResampler> StreamResampler::create(int channels, int srcRa
     src.format = SDL_AUDIO_F32; src.channels = channels; src.freq = srcRate;
     dst.format = SDL_AUDIO_F32; dst.channels = channels; dst.freq = dstRate;
     // SDL_CreateAudioStream needs no SDL_Init: it is a plain converter.
+    // Opt out of SDL 3.4+'s auto-cleanup so SDL_QuitSubSystem(SDL_INIT_AUDIO)
+    // cannot free this stream out from under StreamResampler (e.g. a MicTap
+    // still awaiting RCU reclamation or a backend reopen).
     SDL_AudioStream* s = SDL_CreateAudioStream(&src, &dst);
     if (!s) return nullptr;
+#ifdef SDL_PROP_AUDIOSTREAM_AUTO_CLEANUP_BOOLEAN
+    if (SDL_PropertiesID props = SDL_GetAudioStreamProperties(s)) {
+        SDL_SetBooleanProperty(props, SDL_PROP_AUDIOSTREAM_AUTO_CLEANUP_BOOLEAN, false);
+    }
+#endif
     std::unique_ptr<StreamResampler> r(new StreamResampler());
     r->stream_ = s;
     r->frameBytes_ = channels * static_cast<int>(sizeof(float));

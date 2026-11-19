@@ -35,6 +35,7 @@ int Engine::createBus()
     bus->initAudioState(sampleRate_, MAX_SCRATCH_FRAMES);
     bus->jitPipeline.setDomain(rcu_);
     bus->convolver.setDomain(rcu_);
+    bus->customDspProcessor.setDomain(rcu_);
     syncBusJitTopology(*bus);
 
     auto newList = std::make_shared<BusList>(*buses_.load());

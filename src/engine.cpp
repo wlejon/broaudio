@@ -62,6 +62,7 @@ bool Engine::init(const AudioDeviceConfig& config)
         master->initAudioState(sampleRate_, MAX_SCRATCH_FRAMES);
         master->jitPipeline.setDomain(rcu_);
         master->convolver.setDomain(rcu_);
+        master->customDspProcessor.setDomain(rcu_);
         syncBusJitTopology(*master);
 
         auto list = std::make_shared<BusList>();
@@ -121,6 +122,7 @@ bool Engine::reopenDevice()
     stopMicCapture();
     if (outStream_) outStream_->stop();
     outStream_.reset();
+    rcu_.reclaim();
     backend_.reset();
 
     std::string error;
@@ -206,7 +208,9 @@ bool Engine::initHeadless()
         master->id = MASTER_BUS_ID;
         master->parentId.store(-1, std::memory_order_relaxed);
         master->initAudioState(sampleRate_, MAX_SCRATCH_FRAMES);
+        master->jitPipeline.setDomain(rcu_);
         master->convolver.setDomain(rcu_);
+        master->customDspProcessor.setDomain(rcu_);
 
         auto list = std::make_shared<BusList>();
         list->push_back(std::move(master));
@@ -352,6 +356,11 @@ void Engine::shutdown()
     // Stop before destroying: once stop() returns no callback is running.
     if (outStream_) outStream_->stop();
     outStream_.reset();
+    // Drop active mic taps and reclaim retired RCU snapshots (which may own
+    // StreamResampler / SDL_AudioStream instances) before tearing down the
+    // backend (SdlBackend calls SDL_QuitSubSystem(SDL_INIT_AUDIO)).
+    micTaps_.store(std::make_shared<const MicTapList>());
+    rcu_.reclaim();
     backend_.reset();
     initialized_ = false;
 }

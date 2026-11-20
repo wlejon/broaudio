@@ -6,8 +6,6 @@
 #include <brass/mir/builder.hpp>
 #include <brass/mir/module.hpp>
 #include <brass/mir/printer.hpp>
-#include <brass/mir/smt_guard_elim.hpp>
-#include <brass/mir/superopt.hpp>
 #include <brass/mir/types.hpp>
 
 #include <cstddef>
@@ -268,9 +266,7 @@ std::shared_ptr<brass::codegen::KernelFunction> buildBusKernel(const JitTopology
     using namespace brass::codegen;
 
     Module mod("bus_jit_module");
-    Function* fn = buildBusKernelMir(topology, mod);
-    brass::run_smt_guard_elimination(*fn, mod);
-    brass::run_mir_superopt(*fn, mod);
+    buildBusKernelMir(topology, mod);
     mod.set_allow_fp_reassociation(true);
 
     KernelOptions opts = KernelOptions::audio_realtime();

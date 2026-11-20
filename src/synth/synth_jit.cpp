@@ -21,8 +21,6 @@
 #include <brass/codegen/kernel_jit.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/module.hpp>
-#include <brass/mir/smt_guard_elim.hpp>
-#include <brass/mir/superopt.hpp>
 #include <brass/mir/types.hpp>
 #endif
 
@@ -276,9 +274,7 @@ void* buildSynthKernel(const LayerPlan& plan, std::shared_ptr<void>& keepAlive)
 {
     using namespace brass::codegen;
     Module mod("synth_layer_module");
-    Function* fn = buildSynthLayerMir(plan, mod);
-    brass::run_smt_guard_elimination(*fn, mod);
-    brass::run_mir_superopt(*fn, mod);
+    buildSynthLayerMir(plan, mod);
 
     KernelOptions opts = KernelOptions::audio_realtime();
     // Bit-exact with the interpreter: no contraction, no reassociation.

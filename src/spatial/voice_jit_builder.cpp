@@ -15,8 +15,6 @@
 #include <brass/codegen/kernel_jit.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/module.hpp>
-#include <brass/mir/smt_guard_elim.hpp>
-#include <brass/mir/superopt.hpp>
 #include <brass/mir/types.hpp>
 #endif
 
@@ -308,9 +306,7 @@ std::shared_ptr<brass::codegen::KernelFunction> compileKernel(Emit&& emit)
 {
     using namespace brass::codegen;
     Module mod("voice_jit_module");
-    Function* fn = emitKernelMir(mod, std::forward<Emit>(emit));
-    brass::run_smt_guard_elimination(*fn, mod);
-    brass::run_mir_superopt(*fn, mod);
+    emitKernelMir(mod, std::forward<Emit>(emit));
 
     KernelOptions opts = KernelOptions::audio_realtime();
     // Bit-exact with the interpreter: no contraction, no reassociation.

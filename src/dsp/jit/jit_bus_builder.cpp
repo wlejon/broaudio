@@ -1,4 +1,5 @@
 #include "jit_bus_builder.h"
+#include "audio_native_cache.h"
 #include "broaudio/dsp/jit/jit_types.h"
 
 #include <brass/codegen/audio_builder.hpp>
@@ -265,14 +266,25 @@ std::shared_ptr<brass::codegen::KernelFunction> buildBusKernel(const JitTopology
     using namespace brass;
     using namespace brass::codegen;
 
-    Module mod("bus_jit_module");
-    buildBusKernelMir(topology, mod);
-    mod.set_allow_fp_reassociation(true);
-
     KernelOptions opts = KernelOptions::audio_realtime();
     opts.enable_unroll = false;
-    KernelJit jit(opts);
-    KernelFunction kfn = jit.compile(mod, "bus_jit_kernel");
+
+    brass::cache::KeyBuilder kb("broaudio.bus/1");
+    kb.add_u64("filter_count", static_cast<uint64_t>(topology.filterCount));
+    kb.add_u64("distortion_mode", static_cast<uint64_t>(topology.distortionMode));
+    kb.add_bool("has_distortion", topology.hasDistortion);
+    kb.add_bool("fuse_gain_pan", topology.fuseGainPan);
+    detail::hash_kernel_options(kb, opts);
+
+    KernelFunction kfn = detail::compile_cached_audio_kernel(
+        kb.finish(),
+        "bus_jit_module",
+        "bus_jit_kernel",
+        opts,
+        [&](brass::Module& mod) {
+            buildBusKernelMir(topology, mod);
+            mod.set_allow_fp_reassociation(true);
+        });
 
     if (!kfn.is_valid()) {
         throw std::runtime_error("buildBusKernel: JIT compilation failed to emit valid entry point");

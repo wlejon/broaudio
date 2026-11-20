@@ -17,6 +17,7 @@
 #include <unordered_map>
 
 #if BROAUDIO_HAS_JIT
+#include "../dsp/jit/audio_native_cache.h"
 #include <brass/codegen/audio_builder.hpp>
 #include <brass/codegen/kernel_jit.hpp>
 #include <brass/mir/builder.hpp>
@@ -273,16 +274,22 @@ brass::Function* buildSynthLayerMir(const LayerPlan& plan, brass::Module& mod)
 void* buildSynthKernel(const LayerPlan& plan, std::shared_ptr<void>& keepAlive)
 {
     using namespace brass::codegen;
-    Module mod("synth_layer_module");
-    buildSynthLayerMir(plan, mod);
-
     KernelOptions opts = KernelOptions::audio_realtime();
     // Bit-exact with the interpreter: no contraction, no reassociation.
     opts.enable_fma = false;
     opts.enable_fp_reassociation = false;
     opts.enable_unroll = false;
-    KernelJit jit(opts);
-    KernelFunction kfn = jit.compile(mod, "synth_layer_kernel");
+
+    brass::cache::KeyBuilder kb("broaudio.synth/1");
+    kb.add("plan_key", plan.key);
+    detail::hash_kernel_options(kb, opts);
+
+    KernelFunction kfn = detail::compile_cached_audio_kernel(
+        kb.finish(),
+        "synth_layer_module",
+        "synth_layer_kernel",
+        opts,
+        [&](brass::Module& mod) { buildSynthLayerMir(plan, mod); });
     if (!kfn.is_valid()) throw std::runtime_error("synth_jit: no entry point");
     auto k = std::make_shared<KernelFunction>(std::move(kfn));
     void* entryPoint = k->entry_point();

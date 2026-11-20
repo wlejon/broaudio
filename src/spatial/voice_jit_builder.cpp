@@ -11,6 +11,7 @@
 #include "voice_jit_builder.h"
 
 #if BROAUDIO_HAS_JIT
+#include "../dsp/jit/audio_native_cache.h"
 #include <brass/codegen/audio_builder.hpp>
 #include <brass/codegen/kernel_jit.hpp>
 #include <brass/mir/builder.hpp>
@@ -302,19 +303,21 @@ brass::Function* emitKernelMir(brass::Module& mod, Emit&& emit)
 }
 
 template <typename Emit>
-std::shared_ptr<brass::codegen::KernelFunction> compileKernel(Emit&& emit)
+std::shared_ptr<brass::codegen::KernelFunction> compileKernel(const brass::cache::CacheKey& clientKey, Emit&& emit)
 {
     using namespace brass::codegen;
-    Module mod("voice_jit_module");
-    emitKernelMir(mod, std::forward<Emit>(emit));
-
     KernelOptions opts = KernelOptions::audio_realtime();
     // Bit-exact with the interpreter: no contraction, no reassociation.
     opts.enable_fma = false;
     opts.enable_fp_reassociation = false;
     opts.enable_unroll = false;
-    KernelJit jit(opts);
-    KernelFunction kfn = jit.compile(mod, "voice_jit_kernel");
+
+    KernelFunction kfn = detail::compile_cached_audio_kernel(
+        clientKey,
+        "voice_jit_module",
+        "voice_jit_kernel",
+        opts,
+        [&](brass::Module& mod) { emitKernelMir(mod, std::forward<Emit>(emit)); });
     if (!kfn.is_valid())
         throw std::runtime_error("voice_jit: no entry point");
     return std::make_shared<KernelFunction>(std::move(kfn));
@@ -333,12 +336,33 @@ std::shared_ptr<brass::codegen::KernelFunction> buildVoiceKernel(const VoiceJitT
 {
     if (topology.source || topology.air)
         throw std::invalid_argument("buildVoiceKernel: no source or air stage in a chain kernel");
-    return compileKernel([&](Emitter& e, Value* a, Value* s, Value* n) { e.emitChain(topology, a, s, n); });
+    brass::codegen::KernelOptions opts = brass::codegen::KernelOptions::audio_realtime();
+    opts.enable_fma = false;
+    opts.enable_fp_reassociation = false;
+    opts.enable_unroll = false;
+    brass::cache::KeyBuilder kb("broaudio.voice/1");
+    kb.add("kind", "chain");
+    kb.add_u64("topology_key", topology.key());
+    detail::hash_kernel_options(kb, opts);
+    return compileKernel(kb.finish(), [&](Emitter& e, Value* a, Value* s, Value* n) {
+        e.emitChain(topology, a, s, n);
+    });
 }
 
 std::shared_ptr<brass::codegen::KernelFunction> buildAirLaneKernel()
 {
-    return compileKernel([](Emitter& e, Value* x, Value* sec, Value* n) { e.emitAir(x, sec, n); });
+    brass::codegen::KernelOptions opts = brass::codegen::KernelOptions::audio_realtime();
+    opts.enable_fma = false;
+    opts.enable_fp_reassociation = false;
+    opts.enable_unroll = false;
+    brass::cache::KeyBuilder kb("broaudio.voice/1");
+    kb.add("kind", "air");
+    kb.add_u64("air_lanes", static_cast<uint64_t>(kAirLanes));
+    kb.add_u64("air_sections", static_cast<uint64_t>(kAirSections));
+    detail::hash_kernel_options(kb, opts);
+    return compileKernel(kb.finish(), [](Emitter& e, Value* x, Value* sec, Value* n) {
+        e.emitAir(x, sec, n);
+    });
 }
 
 #else // !BROAUDIO_HAS_JIT

@@ -121,6 +121,12 @@ bool extractKernelSourceAndOptions(
         if (nameV.isString()) outOpts.name = ev::toUtf8(nameV);
         Value kNameV = ev::getProperty(opts.get(), "kernelName");
         if (kNameV.isString()) outOpts.name = ev::toUtf8(kNameV);
+        Value langV = ev::getProperty(opts.get(), "language");
+        if (langV.isString()) outOpts.language = ev::toUtf8(langV);
+        Value entryV = ev::getProperty(opts.get(), "entry");
+        if (entryV.isString()) outOpts.entryName = ev::toUtf8(entryV);
+        Value entryNameV = ev::getProperty(opts.get(), "entryName");
+        if (entryNameV.isString()) outOpts.entryName = ev::toUtf8(entryNameV);
         Value throwV = ev::getProperty(opts.get(), "throwOnError");
         if (ev::isBool(throwV)) outThrowOnError = ev::toBool(throwV);
     }

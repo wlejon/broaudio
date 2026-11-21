@@ -18,6 +18,10 @@ CustomDspKernel compileVerifiedDspKernel(
     std::string_view jsSourceOrExpr,
     const VerifiedDspCompileOptions& opts) {
 
+    if (opts.language == "brokernel" || opts.language == "bk") {
+        return compileVerifiedBrokernelDsp(jsSourceOrExpr, opts);
+    }
+
     CustomDspKernel result;
     result.maxAmp = (std::isfinite(opts.maxAmp) && opts.maxAmp > 0.0f) ? opts.maxAmp : 1.0f;
     result.kernelName = opts.name.empty() ? "js_dsp_kernel" : opts.name;
@@ -78,6 +82,19 @@ CustomDspKernel compileVerifiedDspKernel(
     result.verified = result.zeroAllocProven && result.nanSafeProven && result.mirEquivProven;
     return result;
 }
+
+#if !BROAUDIO_HAS_BROKERNEL
+CustomDspKernel compileVerifiedBrokernelDsp(
+    std::string_view bkSource,
+    const VerifiedDspCompileOptions& opts) {
+    CustomDspKernel result;
+    result.maxAmp = (std::isfinite(opts.maxAmp) && opts.maxAmp > 0.0f) ? opts.maxAmp : 1.0f;
+    result.kernelName = !opts.entryName.empty() ? opts.entryName : (opts.name.empty() ? "bk_dsp_kernel" : opts.name);
+    result.source = std::string(bkSource);
+    result.errorMessage = "broaudio was built without BROAUDIO_WITH_BROKERNEL";
+    return result;
+}
+#endif
 
 VerifiedDspProcessor::VerifiedDspProcessor() {
     for (size_t i = 0; i < MAX_PARAMS; ++i) {

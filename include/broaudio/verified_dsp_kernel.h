@@ -28,6 +28,8 @@ struct VerifiedDspCompileOptions {
     float maxAmp = 1.0f;            // Hardware speaker-protection clamp bound [-maxAmp, +maxAmp]
     bool enableSuperopt = true;     // Run Brass MIR + x64 LIR superoptimizers & SMT proof
     std::string name = "js_dsp_kernel";
+    std::string language = "js";    // "js" or "brokernel"
+    std::string entryName;          // Entry point name for multi-function brokernel modules
 };
 
 struct CustomDspKernel {
@@ -52,6 +54,13 @@ struct CustomDspKernel {
 // machine-code kernel with hardware speaker-protection epilogue.
 CustomDspKernel compileVerifiedDspKernel(
     std::string_view jsSourceOrExpr,
+    const VerifiedDspCompileOptions& opts = {});
+
+// Compile a brokernel (.bk) scalar point kernel (`std::dsp`) into a CustomDspKernel
+// with an SMT-verified NaN/Inf/amplitude hardware speaker-protection epilogue.
+// Returns an invalid kernel with diagnostics if BROAUDIO_HAS_BROKERNEL is disabled.
+CustomDspKernel compileVerifiedBrokernelDsp(
+    std::string_view bkSource,
     const VerifiedDspCompileOptions& opts = {});
 
 // Real-time lock-free audio processor executing a verified native DSP kernel.

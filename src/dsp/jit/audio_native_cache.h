@@ -5,7 +5,6 @@
 #include <brass/codegen/kernel_jit.hpp>
 #include <brass/mir/module.hpp>
 
-#include <cstdlib>
 #include <filesystem>
 #include <memory>
 #include <stdexcept>
@@ -16,30 +15,7 @@ namespace broaudio::detail {
 
 inline std::filesystem::path audio_cache_directory()
 {
-    if (const char* env_dir = std::getenv("BROAUDIO_CACHE_DIR"); env_dir && env_dir[0] != '\0') {
-        return std::filesystem::path(env_dir);
-    }
-#if defined(_WIN32)
-    if (const char* local_app = std::getenv("LOCALAPPDATA"); local_app && local_app[0] != '\0') {
-        return std::filesystem::path(local_app) / "broaudio" / "kernels";
-    }
-    if (const char* user_prof = std::getenv("USERPROFILE"); user_prof && user_prof[0] != '\0') {
-        return std::filesystem::path(user_prof) / ".cache" / "broaudio" / "kernels";
-    }
-#else
-    if (const char* xdg = std::getenv("XDG_CACHE_HOME"); xdg && xdg[0] != '\0') {
-        return std::filesystem::path(xdg) / "broaudio" / "kernels";
-    }
-    if (const char* home = std::getenv("HOME"); home && home[0] != '\0') {
-        return std::filesystem::path(home) / ".cache" / "broaudio" / "kernels";
-    }
-#endif
-    std::error_code ec;
-    auto tmp = std::filesystem::temp_directory_path(ec);
-    if (!ec && !tmp.empty()) {
-        return tmp / "broaudio" / "kernels";
-    }
-    return std::filesystem::path(".cache") / "broaudio" / "kernels";
+    return brass::cache::default_cache_dir("broaudio", "kernels", "BROAUDIO_CACHE_DIR");
 }
 
 inline brass::cache::NativeModuleCache& audio_native_module_cache()

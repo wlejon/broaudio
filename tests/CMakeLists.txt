@@ -90,6 +90,13 @@ if(BROAUDIO_HAS_JIT)
     add_test(NAME test_jit_pipeline COMMAND test_jit_pipeline)
 endif()
 
+if(BROAUDIO_HAS_BROKERNEL)
+    add_executable(test_kernel_dsp test_kernel_dsp.cpp)
+    target_link_libraries(test_kernel_dsp PRIVATE broaudio)
+    target_include_directories(test_kernel_dsp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME test_kernel_dsp COMMAND test_kernel_dsp)
+endif()
+
 # Bronze JavaScript binding (broaudio_api): Web Audio mount points, an
 # AudioContext node graph, createBus, TypeErrors on bad arguments. Never
 # resumes the context or starts playback.

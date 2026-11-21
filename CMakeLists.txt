@@ -313,6 +313,18 @@ else()
     message(STATUS "broaudio: Brass not found; JIT disabled")
 endif()
 
+option(BROAUDIO_WITH_BROKERNEL "Enable brokernel DSP kernel helper (std::dsp)" OFF)
+if(BROAUDIO_WITH_BROKERNEL)
+    bro_dependency(brokernel GITHUB wlejon/brokernel
+                   OPTIONS BROKERNEL_BUILD_TESTS=OFF BROKERNEL_BUILD_BENCH=OFF)
+    if(TARGET brokernel)
+        target_sources(broaudio PRIVATE src/kernel_dsp.cpp)
+        target_link_libraries(broaudio PRIVATE brokernel)
+        target_compile_definitions(broaudio PUBLIC BROAUDIO_HAS_BROKERNEL=1)
+        set(BROAUDIO_HAS_BROKERNEL 1)
+    endif()
+endif()
+
 # Vendored codec implementations (see broaudio_codecs above). PUBLIC so the
 # decoder symbols reach the final link line of every consumer of broaudio.
 target_link_libraries(broaudio PUBLIC broaudio_codecs)

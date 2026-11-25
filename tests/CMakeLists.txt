@@ -88,6 +88,11 @@ if(BROAUDIO_HAS_JIT)
     target_link_libraries(test_jit_pipeline PRIVATE broaudio)
     target_include_directories(test_jit_pipeline PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     add_test(NAME test_jit_pipeline COMMAND test_jit_pipeline)
+
+    add_executable(test_dsp_mir_gpu test_dsp_mir_gpu.cpp)
+    target_link_libraries(test_dsp_mir_gpu PRIVATE broaudio)
+    target_include_directories(test_dsp_mir_gpu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/src)
+    add_test(NAME test_dsp_mir_gpu COMMAND test_dsp_mir_gpu)
 endif()
 
 if(BROAUDIO_HAS_BROKERNEL)

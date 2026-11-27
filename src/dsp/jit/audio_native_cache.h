@@ -42,6 +42,10 @@ inline void hash_kernel_options(brass::cache::KeyBuilder& kb, const brass::codeg
     kb.add_bool("enable_slp", opts.enable_slp);
     kb.add_bool("enable_unroll", opts.enable_unroll);
     kb.add_u64("unroll_factor", static_cast<uint64_t>(opts.unroll_factor));
+    kb.add_bool("enable_trace_layout", opts.enable_trace_layout);
+    kb.add_bool("enable_pre_ra_schedule", opts.enable_pre_ra_schedule);
+    kb.add_bool("enable_post_ra_schedule", opts.enable_post_ra_schedule);
+    kb.add_bool("enable_software_pipelining", opts.enable_software_pipelining);
     kb.add_bool("enable_parallel", opts.enable_parallel);
     kb.add_u64("parallel_threshold", opts.parallel_threshold);
     kb.add_u64("parallel_workers", static_cast<uint64_t>(opts.parallel_workers));

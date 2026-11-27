@@ -395,7 +395,11 @@ KernelOptions makeCpuSimdKernelOptions()
 GpuTargetArtifacts compileGpuTargetsFromMir(Function* fn, Module& mod, uint32_t localSizeX)
 {
     GpuTargetArtifacts out;
-    brass::optimize_gpu_function(*fn, mod);
+    brass::GpuOptOptions gopt;
+    gopt.enable_gpu_superopt = true;
+    gopt.enable_small_loop_unroll = true;
+    gopt.enable_load_coalesce = true;
+    brass::optimize_gpu_function(*fn, mod, gopt);
     fn->rebuild_cfg_predecessors();
 
     brass::DiagnosticReporter diag;

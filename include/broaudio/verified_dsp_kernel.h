@@ -38,6 +38,7 @@ struct CustomDspKernel {
     bool zeroAllocProven = false;   // Proven free of GC, heap, closures, throws, unbounded loops
     bool nanSafeProven = false;     // SMT-proven finite output in [-maxAmp, +maxAmp] (no NaN/Inf)
     bool mirEquivProven = false;    // SMT-proven Unopt MIR == Superopt MIR equivalence
+    bool crossModuleFused = false;  // Direct cross-module MIR inlining succeeded (no indirect call)
     float maxAmp = 1.0f;
     std::string kernelName;
     std::string source;

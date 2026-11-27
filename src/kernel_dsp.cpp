@@ -4,6 +4,7 @@
 
 #include <brass/codegen/kernel_jit.hpp>
 #include <brass/mir/builder.hpp>
+#include <brass/mir/cross_module.hpp>
 #include <brass/mir/function.hpp>
 #include <brass/mir/module.hpp>
 #include <brass/verify/smt_equiv.hpp>
@@ -180,9 +181,8 @@ CustomDspKernel compileVerifiedBrokernelDsp(
         return result;
     }
 
-    const auto& ptFn = k->cpu_point_fn();
-    if (!ptFn.is_valid() || !ptFn.entry_point() || !k->cpu_error().empty()) {
-        result.errorMessage = "compileVerifiedBrokernelDsp: CPU JIT failed: " + k->cpu_error();
+    if (!k->has_cpu_build()) {
+        result.errorMessage = "compileVerifiedBrokernelDsp: kernel '" + k->name + "' has no CPU build";
         return result;
     }
     result.kernelName = k->name;
@@ -217,56 +217,111 @@ CustomDspKernel compileVerifiedBrokernelDsp(
     }
 
     // Build real-time audio ABI wrapper `(sample, time, p0, p1) -> clamped_f32`.
+    // Prefer direct cross-module MIR fusion into the wrapper so KernelJit SROA
+    // eliminates argsPack/coordsCtx/outRet allocas and indirect call overhead.
     const std::string wrapName = "bk_audio_wrap_" + k->name;
+    auto buildWrapper = [&](bool directCall, brass::Module& outMod, brass::Function*& outFn, brass::Instruction*& outCallInst) {
+        outFn = outMod.create_function(
+            wrapName, brass::Type::f32(),
+            {brass::Type::f32(), brass::Type::f32(), brass::Type::f32(), brass::Type::f32()});
+        brass::Builder wb(outMod);
+        wb.set_function(outFn);
+        brass::BasicBlock* entryBlk = wb.append_block("entry");
+        brass::Value* vSample = wb.add_block_param(entryBlk, brass::Type::f32());
+        brass::Value* vTime = wb.add_block_param(entryBlk, brass::Type::f32());
+        brass::Value* vP0 = wb.add_block_param(entryBlk, brass::Type::f32());
+        brass::Value* vP1 = wb.add_block_param(entryBlk, brass::Type::f32());
+        wb.position_at_end(entryBlk);
+
+        brass::Value* argsPack = wb.build_alloca(32, 8);
+        brass::Value* coordsCtx = wb.build_alloca(104, 8);
+        brass::Value* outRet = wb.build_alloca(8, 8);
+        brass::Value* zero64 = wb.build_iconst_i64(0);
+        for (int32_t off = 0; off < 32; off += 8) {
+            wb.build_store(brass::Type::i64(), argsPack, off, zero64);
+        }
+        for (int32_t off = 0; off < 104; off += 8) {
+            wb.build_store(brass::Type::i64(), coordsCtx, off, zero64);
+        }
+        wb.build_store(brass::Type::i64(), outRet, 0, zero64);
+
+        wb.build_store(brass::Type::f32(), argsPack, 0, vSample);
+        wb.build_store(brass::Type::f32(), argsPack, 8, vTime);
+        wb.build_store(brass::Type::f32(), argsPack, 16, vP0);
+        wb.build_store(brass::Type::f32(), argsPack, 24, vP1);
+
+        outCallInst = nullptr;
+        if (directCall && k->cpu_ && k->cpu_->point) {
+            wb.build_call(k->cpu_->point->name(), brass::Type::void_type(), {argsPack, coordsCtx, outRet});
+            for (brass::Instruction* inst : *entryBlk) {
+                if (inst && inst->opcode() == brass::Opcode::call) outCallInst = inst;
+            }
+        } else {
+            const auto& ptFn = k->cpu_point_fn();
+            if (!ptFn.is_valid() || !ptFn.entry_point() || !k->cpu_error().empty()) {
+                return;
+            }
+            const auto ptAddr = static_cast<int64_t>(reinterpret_cast<uintptr_t>(ptFn.entry_point()));
+            brass::Value* fnSlot = wb.build_alloca(8, 8);
+            wb.build_store(brass::Type::i64(), fnSlot, 0, wb.build_iconst_i64(ptAddr));
+            brass::Value* calleePtr = wb.build_load(brass::Type::ptr(), fnSlot, 0);
+            wb.build_call_indirect(calleePtr, brass::Type::void_type(), {argsPack, coordsCtx, outRet});
+        }
+
+        brass::Value* rawY = wb.build_load(brass::Type::f32(), outRet, 0);
+        wb.build_ret(emitSpeakerClampEpilogue(wb, rawY, result.maxAmp));
+        outFn->rebuild_cfg_predecessors();
+    };
+
     brass::Module wrapMod("bk_dsp_wrapper");
-    brass::Function* wfn = wrapMod.create_function(
-        wrapName, brass::Type::f32(),
-        {brass::Type::f32(), brass::Type::f32(), brass::Type::f32(), brass::Type::f32()});
-    brass::Builder wb(wrapMod);
-    wb.set_function(wfn);
-    brass::BasicBlock* entryBlk = wb.append_block("entry");
-    brass::Value* vSample = wb.add_block_param(entryBlk, brass::Type::f32());
-    brass::Value* vTime = wb.add_block_param(entryBlk, brass::Type::f32());
-    brass::Value* vP0 = wb.add_block_param(entryBlk, brass::Type::f32());
-    brass::Value* vP1 = wb.add_block_param(entryBlk, brass::Type::f32());
-    wb.position_at_end(entryBlk);
-
-    brass::Value* argsPack = wb.build_alloca(32, 8);
-    brass::Value* coordsCtx = wb.build_alloca(104, 8);
-    brass::Value* outRet = wb.build_alloca(8, 8);
-    brass::Value* zero64 = wb.build_iconst_i64(0);
-    for (int32_t off = 0; off < 32; off += 8) {
-        wb.build_store(brass::Type::i64(), argsPack, off, zero64);
+    brass::Function* wfn = nullptr;
+    brass::Instruction* directCallInst = nullptr;
+    const bool canFuse = (k->cpu_ && k->cpu_->module && k->cpu_->point);
+    if (canFuse) {
+        buildWrapper(true, wrapMod, wfn, directCallInst);
+        if (wfn && directCallInst) {
+            brass::CrossDomainFusionOptions fopts;
+            fopts.allow_nanbox_unboxing = false;
+            fopts.max_inlined_insts = 1024;
+            fopts.audit_opts.require_no_gc = true;
+            fopts.audit_opts.require_no_pinned_tls = true;
+            fopts.audit_opts.require_no_alloc = true;
+            fopts.audit_opts.require_no_deopt = true;
+            fopts.audit_opts.require_no_eh = true;
+            const brass::CrossDomainFusionResult fres = brass::fuse_cross_module_call(
+                *wfn, directCallInst, wrapMod, *k->cpu_->module, k->cpu_->point->name(), fopts);
+            if (fres.fused) {
+                result.crossModuleFused = true;
+                result.zeroAllocProven = fres.audit.ok;
+            }
+        }
     }
-    for (int32_t off = 0; off < 104; off += 8) {
-        wb.build_store(brass::Type::i64(), coordsCtx, off, zero64);
+
+    brass::Module fallbackMod("bk_dsp_wrapper_fallback");
+    brass::Module* compileMod = &wrapMod;
+    if (!result.crossModuleFused) {
+        const auto& ptFn = k->cpu_point_fn();
+        if (!ptFn.is_valid() || !ptFn.entry_point() || !k->cpu_error().empty()) {
+            result.errorMessage = "compileVerifiedBrokernelDsp: CPU JIT failed: " + k->cpu_error();
+            return result;
+        }
+        brass::Function* fbFn = nullptr;
+        brass::Instruction* unused = nullptr;
+        buildWrapper(false, fallbackMod, fbFn, unused);
+        compileMod = &fallbackMod;
     }
-    wb.build_store(brass::Type::i64(), outRet, 0, zero64);
-
-    wb.build_store(brass::Type::f32(), argsPack, 0, vSample);
-    wb.build_store(brass::Type::f32(), argsPack, 8, vTime);
-    wb.build_store(brass::Type::f32(), argsPack, 16, vP0);
-    wb.build_store(brass::Type::f32(), argsPack, 24, vP1);
-
-    const auto ptAddr = static_cast<int64_t>(reinterpret_cast<uintptr_t>(ptFn.entry_point()));
-    brass::Value* fnSlot = wb.build_alloca(8, 8);
-    wb.build_store(brass::Type::i64(), fnSlot, 0, wb.build_iconst_i64(ptAddr));
-    brass::Value* calleePtr = wb.build_load(brass::Type::ptr(), fnSlot, 0);
-    wb.build_call_indirect(calleePtr, brass::Type::void_type(), {argsPack, coordsCtx, outRet});
-
-    brass::Value* rawY = wb.build_load(brass::Type::f32(), outRet, 0);
-    wb.build_ret(emitSpeakerClampEpilogue(wb, rawY, result.maxAmp));
 
     auto kopts = brass::codegen::KernelOptions::audio_realtime();
     kopts.enable_optimizations = true;
-    kopts.opt_level = 1;
+    kopts.opt_level = result.crossModuleFused ? 2 : 1;
+    kopts.enable_sroa = true;
     kopts.enable_smt_guard_elim = false;
     kopts.enable_superopt = false;
     kopts.enable_fma = false;
     kopts.enable_fp_reassociation = false;
 
     brass::codegen::KernelJit jit(kopts);
-    brass::codegen::KernelFunction jfn = jit.compile(wrapMod, wrapName);
+    brass::codegen::KernelFunction jfn = jit.compile(*compileMod, wrapName);
     if (!jfn.is_valid() || !jfn.entry_point()) {
         result.errorMessage = "compileVerifiedBrokernelDsp: KernelJit failed for wrapper";
         return result;

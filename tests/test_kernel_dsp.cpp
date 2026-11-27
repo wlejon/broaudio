@@ -71,6 +71,7 @@ pub fn bk_clip(sample: f32, time: f32, drive: f32, gain: f32) -> f32 {
     CHECK(vk.zeroAllocProven);
     CHECK(vk.nanSafeProven);
     CHECK(vk.mirEquivProven);
+    CHECK(vk.crossModuleFused);
 
     const float yNormal = vk.eval(0.25f, 0.0f, 1.0f, 1.0f);
     CHECK(std::fabs(yNormal - (0.5f / 1.25f)) < 1e-4f);
